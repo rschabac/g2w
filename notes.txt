@@ -1,0 +1,15 @@
+small example of rewriting: replace 'auto' type with actual type, if actual type is succinct
+AST-based macros: #expand tells the compiler to change the source file
+	maybe also add #expand_recursively to expand all nested macros
+	will need to keep all info about source file through lexing and parsing
+polymorphism can be done with type erasure OR separately optimized
+	template expansion (separately optimized) generates additional file with instantiations
+	type erasure will need to prevent doing type-specific things with values
+		can only be used like a void*
+	hybrid mode: type-erased for pointer types, specialized for non-pointer types
+
+maybe:
+	Sum types
+	unity builds are default, whole directory compilation
+
+write interpreter first to test
