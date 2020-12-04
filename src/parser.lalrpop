@@ -1,0 +1,29 @@
+//use std::str::FromStr;
+use super::ast;
+
+grammar;
+
+pub Type: ast::Ty = {
+	"bool" => ast::Ty::Bool,
+
+	"u8" => ast::Ty::Int{signed: false, size: ast::IntSize::Size8},
+	"u16" => ast::Ty::Int{signed: false, size: ast::IntSize::Size16},
+	"u32" => ast::Ty::Int{signed: false, size: ast::IntSize::Size32},
+	"u64" => ast::Ty::Int{signed: false, size: ast::IntSize::Size64},
+
+	"i8" => ast::Ty::Int{signed: true, size: ast::IntSize::Size8},
+	"i16" => ast::Ty::Int{signed: true, size: ast::IntSize::Size16},
+	"i32" => ast::Ty::Int{signed: true, size: ast::IntSize::Size32},
+	"i64" => ast::Ty::Int{signed: true, size: ast::IntSize::Size64},
+
+	"f32" => ast::Ty::Float(ast::FloatSize::FSize32),
+	"f64" => ast::Ty::Float(ast::FloatSize::FSize64),
+
+	<t:Type> "*" => ast::Ty::Ptr(Box::new(Some(t))),
+	"void" "*" => ast::Ty::Ptr(Box::new(None)),
+
+	"struct" <name:r"[a-zA-Z_][a-zA-Z_0-9]*"> => ast::Ty::Struct(name.to_string()),
+
+	"'" <name:r"[a-zA-Z_][a-zA-Z_0-9]*"> => ast::Ty::TypeVar(name.to_string())
+
+}

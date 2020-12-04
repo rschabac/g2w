@@ -1,0 +1,21 @@
+TODO: make some examples of generics to test out syntaxes
+/*
+to make things simpler, generics can only take one argument
+must have either separated or erased keyword before 'identifier
+*/
+struct Vector<separated 'a>{
+	'a* data;
+	u32 size;
+	u32 capacity;
+}
+
+/*
+this example is invalid because it refers to a separated type that depends on an erased type var
+Vector is marked as a separated generic
+inside vectorPush, 'a is marked as erased
+an erased type var cannot be passed to a separated generic
+*/
+void vectorPush<erased 'a>(Vector<'a> *vec, 'a elem){
+	vec.data[vec.size+1] = elem;
+	vec.size = vec.size + 1;
+}

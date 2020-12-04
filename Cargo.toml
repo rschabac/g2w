@@ -4,6 +4,20 @@ version = "0.1.0"
 authors = ["Robert Schabacker <rschabac@stevens.edu>"]
 edition = "2018"
 
+#needed for LALRPOP preprocessing
+build = "build.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# The generated code depends on lalrpop-util.
+#
+# The generated tokenizer depends on the regex crate.
+#
+lalrpop-util = "0.19.1"
+regex = "1"
+
+# Add a build-time dependency on the lalrpop library:
+[build-dependencies]
+# If you do not supply your own, external lexer you also need the `lexer` feature
+lalrpop = { version = "0.19.1", features = ["lexer"] }

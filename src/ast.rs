@@ -1,23 +1,34 @@
-enum IntSize{
+#[derive(Debug, PartialEq)]
+pub enum IntSize{
 	Size8,
 	Size16,
 	Size32,
 	Size64
 }
-enum Ty{
+#[derive(Debug, PartialEq)]
+pub enum FloatSize{
+	FSize32,
+	FSize64
+}
+#[derive(Debug, PartialEq)]
+pub enum Ty{
 	Bool,
 	Int{signed: bool, size: IntSize},
-	Ptr(Box<Ty>),
-	Struct(String)
+	Float(FloatSize),
+	Ptr(Box<Option<Ty>>),	//void pointers are represented as Ptr(None)
+	Struct(String),
+	TypeVar(String)
 }
 
-enum UnaryOp{
+#[derive(Debug)]
+pub enum UnaryOp{
 	Neg,
 	Lognot,
 	Bitnot
 }
 
-enum BinaryOp{
+#[derive(Debug)]
+pub enum BinaryOp{
 	Add,
 	Sub,
 	Mul,
@@ -38,7 +49,8 @@ enum BinaryOp{
 	Sar
 }
 
-enum Expr{
+#[derive(Debug)]
+pub enum Expr{
 	LitNull,
 	LitBool(bool),
 	LitInt{signed: bool, size: IntSize},
@@ -51,10 +63,13 @@ enum Expr{
 	Call(Box<Expr>, Vec<Expr>),
 	Cast(Ty, Box<Expr>),
 	Binop(Box<Expr>, BinaryOp, Box<Expr>),
-	Unop(UnaryOp, Box<Expr>)
+	Unop(UnaryOp, Box<Expr>),
+	GetRef(Box<Expr>),
+	Deref(Box<Expr>)
 }
 
-enum Stmt{
+#[derive(Debug)]
+pub enum Stmt{
 	Assign(Expr, Expr),
 	Decl(Ty, String),
 	Return(Option<Expr>),
@@ -65,8 +80,17 @@ enum Stmt{
 
 type Block = Vec<Stmt>;
 
-enum Gdecl{
+#[derive(Debug)]
+pub enum PolymorphMode{
+	Separated,
+	Erased
+}
+
+#[derive(Debug)]
+pub enum Gdecl{
 	GVarDecl(Ty, String),
 	GFuncDecl{ret_type: Option<Ty>, name: String, args: Vec<(Ty, String)>, body: Block},
-	GStructDecl(String, Vec<(Ty, String)>)
+	GStructDecl{name: String, fields: Vec<(Ty, String)>},
+	GGenericStructDecl{name: String, param: String, mode: PolymorphMode, fields: Vec<(Ty, String)>},
+	GGenericFuncDecl{name: String, ret_type: Option<Ty>, args: Vec<(Ty, String)>, body: Block, param: String, mode: PolymorphMode}
 }

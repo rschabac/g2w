@@ -9,7 +9,10 @@ polymorphism can be done with type erasure OR separately optimized
 	hybrid mode: type-erased for pointer types, specialized for non-pointer types
 
 maybe:
+	sizeof operator
 	Sum types
 	unity builds are default, whole directory compilation
 
 write interpreter first to test
+
+lexing comments: http://lalrpop.github.io/lalrpop/lexer_tutorial/001_lexer_gen.html
