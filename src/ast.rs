@@ -75,7 +75,7 @@ pub enum Expr{
 	Sizeof(Ty)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Stmt{
 	Assign(Expr, Expr),
 	Decl(Ty, String),
@@ -85,15 +85,15 @@ pub enum Stmt{
 	While(Expr, Block)
 }
 
-type Block = Vec<Stmt>;
+pub type Block = Vec<Stmt>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PolymorphMode{
 	Separated,
 	Erased
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Gdecl{
 	GVarDecl(Ty, String),
 	GFuncDecl{ret_type: Option<Ty>, name: String, args: Vec<(Ty, String)>, body: Block},

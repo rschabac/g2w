@@ -16,7 +16,7 @@ Comma<T>: Vec<T> = {
 
 //identifiers (variables, struct names, and type vars) cannot start with an underscore
 Identifier: String = {
-	r#"[a-zA-Z][a-zA-Z_]*"# => <>.to_string()
+	r#"[a-zA-Z][a-zA-Z_]*"# => <>.to_owned()
 }
 
 
@@ -150,74 +150,88 @@ PrimaryExpr: ast::Expr = {
 	"(" <e:Expr> ")" => e
 }
 
+Block: Vec<ast::Stmt> = {
+	"{" <s:(<Stmt>)*> "}" => s
+}
+
+pub Stmt: ast::Stmt = {
+	<lhs: Expr> "=" <rhs: Expr> ";" => ast::Stmt::Assign(lhs, rhs),
+
+	<t: Type> <i:Identifier> ";" => ast::Stmt::Decl(t, i),
+
+	"return" <e: Expr?> ";" => ast::Stmt::Return(e),
+
+	<e: Expr> ";" => ast::Stmt::BareExpr(e),
+
+	"while" <cond: Expr> <body:Block> => ast::Stmt::While(cond, body),
+
+	<i:IfStmt> => i
+}
+
+IfStmt: ast::Stmt = {
+	"if" <cond: Expr> <b1: Block> <b2: ElseStmt> => ast::Stmt::If(cond, b1, b2)
+}
+
+ElseStmt: Vec<ast::Stmt> = {
+	=> vec![],
+	"else" <b: Block> => b,
+	"else" <s: IfStmt> => vec![s]
+}
+
+PolyMode: ast::PolymorphMode = {
+	"separated" => ast::PolymorphMode::Separated,
+	"erased" => ast::PolymorphMode::Erased
+}
+
+FuncParam: Vec<(ast::Ty, String)> = {
+	<x:Comma<(Type Identifier)>> => x
+}
+
+pub GDecl: ast::Gdecl = {
+	<t: Type> <name: Identifier> ";" => ast::Gdecl::GVarDecl(t, name),
+
+	<ret: Type> <fname: Identifier> "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GFuncDecl{
+		ret_type: Some(ret),
+		name: fname,
+		args: fargs,
+		body: b
+	},
+	"void" <fname: Identifier> "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GFuncDecl{
+		ret_type: None,
+		name: fname,
+		args: fargs,
+		body: b
+	},
+
+	<ret: Type> <fname: Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+		ret_type: Some(ret),
+		name: fname,
+		args: fargs,
+		body: b,
+		param: param_name,
+		mode: mode
+	},
+	"void" <fname: Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+		ret_type: None,
+		name: fname,
+		args: fargs,
+		body: b,
+		param: param_name,
+		mode: mode
+	},
+
+	"struct" <n:Identifier> "{" <field_list: (<Type> <Identifier> ";")*> "}" => ast::Gdecl::GStructDecl{
+		name: n,
+		fields: field_list
+	},
+
+	"struct" <n:Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">"
+		"{" <field_list: (<Type> <Identifier> ";")*> "}" => ast::Gdecl::GGenericStructDecl{
+		name: n,
+		param: param_name,
+		mode: mode,
+		fields: field_list
+	}
+}
 
 
-// Not using this anymore because of precedence issues
-//Binop: ast::BinaryOp = {
-//	"+" => ast::BinaryOp::Add,
-//	"-" => ast::BinaryOp::Sub,
-//	"*" => ast::BinaryOp::Mul,
-//	"/" => ast::BinaryOp::Div,
-//	"%" => ast::BinaryOp::Mod,
-//	"==" => ast::BinaryOp::Equ,
-//	"!=" => ast::BinaryOp::Neq,
-//	"<" => ast::BinaryOp::Lt,
-//	"<=" => ast::BinaryOp::Lte,
-//	">" => ast::BinaryOp::Gt,
-//	">=" => ast::BinaryOp::Gte,
-//	"&&" => ast::BinaryOp::And,
-//	"||" => ast::BinaryOp::Or,
-//	"&" => ast::BinaryOp::Bitand,
-//	"|" => ast::BinaryOp::Bitor,
-//	"^" => ast::BinaryOp::Bitxor,
-//	"<<" => ast::BinaryOp::Shl,
-//	">>" => ast::BinaryOp::Shr,
-//	">>>" => ast::BinaryOp::Sar
-//}
-//
-//Unop: ast::UnaryOp = {
-//	"-" => ast::UnaryOp::Neg,
-//	"!" => ast::UnaryOp::Lognot,
-//	"~" => ast::UnaryOp::Bitnot
-//}
-//pub Expr: ast::Expr = {
-//	"null" => ast::Expr::LitNull,
-//
-//	"true" => ast::Expr::LitBool(true),
-//	"false"=> ast::Expr::LitBool(false),
-//
-//	//signed ints look like '123' or '0x123'
-//	<s:r"[0-9]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[1..], 10).unwrap()),
-//	<s:r"0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[1..], 16).unwrap()),
-//
-//	//unsigned ints look like 'u123' or 'u0x123'
-//	<s:r"u[0-9]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(s, 10).unwrap()),
-//	<s:r"u0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(s, 16).unwrap()),
-//
-//	//TODO: string escape sequences
-//	<s:r#"".*""#> => ast::Expr::LitString(String::from(s)),
-//
-//	<id:Identifier> => ast::Expr::Id(id),
-//
-//	"{" <exprs:Comma<Expr>> "}" => ast::Expr::LitArr(exprs),
-//
-//	<base:Expr> "[" <index:Expr> "]" => ast::Expr::Index(Box::new(base), Box::new(index)),
-//
-//	<base:Expr> "." <field:Identifier> => ast::Expr::Proj(Box::new(base), field),
-//
-//	<func:Expr> "(" <args:Comma<Expr>> ")" => ast::Expr::Call(Box::new(func), args),
-//
-//	"cast" "(" <t:Type> "," <e:Expr> ")" => ast::Expr::Cast(t, Box::new(e)),
-//
-//	<e1:Expr> <b:Binop> <e2:Expr> => ast::Expr::Binop(Box::new(e1), b, Box::new(e2)),
-//
-//	<u:Unop> <e:Expr> => ast::Expr::Unop(u, Box::new(e)),
-//
-//	"&" <e:Expr> => ast::Expr::GetRef(Box::new(e)),
-//
-//	"*" <e:Expr> => ast::Expr::Deref(Box::new(e)),
-//
-//	"sizeof" <t:Type> => ast::Expr::Sizeof(t),
-//
-//	"(" <e:Expr> ")" => e,
-//}

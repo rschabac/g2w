@@ -3,7 +3,7 @@ TODO: make some examples of generics to test out syntaxes
 to make things simpler, generics can only take one argument
 must have either separated or erased keyword before 'identifier
 */
-newstruct Vector<separated 'a>{
+struct Vector<separated 'a>{
 	'a* data;
 	u32 size;
 	u32 capacity;

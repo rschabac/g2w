@@ -13,7 +13,7 @@ maybe:
 	Sum types
 	unity builds are default, whole directory compilation
 
-write interpreter first to test
+interpreter may be helpful in testing, to compare compiler against
 
 lexing comments: http://lalrpop.github.io/lalrpop/lexer_tutorial/001_lexer_gen.html
 How to handle errno?

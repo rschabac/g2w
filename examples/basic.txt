@@ -1,5 +1,5 @@
 
-newstruct person{
+struct person{
 	u8 age;
 	u8* firstName;
 	u8* middleName;
