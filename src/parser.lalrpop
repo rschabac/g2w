@@ -3,6 +3,23 @@ use super::ast;
 
 grammar;
 
+Comma<T>: Vec<T> = {
+	<v:(<T> ",")*> <e:T?> => match e {
+		None => v,
+		Some(e) => {
+			let mut v = v;
+			v.push(e);
+			v
+		}
+	}
+}
+
+//identifiers (variables, struct names, and type vars) cannot start with an underscore
+Identifier: String = {
+	r#"[a-zA-Z][a-zA-Z_]*"# => <>.to_string()
+}
+
+
 pub Type: ast::Ty = {
 	"bool" => ast::Ty::Bool,
 
@@ -19,11 +36,188 @@ pub Type: ast::Ty = {
 	"f32" => ast::Ty::Float(ast::FloatSize::FSize32),
 	"f64" => ast::Ty::Float(ast::FloatSize::FSize64),
 
-	<t:Type> "*" => ast::Ty::Ptr(Box::new(Some(t))),
-	"void" "*" => ast::Ty::Ptr(Box::new(None)),
+	<t:Type> "*" => ast::Ty::Ptr(Some(Box::new(t))),
+	"void" "*" => ast::Ty::Ptr(None),
 
-	"struct" <name:r"[a-zA-Z_][a-zA-Z_0-9]*"> => ast::Ty::Struct(name.to_string()),
+	<t:Type> "[" <num:r"[0-9]+"> "]" => ast::Ty::Array{length: u32::from_str_radix(num, 10).unwrap(), typ: Box::new(t)},
 
-	"'" <name:r"[a-zA-Z_][a-zA-Z_0-9]*"> => ast::Ty::TypeVar(name.to_string())
+	"struct" <id:Identifier> => ast::Ty::Struct(id),
+
+	"'" <id:Identifier> => ast::Ty::TypeVar(id)
 
 }
+
+//https://cs.wmich.edu/~gupta/teaching/cs4850/sumII06/The%20syntax%20of%20C%20in%20Backus-Naur%20form.htm
+
+pub Expr: ast::Expr = {
+	<e1: Expr> "||" <e2: LogAndExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Or, Box::new(e2)),
+	<e2: LogAndExpr> => e2
+}
+
+LogAndExpr: ast::Expr = {
+	<e1: LogAndExpr> "&&" <e2: BitOrExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::And, Box::new(e2)),
+	<e: BitOrExpr> => e
+}
+
+BitOrExpr: ast::Expr = {
+	<e1: BitOrExpr> "|" <e2: BitXorExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Bitor, Box::new(e2)),
+	<e: BitXorExpr> => e
+}
+
+BitXorExpr: ast::Expr = {
+	<e1: BitXorExpr> "^" <e2: BitAndExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Bitxor, Box::new(e2)),
+	<e: BitAndExpr> => e
+}
+
+BitAndExpr: ast::Expr = {
+	<e1: BitAndExpr> "&" <e2: EqualityExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Bitand, Box::new(e2)),
+	<e: EqualityExpr> => e
+}
+
+EqualityExpr: ast::Expr = {
+	<e1: EqualityExpr> "==" <e2: RelationalExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Equ, Box::new(e2)),
+	<e1: EqualityExpr> "!=" <e2: RelationalExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Neq, Box::new(e2)),
+	<e: RelationalExpr> => e
+}
+
+RelationalExpr: ast::Expr = {
+	<e1: RelationalExpr> "<" <e2: ShiftExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Lt, Box::new(e2)),
+	<e1: RelationalExpr> "<=" <e2: ShiftExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Lte, Box::new(e2)),
+	<e1: RelationalExpr> ">" <e2: ShiftExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Gt, Box::new(e2)),
+	<e1: RelationalExpr> ">=" <e2: ShiftExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Gte, Box::new(e2)),
+	<e: ShiftExpr> => e
+}
+
+ShiftExpr: ast::Expr = {
+	<e1: ShiftExpr> "<<" <e2: AddExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Shl, Box::new(e2)),
+	<e1: ShiftExpr> ">>" <e2: AddExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Shr, Box::new(e2)),
+	<e1: ShiftExpr> ">>>" <e2: AddExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Sar, Box::new(e2)),
+	<e: AddExpr> => e
+}
+
+AddExpr: ast::Expr = {
+	<e1: AddExpr> "+" <e2: MulExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Add, Box::new(e2)),
+	<e1: AddExpr> "-" <e2: MulExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Sub, Box::new(e2)),
+	<e: MulExpr> => e
+}
+
+MulExpr: ast::Expr = {
+	<e1: MulExpr> "*" <e2: UnaryExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Mul, Box::new(e2)),
+	<e1: MulExpr> "/" <e2: UnaryExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Div, Box::new(e2)),
+	<e1: MulExpr> "%" <e2: UnaryExpr> => ast::Expr::Binop(Box::new(e1), ast::BinaryOp::Mod, Box::new(e2)),
+	<e: UnaryExpr> => e
+}
+
+UnaryExpr: ast::Expr = {
+	"&" <e: UnaryExpr> => ast::Expr::GetRef(Box::new(e)),
+	"*" <e: UnaryExpr> => ast::Expr::Deref(Box::new(e)),
+	"~" <e: UnaryExpr> => ast::Expr::Unop(ast::UnaryOp::Bitnot, Box::new(e)),
+	"!" <e: UnaryExpr> => ast::Expr::Unop(ast::UnaryOp::Lognot, Box::new(e)),
+	"-" <e: UnaryExpr> => ast::Expr::Unop(ast::UnaryOp::Neg, Box::new(e)),
+	<e: PostfixExpr> => e
+}
+
+PostfixExpr: ast::Expr = {
+	<e1: PostfixExpr> "[" <e2: Expr> "]" => ast::Expr::Index(Box::new(e1), Box::new(e2)),
+	"sizeof" "(" <t:Type> ")" => ast::Expr::Sizeof(t),
+	"cast" "(" <t:Type> "," <e: Expr> ")" => ast::Expr::Cast(t, Box::new(e)),
+	<e1: PostfixExpr> "(" <args: Comma<Expr>> ")"  => ast::Expr::Call(Box::new(e1), args),
+	<e1: PostfixExpr> "." <id:Identifier> => ast::Expr::Proj(Box::new(e1), id),
+	<e: PrimaryExpr> => e
+}
+
+PrimaryExpr: ast::Expr = {
+	"null" => ast::Expr::LitNull,
+
+	"true" => ast::Expr::LitBool(true),
+	"false"=> ast::Expr::LitBool(false),
+
+	//signed ints look like '123' or '0x123'
+	<s:r"[0-9]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(s, 10).unwrap()),
+	<s:r"0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[2..], 16).unwrap()),
+
+	//unsigned ints look like 'u123' or 'u0x123'
+	<s:r"u[0-9]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[1..], 10).unwrap()),
+	<s:r"u0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[3..], 16).unwrap()),
+
+	//TODO: string escape sequences
+	<s:r#"".*""#> => ast::Expr::LitString(String::from(&s[1..s.len()-1])),
+
+	<id:Identifier> => ast::Expr::Id(id),
+
+	"{" <exprs:Comma<Expr>> "}" => ast::Expr::LitArr(exprs),
+
+	"(" <e:Expr> ")" => e
+}
+
+
+
+// Not using this anymore because of precedence issues
+//Binop: ast::BinaryOp = {
+//	"+" => ast::BinaryOp::Add,
+//	"-" => ast::BinaryOp::Sub,
+//	"*" => ast::BinaryOp::Mul,
+//	"/" => ast::BinaryOp::Div,
+//	"%" => ast::BinaryOp::Mod,
+//	"==" => ast::BinaryOp::Equ,
+//	"!=" => ast::BinaryOp::Neq,
+//	"<" => ast::BinaryOp::Lt,
+//	"<=" => ast::BinaryOp::Lte,
+//	">" => ast::BinaryOp::Gt,
+//	">=" => ast::BinaryOp::Gte,
+//	"&&" => ast::BinaryOp::And,
+//	"||" => ast::BinaryOp::Or,
+//	"&" => ast::BinaryOp::Bitand,
+//	"|" => ast::BinaryOp::Bitor,
+//	"^" => ast::BinaryOp::Bitxor,
+//	"<<" => ast::BinaryOp::Shl,
+//	">>" => ast::BinaryOp::Shr,
+//	">>>" => ast::BinaryOp::Sar
+//}
+//
+//Unop: ast::UnaryOp = {
+//	"-" => ast::UnaryOp::Neg,
+//	"!" => ast::UnaryOp::Lognot,
+//	"~" => ast::UnaryOp::Bitnot
+//}
+//pub Expr: ast::Expr = {
+//	"null" => ast::Expr::LitNull,
+//
+//	"true" => ast::Expr::LitBool(true),
+//	"false"=> ast::Expr::LitBool(false),
+//
+//	//signed ints look like '123' or '0x123'
+//	<s:r"[0-9]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[1..], 10).unwrap()),
+//	<s:r"0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[1..], 16).unwrap()),
+//
+//	//unsigned ints look like 'u123' or 'u0x123'
+//	<s:r"u[0-9]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(s, 10).unwrap()),
+//	<s:r"u0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(s, 16).unwrap()),
+//
+//	//TODO: string escape sequences
+//	<s:r#"".*""#> => ast::Expr::LitString(String::from(s)),
+//
+//	<id:Identifier> => ast::Expr::Id(id),
+//
+//	"{" <exprs:Comma<Expr>> "}" => ast::Expr::LitArr(exprs),
+//
+//	<base:Expr> "[" <index:Expr> "]" => ast::Expr::Index(Box::new(base), Box::new(index)),
+//
+//	<base:Expr> "." <field:Identifier> => ast::Expr::Proj(Box::new(base), field),
+//
+//	<func:Expr> "(" <args:Comma<Expr>> ")" => ast::Expr::Call(Box::new(func), args),
+//
+//	"cast" "(" <t:Type> "," <e:Expr> ")" => ast::Expr::Cast(t, Box::new(e)),
+//
+//	<e1:Expr> <b:Binop> <e2:Expr> => ast::Expr::Binop(Box::new(e1), b, Box::new(e2)),
+//
+//	<u:Unop> <e:Expr> => ast::Expr::Unop(u, Box::new(e)),
+//
+//	"&" <e:Expr> => ast::Expr::GetRef(Box::new(e)),
+//
+//	"*" <e:Expr> => ast::Expr::Deref(Box::new(e)),
+//
+//	"sizeof" <t:Type> => ast::Expr::Sizeof(t),
+//
+//	"(" <e:Expr> ")" => e,
+//}

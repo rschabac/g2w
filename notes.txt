@@ -16,3 +16,4 @@ maybe:
 write interpreter first to test
 
 lexing comments: http://lalrpop.github.io/lalrpop/lexer_tutorial/001_lexer_gen.html
+How to handle errno?

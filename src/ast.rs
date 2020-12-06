@@ -15,24 +15,26 @@ pub enum Ty{
 	Bool,
 	Int{signed: bool, size: IntSize},
 	Float(FloatSize),
-	Ptr(Box<Option<Ty>>),	//void pointers are represented as Ptr(None)
+	Ptr(Option<Box<Ty>>),	//void pointers are represented as Ptr(None)
+	Array{length: u32, typ: Box<Ty>},
 	Struct(String),
-	TypeVar(String)
+	TypeVar(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum UnaryOp{
 	Neg,
 	Lognot,
 	Bitnot
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum BinaryOp{
 	Add,
 	Sub,
 	Mul,
 	Div,
+	Mod,
 	Equ,
 	Neq,
 	Lt,
@@ -44,28 +46,33 @@ pub enum BinaryOp{
 	Bitand,
 	Bitor,
 	Bitxor,
-	Shl,
-	Shr,
-	Sar
+	Shl,	//<<
+	Shr,	//>>
+	Sar		//>>>
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Expr{
 	LitNull,
 	LitBool(bool),
-	LitInt{signed: bool, size: IntSize},
+	//For the time being, all integer literals will be 64 bits
+	LitSignedInt(i64),
+	LitUnsignedInt(u64),
 	LitString(String),
 	Id(String),
-	LitArr{typ: Ty, values: Vec<Expr>},
+	//Type of an array literal will be inferred based on the first element
+	LitArr(Vec<Expr>),
 	Index(Box<Expr>, Box<Expr>),
-	LitStruct{struct_name: String, values: Vec<(String, Expr)>},
+	//maybe add this back in later
+	//LitStruct{struct_name: String, values: Vec<(String, Expr)>},
 	Proj(Box<Expr>, String),
 	Call(Box<Expr>, Vec<Expr>),
 	Cast(Ty, Box<Expr>),
 	Binop(Box<Expr>, BinaryOp, Box<Expr>),
 	Unop(UnaryOp, Box<Expr>),
 	GetRef(Box<Expr>),
-	Deref(Box<Expr>)
+	Deref(Box<Expr>),
+	Sizeof(Ty)
 }
 
 #[derive(Debug)]
