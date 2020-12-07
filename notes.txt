@@ -9,7 +9,7 @@ polymorphism can be done with type erasure OR separately optimized
 	hybrid mode: type-erased for pointer types, specialized for non-pointer types
 
 maybe:
-	sizeof operator
+	function pointers and function types
 	Sum types
 	unity builds are default, whole directory compilation
 

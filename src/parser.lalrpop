@@ -1,7 +1,15 @@
-//use std::str::FromStr;
 use super::ast;
 
+//LALR makes compile times faster
+#[LALR]
 grammar;
+
+match{
+	r"\s*" => {},	//ignore whitespace
+	r"//[^\n\r]*[\n\r]*" => {},	//remove line comments
+	r"/\*([^\*]*\*+[^\*/])*([^\*]*\*+|[^\*])*\*/" => {},  //remove block comments
+	_
+}
 
 Comma<T>: Vec<T> = {
 	<v:(<T> ",")*> <e:T?> => match e {
@@ -16,7 +24,7 @@ Comma<T>: Vec<T> = {
 
 //identifiers (variables, struct names, and type vars) cannot start with an underscore
 Identifier: String = {
-	r#"[a-zA-Z][a-zA-Z_]*"# => <>.to_owned()
+	<s:r#"[a-zA-Z][a-zA-Z_]*"#> => s.to_owned()
 }
 
 
@@ -234,4 +242,6 @@ pub GDecl: ast::Gdecl = {
 	}
 }
 
-
+pub Program: Vec<ast::Gdecl> = {
+	<p:(<GDecl>)*> => p
+}

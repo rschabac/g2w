@@ -48,8 +48,8 @@ mod tests{
 	fn parse_Expr_test(){
 		use ast::{Expr, Ty, BinaryOp, UnaryOp};
 		let tests = vec![
-			("null", Expr::LitNull),
-			("true", Expr::LitBool(true)),
+			("//Comments work\n\nnull", Expr::LitNull),
+			("/*block\tcomments\ntoo*/ true", Expr::LitBool(true)),
 			("987", Expr::LitSignedInt(987)),
 			("0xA", Expr::LitSignedInt(10)),
 			("u10", Expr::LitUnsignedInt(10)),
@@ -284,6 +284,8 @@ mod tests{
 
 fn main() {
 	let expr_parser = parser::ExprParser::new();
-	let parse_result = expr_parser.parse("7d9s9");
+	let parse_result = expr_parser.parse("3 + //a b c \n 4");
+	println!("{:?}", parse_result);
+	let parse_result = expr_parser.parse("3 /* abc\nxyz * /* */ + 4");
 	println!("{:?}", parse_result);
 }
