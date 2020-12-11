@@ -28,12 +28,5 @@ i32 main(i32 argc, u8** argv){
 		person1.lastName = argv[4];
 	}
 
-	//TODO: Do I want to bother with printf? it would complicate typechecking
-	write(1, "Hello ", 6);
-	write(1, person1.firstName, strlen(person1.firstName));
-	write(1, " ", 1);
-	write(1, person1.middleName, strlen(person1.middleName));
-	write(1, " ", 1);
-	write(1, person1.lastName, strlen(person1.lastName));
-	write(1, "\n", 1);
+	printf("Hello %s %s %s\n", person1.firstName, person1.middleName, person1.lastName);
 }

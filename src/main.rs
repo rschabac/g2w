@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate lalrpop_util;
 mod ast;
+mod typechecker;
 
 lalrpop_mod!(pub parser); //synthesized by LALRPOP
 
@@ -8,6 +9,7 @@ lalrpop_mod!(pub parser); //synthesized by LALRPOP
 mod tests{
 	use super::ast;
 	use super::parser;
+	use super::typechecker;
 	#[test]
 	fn parse_Type_test(){
 		use ast::{Ty, IntSize, FloatSize};
@@ -280,12 +282,52 @@ mod tests{
 			panic!();
 		}
 	}
+
+	mod typechecking_tests {
+		use crate::typechecker::*;
+		use crate::ast::*;
+		use crate::ast::Ty::*;
+		use super::parser;
+		#[test]
+		fn typecheck_expr_test1(){
+			let mut empty_typecontext = get_empty_typecontext();
+			let expr_parser = parser::ExprParser::new();
+			let expr = expr_parser.parse("true").expect("parse error");
+			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
+			assert_eq!(typecheck_result.unwrap(), Bool);
+		}
+		#[test]
+		fn typecheck_expr_test2(){
+			let mut empty_typecontext = get_empty_typecontext();
+			let expr_parser = parser::ExprParser::new();
+			let expr = expr_parser.parse("38").expect("parse error");
+			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
+			assert_eq!(typecheck_result.unwrap(), Int{signed:true, size: IntSize::Size64});
+		}
+		#[test]
+		fn typecheck_expr_test3(){
+			let mut empty_typecontext = get_empty_typecontext();
+			let expr_parser = parser::ExprParser::new();
+			let expr = expr_parser.parse("{1, 2, 3}").expect("parse error");
+			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
+			assert_eq!(typecheck_result.unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
+		}
+		#[test]
+		fn typecheck_expr_test4(){
+			let mut empty_typecontext = get_empty_typecontext();
+			let expr_parser = parser::ExprParser::new();
+			let expr = expr_parser.parse("\"abc\"[{1, 2, 3}[0]]").expect("parse error");
+			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
+			assert_eq!(typecheck_result.unwrap(), Int{signed: false, size: IntSize::Size8});
+		}
+	}
 }
 
-fn main() {
+fn main(){
+	use std::env::args;
 	let expr_parser = parser::ExprParser::new();
-	let parse_result = expr_parser.parse("3 + //a b c \n 4");
-	println!("{:?}", parse_result);
-	let parse_result = expr_parser.parse("3 /* abc\nxyz * /* */ + 4");
-	println!("{:?}", parse_result);
+	let test_str = &args().collect::<Vec<String>>()[1];
+	let parse_result = expr_parser.parse(test_str);
+	let mut empty_typecontext = typechecker::get_empty_typecontext();
+	println!("type of '{}' = {:?}", test_str, typechecker::typecheck_expr(&mut empty_typecontext, &parse_result.unwrap()));
 }

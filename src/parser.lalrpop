@@ -47,7 +47,7 @@ pub Type: ast::Ty = {
 	<t:Type> "*" => ast::Ty::Ptr(Some(Box::new(t))),
 	"void" "*" => ast::Ty::Ptr(None),
 
-	<t:Type> "[" <num:r"[0-9]+"> "]" => ast::Ty::Array{length: u32::from_str_radix(num, 10).unwrap(), typ: Box::new(t)},
+	<t:Type> "[" <num:r"[0-9]+"> "]" => ast::Ty::Array{length: u64::from_str_radix(num, 10).unwrap(), typ: Box::new(t)},
 
 	"struct" <id:Identifier> => ast::Ty::Struct(id),
 

@@ -1,54 +1,39 @@
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum IntSize{
 	Size8,
 	Size16,
 	Size32,
 	Size64
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum FloatSize{
 	FSize32,
 	FSize64
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Ty{
 	Bool,
 	Int{signed: bool, size: IntSize},
 	Float(FloatSize),
 	Ptr(Option<Box<Ty>>),	//void pointers are represented as Ptr(None)
-	Array{length: u32, typ: Box<Ty>},
+	Array{length: u64, typ: Box<Ty>},
 	Struct(String),
 	TypeVar(String),
 }
 
 #[derive(Debug, PartialEq)]
 pub enum UnaryOp{
-	Neg,
-	Lognot,
-	Bitnot
+	Neg, Lognot, Bitnot
 }
 
 #[derive(Debug, PartialEq)]
 pub enum BinaryOp{
-	Add,
-	Sub,
-	Mul,
-	Div,
-	Mod,
-	Equ,
-	Neq,
-	Lt,
-	Lte,
-	Gt,
-	Gte,
-	And,
-	Or,
-	Bitand,
-	Bitor,
-	Bitxor,
-	Shl,	//<<
-	Shr,	//>>
-	Sar		//>>>
+	Add, Sub, Mul, Div, Mod,
+	Equ, Neq,
+	Lt, Lte, Gt, Gte,
+	And, Or,
+	Bitand, Bitor, Bitxor,
+	Shl /* << */, Shr /* >> */, Sar	/* >>> */
 }
 
 #[derive(Debug, PartialEq)]
