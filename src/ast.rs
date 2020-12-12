@@ -51,7 +51,7 @@ pub enum Expr{
 	//maybe add this back in later
 	//LitStruct{struct_name: String, values: Vec<(String, Expr)>},
 	Proj(Box<Expr>, String),
-	Call(Box<Expr>, Vec<Expr>),
+	Call(String, Vec<Expr>),
 	Cast(Ty, Box<Expr>),
 	Binop(Box<Expr>, BinaryOp, Box<Expr>),
 	Unop(UnaryOp, Box<Expr>),
@@ -65,7 +65,7 @@ pub enum Stmt{
 	Assign(Expr, Expr),
 	Decl(Ty, String),
 	Return(Option<Expr>),
-	BareExpr(Expr),
+	SCall(String, Vec<Expr>),
 	If(Expr, Block, Block),
 	While(Expr, Block)
 }

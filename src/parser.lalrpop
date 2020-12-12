@@ -129,7 +129,7 @@ PostfixExpr: ast::Expr = {
 	<e1: PostfixExpr> "[" <e2: Expr> "]" => ast::Expr::Index(Box::new(e1), Box::new(e2)),
 	"sizeof" "(" <t:Type> ")" => ast::Expr::Sizeof(t),
 	"cast" "(" <t:Type> "," <e: Expr> ")" => ast::Expr::Cast(t, Box::new(e)),
-	<e1: PostfixExpr> "(" <args: Comma<Expr>> ")"  => ast::Expr::Call(Box::new(e1), args),
+	<i:Identifier> "(" <args: Comma<Expr>> ")"  => ast::Expr::Call(i, args),
 	<e1: PostfixExpr> "." <id:Identifier> => ast::Expr::Proj(Box::new(e1), id),
 	<e: PrimaryExpr> => e
 }
@@ -169,7 +169,7 @@ pub Stmt: ast::Stmt = {
 
 	"return" <e: Expr?> ";" => ast::Stmt::Return(e),
 
-	<e: Expr> ";" => ast::Stmt::BareExpr(e),
+	<i:Identifier> "(" <args: Comma<Expr>> ")" ";" => ast::Stmt::SCall(i, args),
 
 	"while" <cond: Expr> <body:Block> => ast::Stmt::While(cond, body),
 

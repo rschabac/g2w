@@ -9,9 +9,8 @@ lalrpop_mod!(pub parser); //synthesized by LALRPOP
 mod tests{
 	use super::ast;
 	use super::parser;
-	use super::typechecker;
 	#[test]
-	fn parse_Type_test(){
+	fn parse_type_test(){
 		use ast::{Ty, IntSize, FloatSize};
 		let tests = vec![
 			("u8", Ty::Int{signed: false, size: IntSize::Size8}),
@@ -26,28 +25,28 @@ mod tests{
 			("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
 		];
 		let type_parser = parser::TypeParser::new();
-		let mut allSucceeded = true;
-		for (test_str, expectedParse) in tests {
+		let mut all_succeeded = true;
+		for (test_str, expected_parse) in tests {
 			match type_parser.parse(test_str) {
-				Ok(parseResult) => {
-					if parseResult != expectedParse {
-						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parseResult, expectedParse);
-						allSucceeded = false;
+				Ok(parse_result) => {
+					if parse_result != expected_parse {
+						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
+						all_succeeded = false;
 					}
 				},
 				Err(error) => {
 					println!("Parse error on {:?}: {:?}", test_str, error);
-					allSucceeded = false;
+					all_succeeded = false;
 				}
 			}
 		}
-		if !allSucceeded {
+		if !all_succeeded {
 			panic!();
 		}
 	}
 
 #[test]
-	fn parse_Expr_test(){
+	fn parse_expr_test(){
 		use ast::{Expr, Ty, BinaryOp, UnaryOp};
 		let tests = vec![
 			("//Comments work\n\nnull", Expr::LitNull),
@@ -67,7 +66,7 @@ mod tests{
 			)),
 			("point.x", Expr::Proj(Box::new(Expr::Id("point".to_owned())), "x".to_owned())),
 			("malloc(64)", Expr::Call(
-				Box::new(Expr::Id("malloc".to_owned())), 
+				"malloc".to_owned(), 
 				vec![Expr::LitSignedInt(64)]
 			)),
 			("cast(u8,null)", Expr::Cast(
@@ -100,7 +99,7 @@ mod tests{
 					Box::new(Expr::Unop(
 						UnaryOp::Lognot,
 						Box::new(Expr::Call(
-							Box::new(Expr::Id("f".to_owned())),
+							"f".to_owned(),
 							vec![
 								Expr::Cast(
 									Ty::Ptr(Some(Box::new(
@@ -130,28 +129,28 @@ mod tests{
 
 		];
 		let expr_parser = parser::ExprParser::new();
-		let mut allSucceeded = true;
-		for (test_str, expectedParse) in tests {
+		let mut all_succeeded = true;
+		for (test_str, expected_parse) in tests {
 			match expr_parser.parse(test_str) {
-				Ok(parseResult) => {
-					if parseResult != expectedParse {
-						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parseResult, expectedParse);
-						allSucceeded = false;
+				Ok(parse_result) => {
+					if parse_result != expected_parse {
+						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
+						all_succeeded = false;
 					}
 				},
 				Err(error) => {
 					println!("Parse error on {:?}: {:?}", test_str, error);
-					allSucceeded = false;
+					all_succeeded = false;
 				}
 			}
 		}
-		if !allSucceeded {
+		if !all_succeeded {
 			panic!();
 		}
 	}
 
 #[test]
-	fn parse_Stmt_test(){
+	fn parse_stmt_test(){
 		use ast::{Ty, Expr, Stmt};
 		let tests = vec![
 			("x = 4;", Stmt::Assign(
@@ -164,7 +163,7 @@ mod tests{
 			)),
 			("return;", Stmt::Return(None)),
 			("return null;", Stmt::Return(Some(Expr::LitNull))),
-			("x;", Stmt::BareExpr(Expr::Id("x".to_owned()))),
+			("f();", Stmt::SCall("f".to_owned(), vec![])),
 			("while true { x = 4; }", Stmt::While(Expr::LitBool(true), vec![
 				Stmt::Assign(Expr::Id("x".to_owned()), Expr::LitSignedInt(4))
 			])),
@@ -198,28 +197,28 @@ mod tests{
 				
 		];
 		let stmt_parser = parser::StmtParser::new();
-		let mut allSucceeded = true;
-		for (test_str, expectedParse) in tests {
+		let mut all_succeeded = true;
+		for (test_str, expected_parse) in tests {
 			match stmt_parser.parse(test_str) {
-				Ok(parseResult) => {
-					if parseResult != expectedParse {
-						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parseResult, expectedParse);
-						allSucceeded = false;
+				Ok(parse_result) => {
+					if parse_result != expected_parse {
+						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
+						all_succeeded = false;
 					}
 				},
 				Err(error) => {
 					println!("Parse error on {:?}: {:?}", test_str, error);
-					allSucceeded = false;
+					all_succeeded = false;
 				}
 			}
 		}
-		if !allSucceeded {
+		if !all_succeeded {
 			panic!();
 		}
 	}
 
 	#[test]
-	fn parse_GDecl_test(){
+	fn parse_gdecl_test(){
 		use ast::{Gdecl, Ty, PolymorphMode};
 		let tests = vec![
 			("bool x;", Gdecl::GVarDecl(Ty::Bool, "x".to_owned())),
@@ -263,22 +262,22 @@ mod tests{
 			})
 		];
 		let gdecl_parser = parser::GDeclParser::new();
-		let mut allSucceeded = true;
-		for (test_str, expectedParse) in tests {
+		let mut all_succeeded = true;
+		for (test_str, expected_parse) in tests {
 			match gdecl_parser.parse(test_str) {
-				Ok(parseResult) => {
-					if parseResult != expectedParse {
-						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parseResult, expectedParse);
-						allSucceeded = false;
+				Ok(parse_result) => {
+					if parse_result != expected_parse {
+						println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
+						all_succeeded = false;
 					}
 				},
 				Err(error) => {
 					println!("Parse error on {:?}: {:?}", test_str, error);
-					allSucceeded = false;
+					all_succeeded = false;
 				}
 			}
 		}
-		if !allSucceeded {
+		if !all_succeeded {
 			panic!();
 		}
 	}
@@ -288,37 +287,56 @@ mod tests{
 		use crate::ast::*;
 		use crate::ast::Ty::*;
 		use super::parser;
+		fn setup(expr: &str) -> Result<Ty, String>{
+			let (mut ctxt, func_context) = get_empty_localtypecontext();
+			return setup_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context);
+		}
+		fn setup_with_localtypecontext(expr: &str, ctxt: &mut LocalTypeContext) -> Result<Ty, String>{
+			let (_, funcs) = get_empty_localtypecontext();
+			return setup_with_localtypecontext_and_funcs(expr, ctxt, &funcs);
+		}
+		fn setup_with_funcs(expr: &str, funcs: &FuncContext) -> Result<Ty, String>{
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			return setup_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs);
+		}
+		fn setup_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
+			let expr_parser = parser::ExprParser::new();
+			let expr = expr_parser.parse(expr).expect("parse error");
+			return typecheck_expr(ctxt, funcs, &expr);
+		}
 		#[test]
 		fn typecheck_expr_test1(){
-			let mut empty_typecontext = get_empty_typecontext();
-			let expr_parser = parser::ExprParser::new();
-			let expr = expr_parser.parse("true").expect("parse error");
-			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
-			assert_eq!(typecheck_result.unwrap(), Bool);
+			assert_eq!(setup("true").unwrap(), Bool);
 		}
 		#[test]
 		fn typecheck_expr_test2(){
-			let mut empty_typecontext = get_empty_typecontext();
-			let expr_parser = parser::ExprParser::new();
-			let expr = expr_parser.parse("38").expect("parse error");
-			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
-			assert_eq!(typecheck_result.unwrap(), Int{signed:true, size: IntSize::Size64});
+			assert_eq!(setup("38").unwrap(), Int{signed:true, size: IntSize::Size64});
 		}
 		#[test]
 		fn typecheck_expr_test3(){
-			let mut empty_typecontext = get_empty_typecontext();
-			let expr_parser = parser::ExprParser::new();
-			let expr = expr_parser.parse("{1, 2, 3}").expect("parse error");
-			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
-			assert_eq!(typecheck_result.unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
+			assert_eq!(setup("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
 		}
 		#[test]
 		fn typecheck_expr_test4(){
-			let mut empty_typecontext = get_empty_typecontext();
-			let expr_parser = parser::ExprParser::new();
-			let expr = expr_parser.parse("\"abc\"[{1, 2, 3}[0]]").expect("parse error");
-			let typecheck_result = typecheck_expr(&mut empty_typecontext, &expr);
-			assert_eq!(typecheck_result.unwrap(), Int{signed: false, size: IntSize::Size8});
+			assert_eq!(setup("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
+		}
+		#[test]
+		fn typecheck_expr_test5(){
+			use std::collections::HashMap;
+			let mut funcs = HashMap::new();
+			let _ = funcs.insert("f".to_owned(), FuncType{
+				args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
+				return_type: Some(Struct("abc".to_owned()))
+			});
+			assert_eq!(setup_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+		}
+		#[test]
+		fn typecheck_expr_test6(){
+			assert!(setup("cast(u8*, 5)").is_err());
+		}
+		#[test]
+		fn typecheck_expr_test7(){
+			assert!(setup("f()").is_err());
 		}
 	}
 }
@@ -328,6 +346,6 @@ fn main(){
 	let expr_parser = parser::ExprParser::new();
 	let test_str = &args().collect::<Vec<String>>()[1];
 	let parse_result = expr_parser.parse(test_str);
-	let mut empty_typecontext = typechecker::get_empty_typecontext();
-	println!("type of '{}' = {:?}", test_str, typechecker::typecheck_expr(&mut empty_typecontext, &parse_result.unwrap()));
+	let (mut empty_localtypecontext, func_context) = typechecker::get_empty_localtypecontext();
+	println!("type of '{}' = {:?}", test_str, typechecker::typecheck_expr(&mut empty_localtypecontext, &func_context, &parse_result.unwrap()));
 }
