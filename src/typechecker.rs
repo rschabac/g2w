@@ -176,6 +176,7 @@ match e {
 		}
 	},
 	Binop(left, _bop, right) => {
+		use ast::BinaryOp::*;
 		let _left_type = typecheck_expr(ctxt, funcs, left)?;
 		let _right_type = typecheck_expr(ctxt, funcs, right)?;
 		panic!("todo")
@@ -187,7 +188,40 @@ match e {
 			_ => #[todo]
 		}
 		*/
-	}
-	_ => Err("Not Implemented".to_owned())
+	},
+	Unop(op, e) => {use ast::UnaryOp::*; match op {
+		Neg => match typecheck_expr(ctxt, funcs, e)? {
+			original @ Int{signed: true, ..} 
+		  | original @ Float(_) => Ok(original),
+			Int{signed: false, ..} => Err("Cannot negate an unsigned int".to_owned()),
+			TypeVar(_) => panic!("not sure how to handle a typevar here"),
+			other => Err(format!("Cannot negate type {:?}", other))
+		},
+		Lognot => match typecheck_expr(ctxt, funcs, e)? {
+			Bool => Ok(Bool),
+			TypeVar(_) => panic!("not sure how to handle a typevar here"),
+			other => Err(format!("Cannot do logical not of type {:?}", other))
+		},
+		Bitnot => match typecheck_expr(ctxt, funcs, e)? {
+			original @ Int{..} => Ok(original),
+			TypeVar(_) => panic!("not sure how to handle a typevar here"),
+			other => Err(format!("Cannot bitwise negate type {:?}", other))
+		}
+	}},
+	GetRef(e) => {
+		let e_type = typecheck_expr(ctxt, funcs, e)?;
+		match **e {
+			Id(_) | Proj(_,_) | Index(_,_) | Deref(_) => Ok(Ptr(Some(Box::new(e_type)))),
+			_ => Err(format!("Cannot get address of {:?}", e))
+		}
+	},
+	Deref(e) => {
+		let e_type = typecheck_expr(ctxt, funcs, e)?;
+		match e_type {
+			Ptr(Some(t)) | Array{typ: t, ..} => Ok(*t.clone()),
+			_ => Err(format!("Cannot dereference type {:?}", e_type))
+		}
+	},
+	Sizeof(_) => Ok(Int{signed:false, size: Size64})
 }
 }

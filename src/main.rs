@@ -338,6 +338,26 @@ mod tests{
 		fn typecheck_expr_test7(){
 			assert!(setup("f()").is_err());
 		}
+		#[test]
+		fn typecheck_expr_test8(){
+			assert_eq!(setup("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
+		}
+		#[test]
+		fn typecheck_expr_test9(){
+			assert_eq!(setup("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
+		}
+		#[test]
+		fn typecheck_expr_test10(){
+			assert_eq!(setup("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
+		}
+		#[test]
+		fn typecheck_expr_test11(){
+			assert_eq!(setup("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
+		}
+		#[test]
+		fn typecheck_expr_test12(){
+			assert!(setup("&true").is_err());
+		}
 	}
 }
 
