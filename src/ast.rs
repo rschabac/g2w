@@ -1,15 +1,17 @@
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, PartialOrd)]
 pub enum IntSize{
 	Size8,
 	Size16,
 	Size32,
 	Size64
 }
-#[derive(Debug, PartialEq, Clone)]
+
+#[derive(Debug, PartialEq, Clone, PartialOrd)]
 pub enum FloatSize{
 	FSize32,
 	FSize64
 }
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Ty{
 	Bool,
@@ -19,6 +21,7 @@ pub enum Ty{
 	Array{length: u64, typ: Box<Ty>},
 	Struct(String),
 	TypeVar(String),
+	GenericStruct{type_var: Box<Ty>, name: String},
 }
 
 #[derive(Debug, PartialEq)]
@@ -43,6 +46,7 @@ pub enum Expr{
 	//For the time being, all integer literals will be 64 bits
 	LitSignedInt(i64),
 	LitUnsignedInt(u64),
+	LitFloat(f64),
 	LitString(String),
 	Id(String),
 	//Type of an array literal will be inferred based on the first element
@@ -52,6 +56,7 @@ pub enum Expr{
 	//LitStruct{struct_name: String, values: Vec<(String, Expr)>},
 	Proj(Box<Expr>, String),
 	Call(String, Vec<Expr>),
+	GenericCall{name: String, type_var: Ty, args: Vec<Expr>},
 	Cast(Ty, Box<Expr>),
 	Binop(Box<Expr>, BinaryOp, Box<Expr>),
 	Unop(UnaryOp, Box<Expr>),
@@ -66,6 +71,7 @@ pub enum Stmt{
 	Decl(Ty, String),
 	Return(Option<Expr>),
 	SCall(String, Vec<Expr>),
+	GenericSCall{name: String, type_var: Ty, args: Vec<Expr>},
 	If(Expr, Block, Block),
 	While(Expr, Block)
 }

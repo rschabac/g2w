@@ -20,6 +20,7 @@ mod tests{
 			("u8 * ", Ty::Ptr(Some(Box::new(Ty::Int{signed: false, size: IntSize::Size8})))),
 			("void*", Ty::Ptr(None)),
 			("struct\tvector", Ty::Struct(String::from("vector"))),
+			("struct vector<bool>", Ty::GenericStruct{type_var: Box::new(Ty::Bool), name: "vector".to_owned()}),
 			("u8 [64]", Ty::Array{length: 64, typ: Box::new(Ty::Int{signed: false, size: IntSize::Size8})}),
 			("'\nT\n", Ty::TypeVar(String::from("T"))),
 			("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
@@ -45,7 +46,7 @@ mod tests{
 		}
 	}
 
-#[test]
+	#[test]
 	fn parse_expr_test(){
 		use ast::{Expr, Ty, BinaryOp, UnaryOp};
 		let tests = vec![
@@ -125,8 +126,16 @@ mod tests{
 					BinaryOp::Add,
 					Box::new(Expr::LitSignedInt(1))
 				)
+			),
+			("print<bool>(null)",
+				Expr::GenericCall(
+					name: "print".to_owned(),
+					type_var: Ty::Bool,
+					args: vec![
+						Expr::LitNull
+					]
+				)
 			)
-
 		];
 		let expr_parser = parser::ExprParser::new();
 		let mut all_succeeded = true;
@@ -164,6 +173,12 @@ mod tests{
 			("return;", Stmt::Return(None)),
 			("return null;", Stmt::Return(Some(Expr::LitNull))),
 			("f();", Stmt::SCall("f".to_owned(), vec![])),
+			("f<bool>();", Stmt::GenericSCall{
+					name: "f".to_owned(),
+					type_var: Ty::Bool,
+					args: vec![]
+				}
+			),
 			("while true { x = 4; }", Stmt::While(Expr::LitBool(true), vec![
 				Stmt::Assign(Expr::Id("x".to_owned()), Expr::LitSignedInt(4))
 			])),
@@ -305,23 +320,11 @@ mod tests{
 			return typecheck_expr(ctxt, funcs, &expr);
 		}
 		#[test]
-		fn typecheck_expr_test1(){
+		fn typecheck_expr_test(){
 			assert_eq!(setup("true").unwrap(), Bool);
-		}
-		#[test]
-		fn typecheck_expr_test2(){
 			assert_eq!(setup("38").unwrap(), Int{signed:true, size: IntSize::Size64});
-		}
-		#[test]
-		fn typecheck_expr_test3(){
 			assert_eq!(setup("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
-		}
-		#[test]
-		fn typecheck_expr_test4(){
 			assert_eq!(setup("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
-		}
-		#[test]
-		fn typecheck_expr_test5(){
 			use std::collections::HashMap;
 			let mut funcs = HashMap::new();
 			let _ = funcs.insert("f".to_owned(), FuncType{
@@ -329,34 +332,18 @@ mod tests{
 				return_type: Some(Struct("abc".to_owned()))
 			});
 			assert_eq!(setup_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
-		}
-		#[test]
-		fn typecheck_expr_test6(){
 			assert!(setup("cast(u8*, 5)").is_err());
-		}
-		#[test]
-		fn typecheck_expr_test7(){
 			assert!(setup("f()").is_err());
-		}
-		#[test]
-		fn typecheck_expr_test8(){
 			assert_eq!(setup("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
-		}
-		#[test]
-		fn typecheck_expr_test9(){
 			assert_eq!(setup("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
-		}
-		#[test]
-		fn typecheck_expr_test10(){
 			assert_eq!(setup("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
-		}
-		#[test]
-		fn typecheck_expr_test11(){
 			assert_eq!(setup("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
-		}
-		#[test]
-		fn typecheck_expr_test12(){
 			assert!(setup("&true").is_err());
+			assert_eq!(setup("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert_eq!(setup("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert!(setup("3.0 + 4").is_err());
+			assert_eq!(setup("3 & cast(i32, 1)").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert!(setup("true % 3.4").is_err());
 		}
 	}
 }

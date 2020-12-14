@@ -1,7 +1,7 @@
 use super::ast;
 
 //LALR makes compile times faster
-#[LALR]
+//#[LALR]
 grammar;
 
 match{
@@ -51,7 +51,9 @@ pub Type: ast::Ty = {
 
 	"struct" <id:Identifier> => ast::Ty::Struct(id),
 
-	"'" <id:Identifier> => ast::Ty::TypeVar(id)
+	"'" <id:Identifier> => ast::Ty::TypeVar(id),
+
+	"struct" <n:Identifier> "@" "<" <t:Type> ">" => ast::Ty::GenericStruct{type_var: Box::new(t), name: n}
 
 }
 
@@ -130,6 +132,7 @@ PostfixExpr: ast::Expr = {
 	"sizeof" "(" <t:Type> ")" => ast::Expr::Sizeof(t),
 	"cast" "(" <t:Type> "," <e: Expr> ")" => ast::Expr::Cast(t, Box::new(e)),
 	<i:Identifier> "(" <args: Comma<Expr>> ")"  => ast::Expr::Call(i, args),
+	<i:Identifier> "@" "<" <t:Type> ">" "(" <args: Comma<Expr>> ")" => ast::Expr::GenericCall{name: i, type_var: t, args: args},
 	<e1: PostfixExpr> "." <id:Identifier> => ast::Expr::Proj(Box::new(e1), id),
 	<e: PrimaryExpr> => e
 }
@@ -147,6 +150,10 @@ PrimaryExpr: ast::Expr = {
 	//unsigned ints look like 'u123' or 'u0x123'
 	<s:r"u[0-9]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[1..], 10).unwrap()),
 	<s:r"u0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[3..], 16).unwrap()),
+
+	//numeric literals with a decimal point become 64-bit floats
+	//There has to be at least one digit, either before or after the decimal point
+	<s:r"[0-9]*\.[0-9]+"> => ast::Expr::LitFloat(s.parse::<f64>().unwrap()),
 
 	//TODO: string escape sequences
 	<s:r#"".*""#> => ast::Expr::LitString(String::from(&s[1..s.len()-1])),
@@ -170,6 +177,7 @@ pub Stmt: ast::Stmt = {
 	"return" <e: Expr?> ";" => ast::Stmt::Return(e),
 
 	<i:Identifier> "(" <args: Comma<Expr>> ")" ";" => ast::Stmt::SCall(i, args),
+	<i:Identifier> "@" "<" <t:Type> ">" "(" <args: Comma<Expr>> ")" ";" => ast::Stmt::GenericSCall{name: i, type_var: t, args: args},
 
 	"while" <cond: Expr> <body:Block> => ast::Stmt::While(cond, body),
 
@@ -211,7 +219,7 @@ pub GDecl: ast::Gdecl = {
 		body: b
 	},
 
-	<ret: Type> <fname: Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+	<ret: Type> <fname: Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
 		ret_type: Some(ret),
 		name: fname,
 		args: fargs,
@@ -219,7 +227,7 @@ pub GDecl: ast::Gdecl = {
 		param: param_name,
 		mode: mode
 	},
-	"void" <fname: Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+	"void" <fname: Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
 		ret_type: None,
 		name: fname,
 		args: fargs,
@@ -233,7 +241,7 @@ pub GDecl: ast::Gdecl = {
 		fields: field_list
 	},
 
-	"struct" <n:Identifier> "<" <mode: PolyMode> "'" <param_name:Identifier> ">"
+	"struct" <n:Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">"
 		"{" <field_list: (<Type> <Identifier> ";")*> "}" => ast::Gdecl::GGenericStructDecl{
 		name: n,
 		param: param_name,

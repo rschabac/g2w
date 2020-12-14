@@ -1,9 +1,15 @@
 use crate::ast;
 use std::collections::{HashMap};
 
+/*
 pub struct FuncType{
 	pub args: Vec<ast::Ty>,
 	pub return_type: Option<ast::Ty>
+}
+*/
+pub enum FuncType{
+	NonGeneric{return_type: Option<ast::Ty>, args: Vec<ast::Ty>},
+	Generic{return_type: Option<ast::Ty>, mode: ast::PolymorphMode, type_var: String, args: Vec<ast::Ty>}
 }
 
 type LocalContext = HashMap<String, ast::Ty>;
@@ -12,6 +18,9 @@ type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
 //TODO: complete type checker for regular structs, then see how StructContext is used,
 //use this to figure out what GenericStructContext and GenericFuncContext should be
 //type GenericStructContext = 
+
+//FuncContext contains generic and non-generic functions
+//a generic and non-generic function cannot share the same name
 pub type FuncContext = HashMap<String, FuncType>;
 
 pub struct LocalTypeContext{
@@ -21,6 +30,10 @@ pub struct LocalTypeContext{
 	type_var: Option<(String, ast::PolymorphMode)>,
 	//TODO: one typechecking is done, find out when to set this
 	type_for_lit_nulls: Option<ast::Ty>,
+	//TODO: add a optional mode field here, and figure out what the rules for it should be
+	//when typechecking a non-generic function, it will be None
+	//when typechecking a generic function, this will be set to the mode that the function is using
+
 }
 
 pub struct TypeContext{
@@ -74,6 +87,7 @@ match e {
 	LitBool(_) => Ok(Bool),
 	LitSignedInt(_) => Ok(Int{signed: true, size: Size64}),
 	LitUnsignedInt(_) => Ok(Int{signed: false, size: Size64}),
+	LitFloat(_) => Ok(Float(ast::FloatSize::FSize64)),
 	LitString(_) => Ok(Ptr(Some(Box::new(Int{signed:false, size: Size8})))),
 	Id(var) => match ctxt.locals.get(var) {
 			Some(t) => Ok(t.clone()),
@@ -126,21 +140,25 @@ match e {
 					return Err(format!("struct {} does not have a {} field", struct_name, field));
 				}
 			},
+			GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
 			_ => Err(format!("{:?} is not a struct, project off of it", base_typ))
 		}
 	},
 	Call(func_name, args) => {
+		use FuncType::*;
 		let return_type;
 		let arg_type_list;
-		let given_types = args.iter().map(|arg| typecheck_expr(ctxt, funcs, arg));
 		match funcs.get(func_name) {
 			None => {
 				return Err(format!("could not find a function named '{}'", func_name));
 			},
-			Some(FuncType{return_type: None, ..}) => {
+			Some(NonGeneric{return_type: None, ..}) => {
 				return Err(format!("function '{}' returns void, cannot be used as an expression", func_name));
 			},
-			Some(FuncType{return_type: Some(ret), args: arg_types}) => {
+			Some(Generic{..}) => {
+				return Err(format!("function '{}' is generic", func_name))
+			},
+			Some(NonGeneric{return_type: Some(ret), args: arg_types}) => {
 				return_type = ret.clone();
 				arg_type_list = arg_types;
 			}
@@ -148,7 +166,8 @@ match e {
 		if args.len() != arg_type_list.len() {
 			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
 		}
-		for (index, (given_type, correct_type)) in given_types
+		for (index, (given_type, correct_type)) in args.iter()
+				.map(|arg| typecheck_expr(ctxt, funcs, arg))
 				.zip(arg_type_list.iter())
 				.enumerate(){
 			let given_type = given_type?;
@@ -160,6 +179,61 @@ match e {
 		}
 		return Ok(return_type);
 	},
+	GenericCall{name: func_name, type_var, args} => {
+		use FuncType::*;
+		let return_type;
+		let arg_type_list;
+		//TODO: once the rules for interop between erased/separated structs/functions are established,
+		//use this and the mod field in LocalTypeContext to check these rules
+		let poly_mode;
+		let type_var_string;
+		match funcs.get(func_name) {
+			None => {
+				return Err(format!("could not find a function named '{}'", func_name));
+			},
+			Some(Generic{return_type: None, ..}) => {
+				return Err(format!("function '{}' returns void, cannot be used as an expression", func_name));
+			},
+			Some(NonGeneric{..}) => {
+				return Err(format!("function '{}' is not generic", func_name))
+			},
+			Some(Generic{return_type: Some(ret), mode, type_var: var_string, args: arg_types}) => {
+				return_type = ret.clone();
+				arg_type_list = arg_types;
+				poly_mode = mode;
+				type_var_string = var_string;
+
+			}
+		};
+		if args.len() != arg_type_list.len() {
+			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
+		}
+		/*
+		expr is:		name<type_var>(..args..)
+		name has type:	return_type name<var_string>(..arg_type_list..)
+		the monomorphed version of name would look like:
+						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
+		*/
+		for (index, (given_type, correct_type)) in args.iter()
+				.map(|arg| typecheck_expr(ctxt, funcs, arg))
+				.zip(arg_type_list.iter())
+				.enumerate(){
+			let given_type = given_type?;
+			let given_type_str = format!("{:?}", given_type);
+			let given_type = decay_type(given_type);
+			let correct_type: &ast::Ty = match correct_type {
+				TypeVar(s) => if s == type_var_string {&type_var} else {
+					panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+					This should have been detected when typechecking the function's declaration.")
+				},
+				t => &t
+			};
+			if given_type.ne(correct_type) {
+				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+			}
+		};
+		Ok(return_type)
+	}
 	Cast(dest_type, source) => {
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
@@ -175,19 +249,48 @@ match e {
 			
 		}
 	},
-	Binop(left, _bop, right) => {
+	Binop(left, bop, right) => {
 		use ast::BinaryOp::*;
-		let _left_type = typecheck_expr(ctxt, funcs, left)?;
-		let _right_type = typecheck_expr(ctxt, funcs, right)?;
-		panic!("todo")
-		/*
+		let left_type = typecheck_expr(ctxt, funcs, left)?;
+		let right_type = typecheck_expr(ctxt, funcs, right)?;
 		match bop {
 			Add | Sub => match (left_type, right_type) {
-
+				(original @ Ptr(_), Int{..}) => Ok(original),
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+				(Int{..}, Int{..}) => Err("Cannot add/sub integers with different signedness".to_owned()),
+				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
+				(TypeVar(_), _) | (_, TypeVar(_)) => panic!("not sure how to handle a typevar here"),
+				(left_type, right_type) => Err(format!("Cannot add/sub types {:?} and {:?}", left_type, right_type))
+			},
+			Mul | Div | Mod => match (left_type, right_type) {
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+				(Int{..}, Int{..}) => Err("Cannot mul/div/mod integers with different signedness".to_owned()),
+				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
+				(left_type, right_type) => Err(format!("Cannot mul/div/mod types {:?} and {:?}", left_type, right_type))
+			},
+			Lt | Lte | Gt | Gte | Equ | Neq => match (left_type, right_type) {
+				(Int{signed: sign1,..}, Int{signed: sign2,..}) if sign1 != sign2 => Err("Cannot compare signed and unsigned int".to_owned()),
+				(Int{..}, Int{..}) => Err("Cannot compare integers with different signedness".to_owned()),
+				(left_type, right_type) if left_type == right_type => match left_type {
+					Struct(name) | GenericStruct{name, ..} => Err(format!("Cannot compare struct {}", name)),
+					Array{..} => Err("Cannot compare arrays".to_owned()),
+					_ => Ok(Bool)
+				},
+				(left_type, right_type) => Err(format!("Cannot compare types {:?} and {:?}", left_type, right_type))
+			},
+			And | Or => match (left_type, right_type) {
+				(Bool, Bool) => Ok(Bool),
+				(left_type, right_type) => Err(format!("Cannot logical and/or types {:?} and {:?}", left_type, right_type))
+			},
+			Bitand | Bitor | Bitxor => match (left_type, right_type) {
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+				(left_type, right_type) => Err(format!("Cannot bitand/bitor/bitxor types {:?} and {:?}", left_type, right_type))
+			},
+			Shl | Shr | Sar => match (left_type, right_type) {
+				(left_type @ Int{..}, Int{..}) => Ok(left_type),
+				(left_type, right_type) => Err(format!("Cannot shl/shr/sar types {:?} and {:?}", left_type, right_type))
 			}
-			_ => #[todo]
 		}
-		*/
 	},
 	Unop(op, e) => {use ast::UnaryOp::*; match op {
 		Neg => match typecheck_expr(ctxt, funcs, e)? {
