@@ -1,7 +1,7 @@
 use super::ast;
 
 //LALR makes compile times faster
-//#[LALR]
+#[LALR]
 grammar;
 
 match{
@@ -148,8 +148,8 @@ PrimaryExpr: ast::Expr = {
 	<s:r"0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitSignedInt(i64::from_str_radix(&s[2..], 16).unwrap()),
 
 	//unsigned ints look like 'u123' or 'u0x123'
-	<s:r"u[0-9]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[1..], 10).unwrap()),
-	<s:r"u0(x|X)[0-9a-fA-F]+"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[3..], 16).unwrap()),
+	<s:r"[0-9]+u"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[.. s.len()-1], 10).unwrap()),
+	<s:r"0(x|X)[0-9a-fA-F]+u"> => ast::Expr::LitUnsignedInt(u64::from_str_radix(&s[2.. s.len()-1], 16).unwrap()),
 
 	//numeric literals with a decimal point become 64-bit floats
 	//There has to be at least one digit, either before or after the decimal point

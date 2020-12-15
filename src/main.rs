@@ -20,7 +20,7 @@ mod tests{
 			("u8 * ", Ty::Ptr(Some(Box::new(Ty::Int{signed: false, size: IntSize::Size8})))),
 			("void*", Ty::Ptr(None)),
 			("struct\tvector", Ty::Struct(String::from("vector"))),
-			("struct vector<bool>", Ty::GenericStruct{type_var: Box::new(Ty::Bool), name: "vector".to_owned()}),
+			("struct vector@<bool>", Ty::GenericStruct{type_var: Box::new(Ty::Bool), name: "vector".to_owned()}),
 			("u8 [64]", Ty::Array{length: 64, typ: Box::new(Ty::Int{signed: false, size: IntSize::Size8})}),
 			("'\nT\n", Ty::TypeVar(String::from("T"))),
 			("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
@@ -50,12 +50,12 @@ mod tests{
 	fn parse_expr_test(){
 		use ast::{Expr, Ty, BinaryOp, UnaryOp};
 		let tests = vec![
-			("//Comments work\n\nnull", Expr::LitNull),
+			("//Comments work\nnull", Expr::LitNull),
 			("/*block\tcomments\ntoo*/ true", Expr::LitBool(true)),
 			("987", Expr::LitSignedInt(987)),
 			("0xA", Expr::LitSignedInt(10)),
-			("u10", Expr::LitUnsignedInt(10)),
-			("u0XFE", Expr::LitUnsignedInt(254)),
+			("10u", Expr::LitUnsignedInt(10)),
+			("0XFEu", Expr::LitUnsignedInt(254)),
 			("\"abc\"", Expr::LitString("abc".to_owned())),
 			("my_var", Expr::Id("my_var".to_owned())),
 			("{4, null, true}", Expr::LitArr(
@@ -127,14 +127,14 @@ mod tests{
 					Box::new(Expr::LitSignedInt(1))
 				)
 			),
-			("print<bool>(null)",
-				Expr::GenericCall(
+			("print@<bool>(null)",
+				Expr::GenericCall{
 					name: "print".to_owned(),
 					type_var: Ty::Bool,
 					args: vec![
 						Expr::LitNull
 					]
-				)
+				}
 			)
 		];
 		let expr_parser = parser::ExprParser::new();
@@ -173,7 +173,7 @@ mod tests{
 			("return;", Stmt::Return(None)),
 			("return null;", Stmt::Return(Some(Expr::LitNull))),
 			("f();", Stmt::SCall("f".to_owned(), vec![])),
-			("f<bool>();", Stmt::GenericSCall{
+			("f@<bool>();", Stmt::GenericSCall{
 					name: "f".to_owned(),
 					type_var: Ty::Bool,
 					args: vec![]
@@ -261,13 +261,13 @@ mod tests{
 					(Ty::Bool, "y".to_owned())
 				]
 			}),
-			("struct a<erased 'T>{}", Gdecl::GGenericStructDecl{
+			("struct a@<erased 'T>{}", Gdecl::GGenericStructDecl{
 				name: "a".to_owned(),
 				param: "T".to_owned(),
 				mode: PolymorphMode::Erased,
 				fields: vec![]
 			}),
-			("void h<separated 'T>(){}", Gdecl::GGenericFuncDecl{
+			("void h@<separated 'T>(){}", Gdecl::GGenericFuncDecl{
 				ret_type: None,
 				name: "h".to_owned(),
 				args: vec![],
@@ -321,17 +321,18 @@ mod tests{
 		}
 		#[test]
 		fn typecheck_expr_test(){
+			use std::collections::HashMap;
 			assert_eq!(setup("true").unwrap(), Bool);
 			assert_eq!(setup("38").unwrap(), Int{signed:true, size: IntSize::Size64});
 			assert_eq!(setup("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
 			assert_eq!(setup("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
-			use std::collections::HashMap;
 			let mut funcs = HashMap::new();
-			let _ = funcs.insert("f".to_owned(), FuncType{
+			let _ = funcs.insert("f".to_owned(), FuncType::NonGeneric{
 				args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
 				return_type: Some(Struct("abc".to_owned()))
 			});
 			assert_eq!(setup_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+			assert!(setup_with_funcs("f@<i32>(true, 5)", &funcs).is_err());
 			assert!(setup("cast(u8*, 5)").is_err());
 			assert!(setup("f()").is_err());
 			assert_eq!(setup("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
@@ -344,6 +345,17 @@ mod tests{
 			assert!(setup("3.0 + 4").is_err());
 			assert_eq!(setup("3 & cast(i32, 1)").unwrap(), Int{signed: true, size: IntSize::Size64});
 			assert!(setup("true % 3.4").is_err());
+			let mut funcs = HashMap::new();
+			let _ = funcs.insert("f".to_owned(), FuncType::Generic{
+				args: vec![TypeVar("T".to_owned()), Int{signed: true, size: IntSize::Size64}],
+				mode: PolymorphMode::Separated,
+				type_var: "T".to_owned(),
+				return_type: Some(Struct("abc".to_owned()))
+			});
+			assert_eq!(setup_with_funcs("f@<bool>(5 == 5, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+			assert!(setup_with_funcs("f(true, 5)", &funcs).is_err());
+			assert_eq!(setup("printf(true, 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
+			assert!(setup("fprintf(3, 5 + 5u)").is_err());
 		}
 	}
 }

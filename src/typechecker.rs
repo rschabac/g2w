@@ -75,6 +75,17 @@ fn decay_type(t: ast::Ty) -> ast::Ty {
 	}
 }
 
+//when typechecking a function call, it the function is one of these, the
+//number and type of arguments are not checked (each individual argument must
+//still be well-typed though).
+static PRINTF_FAMILY: &[&str] = &[
+	"printf",
+	"sprintf",
+	"fprintf",
+	"snprintf",
+	"dprintf"
+];
+
 pub fn typecheck_expr(ctxt: &mut LocalTypeContext, funcs: &FuncContext, e: &ast::Expr) -> Result<ast::Ty, String>{
 use ast::Ty::*;
 use ast::Expr::*;
@@ -146,6 +157,12 @@ match e {
 	},
 	Call(func_name, args) => {
 		use FuncType::*;
+		if PRINTF_FAMILY.contains(&func_name.as_str()){
+			for arg in args.iter(){
+				let _ = typecheck_expr(ctxt, funcs, arg)?;
+			}
+			return Ok(Int{signed: true, size: ast::IntSize::Size32});
+		}
 		let return_type;
 		let arg_type_list;
 		match funcs.get(func_name) {
@@ -270,7 +287,9 @@ match e {
 			},
 			Lt | Lte | Gt | Gte | Equ | Neq => match (left_type, right_type) {
 				(Int{signed: sign1,..}, Int{signed: sign2,..}) if sign1 != sign2 => Err("Cannot compare signed and unsigned int".to_owned()),
-				(Int{..}, Int{..}) => Err("Cannot compare integers with different signedness".to_owned()),
+				(Int{..}, Int{..}) | (Float(_), Float(_)) => {
+					Ok(Bool)
+				},
 				(left_type, right_type) if left_type == right_type => match left_type {
 					Struct(name) | GenericStruct{name, ..} => Err(format!("Cannot compare struct {}", name)),
 					Array{..} => Err("Cannot compare arrays".to_owned()),
