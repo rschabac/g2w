@@ -24,12 +24,12 @@ type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
 pub type FuncContext = HashMap<String, FuncType>;
 
 pub struct LocalTypeContext{
-	locals: LocalContext,
-	globals: GlobalContext,
-	structs: StructContext,
-	type_var: Option<(String, ast::PolymorphMode)>,
+	pub locals: LocalContext,
+	pub globals: GlobalContext,
+	pub structs: StructContext,
+	pub type_var: Option<(String, ast::PolymorphMode)>,
 	//TODO: one typechecking is done, find out when to set this
-	type_for_lit_nulls: Option<ast::Ty>,
+	pub type_for_lit_nulls: Option<ast::Ty>,
 	//TODO: add a optional mode field here, and figure out what the rules for it should be
 	//when typechecking a non-generic function, it will be None
 	//when typechecking a generic function, this will be set to the mode that the function is using
@@ -250,7 +250,7 @@ match e {
 			}
 		};
 		Ok(return_type)
-	}
+	},
 	Cast(dest_type, source) => {
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
@@ -346,4 +346,165 @@ match e {
 	},
 	Sizeof(_) => Ok(Int{signed:false, size: Size64})
 }
+}
+
+pub fn typecheck_stmt(ctxt: &mut LocalTypeContext, funcs: &FuncContext, s: &ast::Stmt, expected_return_type: &Option<ast::Ty>) -> Result<bool, String> {
+use ast::Ty::*;
+use ast::Expr::*;
+use ast::Stmt::*;
+match s {
+	Assign(lhs, rhs) => {
+		let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
+		match lhs {
+			Id(_) | Index(_,_) | Proj(_,_) | Deref(_) => {
+				let lhs_type = typecheck_expr(ctxt, funcs, &lhs)?;
+				if lhs_type != rhs_type {
+					Err(format!("Cannot assign value of type {:?} to something of type {:?}", rhs_type, lhs_type))
+				} else {
+					Ok(false)
+				}
+			},
+			_ => Err(format!("Left-hand-side of assignment cannot be a {:?}", lhs))
+		}
+	},
+	Decl(typ, name) => {
+		//TODO: whenever the ast contains a Ty, check if it is a Struct or GenericStruct,
+		//if it is, make sure it is in ctxt.structs (and probably ctxt.generic_structs, which doesn't exist yet)
+		if ctxt.locals.contains_key(name){
+			Err(format!("redeclaration of local var {}", name))
+		} else {
+			ctxt.locals.insert(name.clone(), typ.clone());
+			Ok(false)
+		}
+	},
+	Return(None) => {
+		if None.eq(expected_return_type) {
+			Ok(true)
+		} else {
+			Err("Cannot return void in a non-void function".to_owned())
+		}
+	},
+	Return(Some(e)) => {
+		let return_expr_type = typecheck_expr(ctxt, funcs, &e)?;
+		match expected_return_type {
+			None => Err("Cannot return a value from a void function".to_owned()),
+			Some(t) if return_expr_type.ne(t) => Err(format!("Cannot return a value of type {:?} in a function that returns {:?}", return_expr_type, t)),
+			Some(_) => Ok(true)
+		}
+	},
+	SCall(func_name, args) => {
+		use FuncType::*;
+		if PRINTF_FAMILY.contains(&func_name.as_str()){
+			for arg in args.iter(){
+				let _ = typecheck_expr(ctxt, funcs, arg)?;
+			}
+			return Ok(false);
+		}
+		let arg_type_list;
+		match funcs.get(func_name) {
+			None => {
+				return Err(format!("could not find a function named '{}'", func_name));
+			},
+			Some(Generic{..}) => {
+				return Err(format!("function '{}' is generic", func_name))
+			},
+			Some(NonGeneric{args: arg_types, ..}) => {
+				arg_type_list = arg_types;
+			}
+		};
+		if args.len() != arg_type_list.len() {
+			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
+		}
+		for (index, (given_type, correct_type)) in args.iter()
+				.map(|arg| typecheck_expr(ctxt, funcs, arg))
+				.zip(arg_type_list.iter())
+				.enumerate(){
+			let given_type = given_type?;
+			let given_type_str = format!("{:?}", given_type);
+			let given_type = decay_type(given_type);
+			if given_type.ne(&correct_type) {
+				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+			}
+		}
+		return Ok(false);
+	},
+	GenericSCall{name: func_name, type_var, args} => {
+		use FuncType::*;
+		let arg_type_list;
+		//TODO: once the rules for interop between erased/separated structs/functions are established,
+		//use this and the mod field in LocalTypeContext to check these rules
+		let poly_mode;
+		let type_var_string;
+		match funcs.get(func_name) {
+			None => {
+				return Err(format!("could not find a function named '{}'", func_name));
+			},
+			Some(NonGeneric{..}) => {
+				return Err(format!("function '{}' is not generic", func_name))
+			},
+			Some(Generic{mode, type_var: var_string, args: arg_types, ..}) => {
+				arg_type_list = arg_types;
+				poly_mode = mode;
+				type_var_string = var_string;
+
+			}
+		};
+		if args.len() != arg_type_list.len() {
+			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
+		}
+		/*
+		expr is:		name<type_var>(..args..)
+		name has type:	return_type name<var_string>(..arg_type_list..)
+		the monomorphed version of name would look like:
+						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
+		*/
+		for (index, (given_type, correct_type)) in args.iter()
+				.map(|arg| typecheck_expr(ctxt, funcs, arg))
+				.zip(arg_type_list.iter())
+				.enumerate(){
+			let given_type = given_type?;
+			let given_type_str = format!("{:?}", given_type);
+			let given_type = decay_type(given_type);
+			let correct_type: &ast::Ty = match correct_type {
+				TypeVar(s) => if s == type_var_string {&type_var} else {
+					panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+					This should have been detected when typechecking the function's declaration.")
+				},
+				t => &t
+			};
+			if given_type.ne(correct_type) {
+				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+			}
+		};
+		Ok(false)
+	},
+	If(cond, then_block, else_block) => {
+		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
+		if cond_type != Bool {
+			return Err(format!("condition of if statement must have type bool, not {:?}", cond_type));
+		}
+		let then_returns = typecheck_block(ctxt, funcs, then_block, expected_return_type)?;
+		let else_returns = typecheck_block(ctxt, funcs, else_block, expected_return_type)?;
+		Ok(then_returns && else_returns)
+	},
+	While(cond, body) => {
+		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
+		if cond_type != Bool {
+			return Err(format!("condition of while statement must have type bool, not {:?}", cond_type));
+		}
+		let _ = typecheck_block(ctxt, funcs, body, expected_return_type)?;
+		Ok(false)
+	}
+}
+}
+
+pub fn typecheck_block(ctxt: &mut LocalTypeContext, funcs: &FuncContext, block: &ast::Block, expected_return_type: &Option<ast::Ty>) -> Result<bool, String> {
+	let mut stmt_returns = false;
+	for stmt in block.iter(){
+		if stmt_returns {
+			return Err("definite return on statement that is not the last in a block".to_owned())
+		}
+		stmt_returns = typecheck_stmt(ctxt, funcs, stmt, expected_return_type)?;
+	}
+	Ok(stmt_returns)
 }

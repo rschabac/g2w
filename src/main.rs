@@ -61,7 +61,7 @@ mod tests{
 			("{4, null, true}", Expr::LitArr(
 				vec![Expr::LitSignedInt(4), Expr::LitNull, Expr::LitBool(true)]
 			)),
-			("array[u5]", Expr::Index(
+			("array[5u]", Expr::Index(
 				Box::new(Expr::Id("array".to_owned())),
 				Box::new(Expr::LitUnsignedInt(5))
 			)),
@@ -158,7 +158,7 @@ mod tests{
 		}
 	}
 
-#[test]
+	#[test]
 	fn parse_stmt_test(){
 		use ast::{Ty, Expr, Stmt};
 		let tests = vec![
@@ -302,19 +302,19 @@ mod tests{
 		use crate::ast::*;
 		use crate::ast::Ty::*;
 		use super::parser;
-		fn setup(expr: &str) -> Result<Ty, String>{
+		fn setup_expr(expr: &str) -> Result<Ty, String>{
 			let (mut ctxt, func_context) = get_empty_localtypecontext();
-			return setup_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context);
+			return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context);
 		}
-		fn setup_with_localtypecontext(expr: &str, ctxt: &mut LocalTypeContext) -> Result<Ty, String>{
+		fn setup_expr_with_localtypecontext(expr: &str, ctxt: &mut LocalTypeContext) -> Result<Ty, String>{
 			let (_, funcs) = get_empty_localtypecontext();
-			return setup_with_localtypecontext_and_funcs(expr, ctxt, &funcs);
+			return setup_expr_with_localtypecontext_and_funcs(expr, ctxt, &funcs);
 		}
-		fn setup_with_funcs(expr: &str, funcs: &FuncContext) -> Result<Ty, String>{
+		fn setup_expr_with_funcs(expr: &str, funcs: &FuncContext) -> Result<Ty, String>{
 			let (mut ctxt, _) = get_empty_localtypecontext();
-			return setup_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs);
+			return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs);
 		}
-		fn setup_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
+		fn setup_expr_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
 			let expr_parser = parser::ExprParser::new();
 			let expr = expr_parser.parse(expr).expect("parse error");
 			return typecheck_expr(ctxt, funcs, &expr);
@@ -322,29 +322,39 @@ mod tests{
 		#[test]
 		fn typecheck_expr_test(){
 			use std::collections::HashMap;
-			assert_eq!(setup("true").unwrap(), Bool);
-			assert_eq!(setup("38").unwrap(), Int{signed:true, size: IntSize::Size64});
-			assert_eq!(setup("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
-			assert_eq!(setup("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
+			assert_eq!(setup_expr("true").unwrap(), Bool);
+			assert_eq!(setup_expr("38").unwrap(), Int{signed:true, size: IntSize::Size64});
+			assert_eq!(setup_expr("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
+			assert_eq!(setup_expr("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			let _ = ctxt.locals.insert("x".to_owned(), Bool);
+			assert_eq!(setup_expr_with_localtypecontext("x", &mut ctxt).unwrap(), Bool);
 			let mut funcs = HashMap::new();
 			let _ = funcs.insert("f".to_owned(), FuncType::NonGeneric{
 				args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
 				return_type: Some(Struct("abc".to_owned()))
 			});
-			assert_eq!(setup_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
-			assert!(setup_with_funcs("f@<i32>(true, 5)", &funcs).is_err());
-			assert!(setup("cast(u8*, 5)").is_err());
-			assert!(setup("f()").is_err());
-			assert_eq!(setup("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
-			assert_eq!(setup("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
-			assert_eq!(setup("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
-			assert_eq!(setup("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
-			assert!(setup("&true").is_err());
-			assert_eq!(setup("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
-			assert_eq!(setup("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
-			assert!(setup("3.0 + 4").is_err());
-			assert_eq!(setup("3 & cast(i32, 1)").unwrap(), Int{signed: true, size: IntSize::Size64});
-			assert!(setup("true % 3.4").is_err());
+			assert_eq!(setup_expr_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+			let mut funcs = HashMap::new();
+			let _ = funcs.insert("f".to_owned(), FuncType::Generic{
+				args: vec![Bool, TypeVar("T".to_owned())],
+				mode: PolymorphMode::Erased,
+				type_var: "T".to_owned(),
+				return_type: Some(Struct("abc".to_owned()))
+			});
+			assert_eq!(setup_expr_with_funcs("f@<i64>(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+			assert!(setup_expr("cast(u8*, 5)").is_err());
+			assert!(setup_expr("f()").is_err());
+			assert_eq!(setup_expr("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
+			assert_eq!(setup_expr("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
+			assert_eq!(setup_expr("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
+			assert_eq!(setup_expr("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
+			assert!(setup_expr("&true").is_err());
+			assert_eq!(setup_expr("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert_eq!(setup_expr("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert!(setup_expr("3.0 + 4").is_err());
+			assert_eq!(setup_expr("3 & cast(i32, 1)").unwrap(), Int{signed: true, size: IntSize::Size64});
+			assert!(setup_expr("true % 3.4").is_err());
 			let mut funcs = HashMap::new();
 			let _ = funcs.insert("f".to_owned(), FuncType::Generic{
 				args: vec![TypeVar("T".to_owned()), Int{signed: true, size: IntSize::Size64}],
@@ -352,10 +362,62 @@ mod tests{
 				type_var: "T".to_owned(),
 				return_type: Some(Struct("abc".to_owned()))
 			});
-			assert_eq!(setup_with_funcs("f@<bool>(5 == 5, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
-			assert!(setup_with_funcs("f(true, 5)", &funcs).is_err());
-			assert_eq!(setup("printf(true, 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
-			assert!(setup("fprintf(3, 5 + 5u)").is_err());
+			assert_eq!(setup_expr_with_funcs("f@<bool>(5 == 5, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+			assert!(setup_expr_with_funcs("f(true, 5)", &funcs).is_err());
+			assert_eq!(setup_expr("printf(true, 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
+			assert!(setup_expr("fprintf(3, 5 + 5u)").is_err());
+		}
+		fn setup_stmt(stmt: &str, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+			let (mut ctxt, func_context) = get_empty_localtypecontext();
+			return setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, &func_context, expected_ret_ty);
+		}
+		fn setup_stmt_with_localtypecontext(stmt: &str, ctxt: &mut LocalTypeContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+			let (_, funcs) = get_empty_localtypecontext();
+			return setup_stmt_with_localtypecontext_and_funcs(stmt, ctxt, &funcs, expected_ret_ty);
+		}
+		fn setup_stmt_with_funcs(stmt: &str, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			return setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, funcs, expected_ret_ty);
+		}
+		fn setup_stmt_with_localtypecontext_and_funcs(stmt: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+			let stmt_parser = parser::StmtParser::new();
+			let stmt = stmt_parser.parse(stmt).expect("parse error");
+			return typecheck_stmt(ctxt, funcs, &stmt, &expected_ret_ty);
+		}
+		#[test]
+		fn typecheck_stmt_test(){
+			use std::collections::HashMap;
+			assert_eq!(setup_stmt("u8 x;", None).unwrap(), false);
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			let _ = ctxt.locals.insert("x".to_owned(), Bool);
+			assert_eq!(setup_stmt_with_localtypecontext("x = true;", &mut ctxt, None).unwrap(), false);
+			assert!(setup_stmt_with_localtypecontext("bool x;", &mut ctxt, None).is_err());
+			assert_eq!(setup_stmt("return;", None).unwrap(), true);
+			assert_eq!(setup_stmt("return 3.0;", Some(Float(FloatSize::FSize64))).unwrap(), true);
+			assert!(setup_stmt("return;", Some(Bool)).is_err());
+			assert!(setup_stmt("return 3;", None).is_err());
+			assert!(setup_stmt("return 3;", Some(Bool)).is_err());
+			let mut funcs = HashMap::new();
+			let _ = funcs.insert("f".to_owned(), FuncType::NonGeneric{
+				args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
+				return_type: Some(Struct("abc".to_owned()))
+			});
+			assert_eq!(setup_stmt_with_funcs("f(true, 7);", &funcs, None).unwrap(), false);
+			let mut funcs = HashMap::new();
+			let _ = funcs.insert("f".to_owned(), FuncType::Generic{
+				args: vec![Bool, TypeVar("T".to_owned())],
+				mode: PolymorphMode::Erased,
+				type_var: "T".to_owned(),
+				return_type: Some(Struct("abc".to_owned()))
+			});
+			assert_eq!(setup_stmt_with_funcs("f@<i64>(true, 5);", &funcs, None).unwrap(), false);
+			assert_eq!(setup_stmt("if true {return true;} else {return false;}", Some(Bool)).unwrap(), true);
+			assert_eq!(setup_stmt("if true {return true;}", Some(Bool)).unwrap(), false);
+			assert!(setup_stmt("if 3 {return true;}", Some(Bool)).is_err());
+			assert!(setup_stmt("if true {x = 4;}", None).is_err());
+			assert_eq!(setup_stmt("while true {return;}", None).unwrap(), false);
+			assert_eq!(setup_stmt("while true {}", None).unwrap(), false);
+			assert!(setup_stmt("while 3 {}", None).is_err());
 		}
 	}
 }
