@@ -1,5 +1,5 @@
 use crate::ast;
-use std::collections::{HashMap};
+use std::collections::{HashMap, HashSet};
 
 /*
 pub struct FuncType{
@@ -36,27 +36,6 @@ pub struct LocalTypeContext{
 
 }
 
-pub struct TypeContext{
-	locals: LocalContext,
-	globals: GlobalContext,
-	structs: StructContext,
-	funcs: FuncContext,
-	type_var: Option<(String, ast::PolymorphMode)>,
-	//TODO: one typechecking is done, find out when to set this
-	type_for_lit_nulls: Option<ast::Ty>,
-}
-
-pub fn get_empty_typecontext() -> TypeContext{
-	TypeContext{
-		locals: HashMap::new(),
-		globals: HashMap::new(),
-		structs: HashMap::new(),
-		funcs: HashMap::new(),
-		type_var: None,
-		type_for_lit_nulls: None
-	}
-}
-
 pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
 	(LocalTypeContext{
 		locals: HashMap::new(),
@@ -73,6 +52,48 @@ fn decay_type(t: ast::Ty) -> ast::Ty {
 		ast::Ty::Array{typ, ..} => ast::Ty::Ptr(Some(typ)),
 		t => t
 	}
+}
+
+fn all_struct_names_valid_set(t: &ast::Ty, structs: &HashSet<String>, generic_structs: &HashSet<String>) -> Result<(), String> {
+	use ast::Ty::*;
+	match t {
+	Struct(s) => if structs.contains(s) { Ok(()) } else
+		{ Err(format!("struct {} does not exist, or is generic", s)) },
+	GenericStruct{name, ..} => if generic_structs.contains(name) { Ok(()) } else
+		{ Err(format!("struct {} does not exist, or is not generic", name)) },
+	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid_set(t, structs, generic_structs),
+	_ => Ok(())
+}}
+
+fn all_struct_names_valid_map<T, G>(t: &ast::Ty, structs: &HashMap<String, T>, generic_structs: &HashMap<String, G>) -> Result<(), String> {
+	use ast::Ty::*;
+	match t {
+	Struct(s) => if structs.contains_key(s) {Ok(())} else
+		{Err(format!("struct {} does not exist, or is generic", s))},
+	GenericStruct{name, ..} => if generic_structs.contains_key(name) {Ok(())} else
+		{Err(format!("struct {} does not exist, or is not generic", name))},
+	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid_map(t, structs, generic_structs),
+	_ => Ok(())
+}}
+
+fn get_builtins() -> FuncContext {
+	//printf functions do not go here, they are handled specially
+	use ast::Ty::*;
+	let mut result = HashMap::new();
+	result.insert("malloc".to_owned(), FuncType::NonGeneric{
+		return_type: Some(Ptr(None)),
+		args: vec![
+			Int{signed: false, size: ast::IntSize::Size64}
+		]
+	});
+	result.insert("free".to_owned(), FuncType::NonGeneric{
+		return_type: None,
+		args: vec![
+			Ptr(None)
+		]
+	});
+	return result;
+
 }
 
 //when typechecking a function call, it the function is one of these, the
@@ -507,4 +528,120 @@ pub fn typecheck_block(ctxt: &mut LocalTypeContext, funcs: &FuncContext, block: 
 		stmt_returns = typecheck_stmt(ctxt, funcs, stmt, expected_return_type)?;
 	}
 	Ok(stmt_returns)
+}
+
+pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, name: String, args: &Vec<(ast::Ty, String)>, body: &ast::Block, ret_type: &Option<ast::Ty>) -> Result<(), String>{
+	/*
+	create a LocalTypeContext
+	add all args to it as locals
+	if ret_type is not None, make sure body definitely returns
+	*/
+	for (arg_ty, arg_name) in args.iter().cloned() {
+		ctxt.locals.insert(arg_name, arg_ty);
+	}
+	let last_statement_definitely_returns = typecheck_block(ctxt, funcs, body, ret_type)?;
+	if ret_type.is_some() && !last_statement_definitely_returns {
+		return Err(format!("function '{}' might not return ", name));
+	}
+	Ok(())
+	
+}
+
+pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
+	/*
+	create StructContext:
+		collect names of all structs, put all of them into struct_context
+			make sure a struct with this name does not already exist
+		for each struct in struct_context:
+			make sure there are no duplicate field
+			make sure each field has a valid type
+	create FuncContext:
+	create GlobalContext:
+		add builtins to a FuncContext
+		for each GFuncDecl (or GGenericFuncDecl, later):
+			make sure a function or global var with this name does not already exist
+			make sure the type signature of the function contains valid types
+			make sure the there are no duplicates in the names of the arguments
+			put it in the FuncContext
+		for each GVarDecl:
+			make sure there are no functions or other vars with this name
+			put them all in a GlobalContext
+	typecheck all functions with typecheck_func_decl (or typecheck_generic_func_decl, later)
+	*/
+	let mut struct_context: StructContext = HashMap::new();
+	for g in gdecls.iter().by_ref(){ match g {
+		GStructDecl{name, fields} => {
+			if struct_context.contains_key(name){
+				return Err(format!("struct '{}' is declared more than once", name));
+			}
+			struct_context.insert(name.clone(), fields.iter().cloned().map(|(t, n)| {(n, t)}).collect());
+		},
+		GGenericFuncDecl{..} | GGenericStructDecl{..} => panic!("not supporting generics yet"),
+		_ => ()
+	}}
+	//struct_context has been populated, now need to check for duplicate and invalid fields
+	for (name, fields) in struct_context.iter(){
+		let mut seen_fields: HashSet<&str> = HashSet::new();
+		for (field_name, field_type) in fields.iter(){
+			if seen_fields.contains(field_name.as_str()){
+				return Err(format!("struct {} contains two fields named {}", name, field_name));
+			}
+			let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+			all_struct_names_valid_map(field_type, &struct_context, &temporary_generic_structs)?;
+			seen_fields.insert(field_name.as_str());
+		}
+	}
+
+	let mut func_context: FuncContext = get_builtins();
+	let mut global_context: GlobalContext = HashMap::new();
+	global_context.insert("errno".to_owned(), ast::Ty::Int{signed: true, size: ast::IntSize::Size32});
+	//TODO: figure out how builtins should be structured based on how other functions are added to func_context
+	use ast::Gdecl::*;
+	for g in gdecls.iter().by_ref(){ match g {
+		GFuncDecl{ret_type, name: func_name, args, ..} => {
+			if func_context.contains_key(func_name) {
+				return Err(format!("function '{}' is declared more than once", func_name));
+				//make sure generic funcs do not have any names in common with non-generic funcs
+			}
+			if global_context.contains_key(func_name) {
+				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
+			}
+			if let Some(ret) = ret_type{
+				let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+				all_struct_names_valid_map(&ret, &struct_context, &temporary_generic_structs)?;
+			}
+			let mut names: HashSet<String>  = HashSet::new();
+			for (arg_type, arg_name) in args.iter().by_ref(){
+				if names.contains(arg_name){
+					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
+				}
+				names.insert(arg_name.clone());
+				let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+				all_struct_names_valid_map(&arg_type, &struct_context, &temporary_generic_structs)?;
+			}
+			func_context.insert(func_name.clone(), FuncType::NonGeneric{
+				return_type: ret_type.clone(),
+				args: args.iter().cloned().map(|(t, _)| t).collect()
+			});
+		},
+		//need to make sure there are no name collisions between global vars and functions
+		GVarDecl(t, name) => {
+			if global_context.contains_key(name) {
+				return Err(format!("cannot have two global variables both named '{}'", name));
+			}
+			if func_context.contains_key(name) {
+				return Err(format!("cannot declare global variable '{}', a function is already declared with that name", name));
+			}
+			global_context.insert(name.clone(), t.clone());
+		},
+		_ => ()
+	}};
+	for g in gdecls.iter().by_ref(){ match g {
+		GFuncDecl{ret_type, name, args, body} => {
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
+		},
+		_ => ()
+	}};
+	Ok(())
 }

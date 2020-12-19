@@ -422,11 +422,12 @@ mod tests{
 	}
 }
 
-fn main(){
+fn main() -> Result<(), String>{
 	use std::env::args;
-	let expr_parser = parser::ExprParser::new();
-	let test_str = &args().collect::<Vec<String>>()[1];
-	let parse_result = expr_parser.parse(test_str);
-	let (mut empty_localtypecontext, func_context) = typechecker::get_empty_localtypecontext();
-	println!("type of '{}' = {:?}", test_str, typechecker::typecheck_expr(&mut empty_localtypecontext, &func_context, &parse_result.unwrap()));
+	use std::fs::read_to_string;
+	let program_parser = parser::ProgramParser::new();
+	let filename = &args().collect::<Vec<String>>()[1];
+	let program_source = read_to_string(filename).map_err(|e| format!("io error: {}", e.to_string()))?;
+	let ast = program_parser.parse(program_source.as_str()).unwrap();
+	typechecker::typecheck_program(ast)
 }
