@@ -1,0 +1,11 @@
+u8* get_str(u64 len){
+	u8* result;
+	result = cast(u8*, malloc(len));
+	u8* tail;
+	tail = result + 1;
+	tail = 1 + result;
+	if result != tail - 1 {
+		return null;
+	}
+	return result;
+}

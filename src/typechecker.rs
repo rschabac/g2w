@@ -107,8 +107,9 @@ use ast::Expr::*;
 use ast::IntSize::*;
 match e {
 	LitNull => match &mut ctxt.type_for_lit_nulls {
-		Some(t) => Ok(t.clone()),
-		None => panic!("no type for this null")
+		Some(t @ Ptr(_)) => Ok(t.clone()),
+		Some(t) => Err(format!("Cannot make null literal have type {:?}", t)),
+		None => Err("Cannot infer type of null literal".to_owned())
 	},
 	LitBool(_) => Ok(Bool),
 	LitSignedInt(_) => Ok(Int{signed: true, size: Size64}),
@@ -128,6 +129,12 @@ match e {
 			return Ok(Array{length: 0, typ: Box::new(Int{signed:true, size:Size64})})
 		}
 		let first_type = typecheck_expr(ctxt, funcs, &init[0])?;
+		match first_type {
+			Ptr(_) => {
+				ctxt.type_for_lit_nulls = Some(first_type.clone());
+			},
+			_ => ()
+		};
 		for (index, init_expr) in init[1..].iter().enumerate() {
 			let typ = typecheck_expr(ctxt, funcs, init_expr)?;
 			if first_type.ne(&typ) {
@@ -143,17 +150,16 @@ match e {
 			Ptr(None) => Err(format!("Can't index off of a void*")),
 			_ => Err(format!("{:?} is not an array or pointer", base_typ))
 		};
-		if result_type.is_err() {
-			return result_type;
-		}
+		let result_type = result_type?;
 		let index_typ = typecheck_expr(ctxt, funcs, index)?;
 		match index_typ {
-			Int{..} => Ok(result_type.unwrap()),
+			Int{..} => Ok(result_type),
 			_ => Err(format!("Array indices must be integers, not {:?}", index_typ))
 		}
 	},
 	Proj(base, field) => {
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
+		use std::borrow::Borrow;
 		match base_typ {
 			Struct(struct_name) => match ctxt.structs.get(&struct_name) {
 				None => Err(format!("could not find struct named '{}'", struct_name)),
@@ -166,14 +172,31 @@ match e {
 					return Err(format!("struct {} does not have a {} field", struct_name, field));
 				}
 			},
+			Ptr(Some(ref boxed)) => match boxed.borrow() {
+				Struct(struct_name) => match ctxt.structs.get(struct_name) {
+					None => Err(format!("could not find struct named '{}'", struct_name)),
+					Some(field_list) => {
+						for (field_name, typ) in field_list.iter() {
+							if field.eq(field_name) {
+								return Ok(typ.clone());
+							}
+						}
+						return Err(format!("struct {} does not have a {} field", struct_name, field));
+					}
+				},
+				GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
+				_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
+			},
 			GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
-			_ => Err(format!("{:?} is not a struct, project off of it", base_typ))
+			_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
 		}
 	},
 	Call(func_name, args) => {
 		use FuncType::*;
 		if PRINTF_FAMILY.contains(&func_name.as_str()){
 			for arg in args.iter(){
+				//nulls should be allowed in printf arguments, but it really doesn't matter what their type is
+				ctxt.type_for_lit_nulls = Some(Ptr(None));
 				let _ = typecheck_expr(ctxt, funcs, arg)?;
 			}
 			return Ok(Int{signed: true, size: ast::IntSize::Size32});
@@ -199,8 +222,8 @@ match e {
 			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
 		}
 		for (index, (given_type, correct_type)) in args.iter()
-				.map(|arg| typecheck_expr(ctxt, funcs, arg))
 				.zip(arg_type_list.iter())
+				.map(|(arg, expected_type)| {ctxt.type_for_lit_nulls = Some(expected_type.clone()); (typecheck_expr(ctxt, funcs, arg), expected_type)})
 				.enumerate(){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
@@ -249,19 +272,24 @@ match e {
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
 		for (index, (given_type, correct_type)) in args.iter()
-				.map(|arg| typecheck_expr(ctxt, funcs, arg))
 				.zip(arg_type_list.iter())
+				.map(|(arg, expected_type)| {
+					let correct_type: &ast::Ty = match expected_type {
+						TypeVar(s) => if s == type_var_string {
+								&type_var
+							} else {
+								panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+								This should have been detected when typechecking the function's declaration.")
+							},
+						t => &t
+					};
+					ctxt.type_for_lit_nulls = Some(correct_type.clone());
+					(typecheck_expr(ctxt, funcs, arg), correct_type)
+				})
 				.enumerate(){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
-			let correct_type: &ast::Ty = match correct_type {
-				TypeVar(s) => if s == type_var_string {&type_var} else {
-					panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-					This should have been detected when typechecking the function's declaration.")
-				},
-				t => &t
-			};
 			if given_type.ne(correct_type) {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
@@ -271,6 +299,7 @@ match e {
 	Cast(dest_type, source) => {
 		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
 		all_struct_names_valid_map(&dest_type, &ctxt.structs, &temporary_generic_structs)?;
+		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
 		let original_type = decay_type(original_type);
@@ -287,11 +316,13 @@ match e {
 	},
 	Binop(left, bop, right) => {
 		use ast::BinaryOp::*;
+		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let left_type = typecheck_expr(ctxt, funcs, left)?;
+		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let right_type = typecheck_expr(ctxt, funcs, right)?;
 		match bop {
 			Add | Sub => match (left_type, right_type) {
-				(original @ Ptr(_), Int{..}) => Ok(original),
+				(original @ Ptr(_), Int{..}) | (Int{..}, original @ Ptr(_)) => Ok(original),
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
 				(Int{..}, Int{..}) => Err("Cannot add/sub integers with different signedness".to_owned()),
 				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
@@ -330,7 +361,10 @@ match e {
 			}
 		}
 	},
-	Unop(op, e) => {use ast::UnaryOp::*; match op {
+	Unop(op, e) => {
+		use ast::UnaryOp::*;
+		ctxt.type_for_lit_nulls = Some(Ptr(None));
+		match op {
 		Neg => match typecheck_expr(ctxt, funcs, e)? {
 			original @ Int{signed: true, ..} 
 		  | original @ Float(_) => Ok(original),
@@ -351,12 +385,14 @@ match e {
 	}},
 	GetRef(e) => {
 		let e_type = typecheck_expr(ctxt, funcs, e)?;
+		//don't need to set type_for_lit_nulls here because it will already be an error anyway
 		match **e {
 			Id(_) | Proj(_,_) | Index(_,_) | Deref(_) => Ok(Ptr(Some(Box::new(e_type)))),
 			_ => Err(format!("Cannot get address of {:?}", e))
 		}
 	},
 	Deref(e) => {
+		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let e_type = typecheck_expr(ctxt, funcs, e)?;
 		match e_type {
 			Ptr(Some(t)) | Array{typ: t, ..} => Ok(*t.clone()),
@@ -624,7 +660,6 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			seen_fields.insert(field_name.as_str());
 		}
 	}
-	//TODO: check for recursive structs
 	check_for_recursive_types(&struct_context)?;
 
 	let mut func_context: FuncContext = get_builtins();
