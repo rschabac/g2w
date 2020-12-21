@@ -1,0 +1,6 @@
+i64 f(){
+	return 4;
+	i64 x;
+	x = 5;
+	return x;
+}

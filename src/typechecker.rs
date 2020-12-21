@@ -1,12 +1,6 @@
 use crate::ast;
 use std::collections::{HashMap, HashSet};
 
-/*
-pub struct FuncType{
-	pub args: Vec<ast::Ty>,
-	pub return_type: Option<ast::Ty>
-}
-*/
 pub enum FuncType{
 	NonGeneric{return_type: Option<ast::Ty>, args: Vec<ast::Ty>},
 	Generic{return_type: Option<ast::Ty>, mode: ast::PolymorphMode, type_var: String, args: Vec<ast::Ty>}
@@ -219,6 +213,8 @@ match e {
 	},
 	GenericCall{name: func_name, type_var, args} => {
 		use FuncType::*;
+		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+		all_struct_names_valid_map(&type_var, &ctxt.structs, &temporary_generic_structs)?;
 		let return_type;
 		let arg_type_list;
 		//TODO: once the rules for interop between erased/separated structs/functions are established,
@@ -273,6 +269,8 @@ match e {
 		Ok(return_type)
 	},
 	Cast(dest_type, source) => {
+		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+		all_struct_names_valid_map(&dest_type, &ctxt.structs, &temporary_generic_structs)?;
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
 		let original_type = decay_type(original_type);
@@ -365,7 +363,11 @@ match e {
 			_ => Err(format!("Cannot dereference type {:?}", e_type))
 		}
 	},
-	Sizeof(_) => Ok(Int{signed:false, size: Size64})
+	Sizeof(t) => {
+		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+		all_struct_names_valid_map(&t, &ctxt.structs, &temporary_generic_structs)?;
+		Ok(Int{signed:false, size: Size64})
+	}
 }
 }
 
@@ -389,8 +391,8 @@ match s {
 		}
 	},
 	Decl(typ, name) => {
-		//TODO: whenever the ast contains a Ty, check if it is a Struct or GenericStruct,
-		//if it is, make sure it is in ctxt.structs (and probably ctxt.generic_structs, which doesn't exist yet)
+		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+		all_struct_names_valid_map(&typ, &ctxt.structs, &temporary_generic_structs)?;
 		if ctxt.locals.contains_key(name){
 			Err(format!("redeclaration of local var {}", name))
 		} else {
@@ -451,6 +453,8 @@ match s {
 	},
 	GenericSCall{name: func_name, type_var, args} => {
 		use FuncType::*;
+		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+		all_struct_names_valid_map(&type_var, &ctxt.structs, &temporary_generic_structs)?;
 		let arg_type_list;
 		//TODO: once the rules for interop between erased/separated structs/functions are established,
 		//use this and the mod field in LocalTypeContext to check these rules
@@ -547,6 +551,35 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	
 }
 
+fn check_for_recursive_types(struct_context: &StructContext) -> Result<(), String> {
+	let mut seen_names: HashSet<&str> = HashSet::with_capacity(struct_context.len());
+	use std::collections::VecDeque;
+	let mut queue: VecDeque<&str> = VecDeque::with_capacity(struct_context.len());
+	for name in struct_context.keys().map(|s| s.as_str()){
+		if seen_names.contains(name) { continue }
+		queue.push_back(name);
+		while !queue.is_empty() {
+			let current: &str = queue.pop_front().unwrap();
+			if seen_names.contains(current) {
+				return Err(format!("struct '{}' is recursive", name));
+			}
+			seen_names.insert(current);
+			for field_type in struct_context.get(current)
+					.expect("why is this not in the struct context?")
+					.iter()
+					.map(|(_, t)| t){
+				match field_type {
+					ast::Ty::Struct(s) => {
+						queue.push_back(s.as_str());
+					},
+					_ => ()
+				}
+			}
+		}
+	};
+	Ok(())
+}
+
 pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 	/*
 	create StructContext:
@@ -591,11 +624,12 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			seen_fields.insert(field_name.as_str());
 		}
 	}
+	//TODO: check for recursive structs
+	check_for_recursive_types(&struct_context)?;
 
 	let mut func_context: FuncContext = get_builtins();
 	let mut global_context: GlobalContext = HashMap::new();
 	global_context.insert("errno".to_owned(), ast::Ty::Int{signed: true, size: ast::IntSize::Size32});
-	//TODO: figure out how builtins should be structured based on how other functions are added to func_context
 	use ast::Gdecl::*;
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name: func_name, args, ..} => {
@@ -626,6 +660,8 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 		},
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
+			let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
+			all_struct_names_valid_map(&t, &struct_context, &temporary_generic_structs)?;
 			if global_context.contains_key(name) {
 				return Err(format!("cannot have two global variables both named '{}'", name));
 			}

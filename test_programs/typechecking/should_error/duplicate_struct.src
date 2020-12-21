@@ -1,0 +1,6 @@
+struct A{
+	bool a;
+}
+struct A{
+	bool a;
+}

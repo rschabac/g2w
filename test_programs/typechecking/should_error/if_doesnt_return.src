@@ -1,0 +1,8 @@
+bool f(){
+	if true {
+		return false;
+	} else {
+		i64 x;
+		x = 5;
+	}
+}

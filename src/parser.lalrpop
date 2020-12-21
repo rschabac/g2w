@@ -24,7 +24,7 @@ Comma<T>: Vec<T> = {
 
 //identifiers (variables, struct names, and type vars) cannot start with an underscore
 Identifier: String = {
-	<s:r#"[a-zA-Z][a-zA-Z_]*"#> => s.to_owned()
+	<s:r#"[a-zA-Z][0-9a-zA-Z_]*"#> => s.to_owned()
 }
 
 

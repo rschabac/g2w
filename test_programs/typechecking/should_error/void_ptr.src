@@ -1,0 +1,5 @@
+void f(){
+	void *arr;
+	arr = malloc(sizeof(i64) * 8u);
+	printf("%d", *arr);
+}

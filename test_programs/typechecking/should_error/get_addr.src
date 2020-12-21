@@ -1,0 +1,5 @@
+bool f(){
+	u64* x;
+	x = &sizeof(i32);
+	return x;
+}

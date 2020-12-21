@@ -1,0 +1,5 @@
+i64 f(){
+	while(true){
+		return 3;
+	}
+}

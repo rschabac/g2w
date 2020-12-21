@@ -1,0 +1,7 @@
+struct S{
+	i32 x;
+}
+void f(){
+	struct S s;
+	printf("%d", s.y);
+}

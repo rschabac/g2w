@@ -1,0 +1,8 @@
+void print(){
+
+}
+i32 f(){
+	i32 x;
+	x = print();
+	return x;
+}

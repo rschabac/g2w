@@ -1,0 +1,7 @@
+i32 f(){
+	bool x;
+	x = true;
+	bool x;
+	x = false;
+	return cast(i32, 4);
+}

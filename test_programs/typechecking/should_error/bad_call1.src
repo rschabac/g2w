@@ -1,0 +1,7 @@
+bool and3(bool a, bool b, bool c){
+	return a && b && c;
+}
+
+bool f(){
+	return and3(true, false);
+}
