@@ -22,12 +22,12 @@ fn parse_type_test(){
 		match type_parser.parse(test_str) {
 			Ok(parse_result) => {
 				if parse_result != expected_parse {
-					println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
+					println!("Parse mistake: {:?} parses as {}, not {}", test_str, parse_result, expected_parse);
 					all_succeeded = false;
 				}
 			},
 			Err(error) => {
-				println!("Parse error on {:?}: {:?}", test_str, error);
+				println!("Parse error on {:?}: {}", test_str, error);
 				all_succeeded = false;
 			}
 		}
@@ -139,7 +139,7 @@ fn parse_expr_test(){
 				}
 			},
 			Err(error) => {
-				println!("Parse error on {:?}: {:?}", test_str, error);
+				println!("Parse error on {:?}: {}", test_str, error);
 				all_succeeded = false;
 			}
 		}
@@ -213,7 +213,7 @@ fn parse_stmt_test(){
 				}
 			},
 			Err(error) => {
-				println!("Parse error on {:?}: {:?}", test_str, error);
+				println!("Parse error on {:?}: {}", test_str, error);
 				all_succeeded = false;
 			}
 		}
@@ -278,7 +278,7 @@ fn parse_gdecl_test(){
 				}
 			},
 			Err(error) => {
-				println!("Parse error on {:?}: {:?}", test_str, error);
+				println!("Parse error on {:?}: {}", test_str, error);
 				all_succeeded = false;
 			}
 		}
@@ -414,13 +414,20 @@ mod typechecking_tests {
 	fn typecheck_files_test(){
 		use std::fs;
 		let program_parser = parser::ProgramParser::new();
-		for entry in fs::read_dir("test_programs/typechecking/should_error").unwrap(){
-			let entry = entry.unwrap();
-			let path = entry.path();
-			let path: &str = path.as_path().to_str().unwrap();
-			let program_source = fs::read_to_string(path).map_err(|e| format!("io error on {}: {}", path, e.to_string())).unwrap();
+		for path in fs::read_dir("test_programs/typechecking/should_error").unwrap()
+				.filter_map(|entry| {
+					//gets only the filenames that end in .src
+					let path_buf = entry.unwrap().path();
+					let path = path_buf.as_path().to_str().unwrap();
+					if path.ends_with(".src") {
+						Some(path.to_owned())
+					} else {
+						None
+					}
+				}){
+			let program_source = fs::read_to_string(&path).map_err(|e| format!("io error on {}: {}", path, e.to_string())).unwrap();
 			let ast = program_parser.parse(program_source.as_str()).map_err(|e| format!("parse error on {}: {}", path, e.to_string())).unwrap();
-			assert!(typecheck_program(ast).is_err(), "{} did not crate a type error", path);
+			assert!(typecheck_program(ast).is_err(), "{} did not create a type error", path);
 		}
 	}
 }
