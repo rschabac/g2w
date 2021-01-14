@@ -3,6 +3,8 @@ extern crate lalrpop_util;
 mod ast;
 mod typechecker;
 
+//This seems to prevent clippy from checking the generated parser file
+#[allow(clippy::all)]
 lalrpop_mod!(pub parser); //synthesized by LALRPOP
 
 #[cfg(test)]

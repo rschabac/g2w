@@ -127,12 +127,9 @@ match e {
 			return Ok(Array{length: 0, typ: Box::new(Int{signed:true, size:Size64})})
 		}
 		let first_type = typecheck_expr(ctxt, funcs, &init[0])?;
-		match first_type {
-			Ptr(_) => {
-				ctxt.type_for_lit_nulls = Some(first_type.clone());
-			},
-			_ => ()
-		};
+		if let Ptr(_) = first_type {
+			ctxt.type_for_lit_nulls = Some(first_type.clone());
+		}
 		for (index, init_expr) in init[1..].iter().enumerate() {
 			let typ = typecheck_expr(ctxt, funcs, init_expr)?;
 			if first_type.ne(&typ) {
@@ -145,7 +142,7 @@ match e {
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
 		let result_type = match base_typ {
 			Ptr(Some(typ)) | Array{typ, ..} => Ok(*typ),
-			Ptr(None) => Err(format!("Can't index off of a void*")),
+			Ptr(None) => Err("Can't index off of a void*".to_owned()),
 			_ => Err(format!("{:?} is not an array or pointer", base_typ))
 		};
 		let result_type = result_type?;
@@ -273,22 +270,22 @@ match e {
 		the monomorphed version of name would look like:
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
-		for (index, (given_type, correct_type)) in args.iter()
-				.zip(arg_type_list.iter())
-				.map(|(arg, expected_type)| {
+		for (index, (given_type, correct_type)) in args.iter() //Expr
+				.zip(arg_type_list.iter()) //(Expr, Ty)
+				.enumerate() //(usize, (Expr, Ty))
+				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
 					let correct_type: &ast::Ty = match expected_type {
-						TypeVar(s) => if s == type_var_string {
-								&type_var
-							} else {
-								panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-								This should have been detected when typechecking the function's declaration.")
-							},
+						TypeVar(s) => {
+							assert!(s == type_var_string, "argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+							This should have been detected when typechecking the function's declaration.",
+							index, func_name, s);
+							&type_var
+						},
 						t => &t
 					};
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
-					(typecheck_expr(ctxt, funcs, arg), correct_type)
-				})
-				.enumerate(){
+					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
+				}){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
@@ -399,7 +396,7 @@ match e {
 		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let e_type = typecheck_expr(ctxt, funcs, e)?;
 		match e_type {
-			Ptr(Some(t)) | Array{typ: t, ..} => Ok(*t.clone()),
+			Ptr(Some(t)) | Array{typ: t, ..} => Ok(*t),
 			_ => Err(format!("Cannot dereference type {:?}", e_type))
 		}
 	},
@@ -532,22 +529,22 @@ match s {
 		the monomorphed version of name would look like:
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
-		for (index, (given_type, correct_type)) in args.iter()
-				.zip(arg_type_list.iter())
-				.map(|(arg, expected_type)| {
+		for (index, (given_type, correct_type)) in args.iter() //Expr
+				.zip(arg_type_list.iter()) //(Expr, Ty)
+				.enumerate() //(usize, (Expr, Ty))
+				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
 					let correct_type: &ast::Ty = match expected_type {
-						TypeVar(s) => if s == type_var_string {
-								&type_var
-							} else {
-								panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-								This should have been detected when typechecking the function's declaration.")
-							},
+						TypeVar(s) => {
+							assert!(s == type_var_string, "argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+							This should have been detected when typechecking the function's declaration.",
+							index, func_name, s);
+							&type_var
+						},
 						t => &t
 					};
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
-					(typecheck_expr(ctxt, funcs, arg), correct_type)
-				})
-				.enumerate(){
+					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
+				}){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
@@ -951,5 +948,30 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 		}
 		_ => ()
 	}};
+
+	//make sure main has the right type signature
+	match func_context.get("main") {
+		Some(FuncType::Generic{..}) => return Err("main() cannot be a generic function".to_owned()),
+		None => return Err("main() must have type i32 main(i32, u8*)".to_owned()),
+		Some(FuncType::NonGeneric{return_type, args}) => {
+			let return_type_is_correct = return_type == &Some(ast::Ty::Int{
+				signed: true, size: ast::IntSize::Size32
+			});
+			let args_are_correct =
+				args.len() == 2
+				&& args[0] == ast::Ty::Int{
+					signed: true, size: ast::IntSize::Size32
+				}
+				&& args[1] == ast::Ty::Ptr(Some(Box::new(
+					ast::Ty::Int{
+						signed: false, size: ast::IntSize::Size8
+					}
+				)))
+			;
+			if !return_type_is_correct || !args_are_correct {
+				return Err("main() must have type i32 main(i32, u8*)".to_owned());
+			}
+		}
+	}
 	Ok(())
 }
