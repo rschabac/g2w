@@ -1,4 +1,4 @@
-#[derive(Debug, PartialEq, Clone, PartialOrd)]
+#[derive(Debug, PartialEq, Clone, PartialOrd, Copy, Eq, Hash)]
 pub enum IntSize{
 	Size8,
 	Size16,
@@ -19,7 +19,7 @@ impl std::fmt::Display for IntSize {
 	}
 }
 
-#[derive(Debug, PartialEq, Clone, PartialOrd)]
+#[derive(Debug, PartialEq, Clone, PartialOrd, Copy, Eq, Hash)]
 pub enum FloatSize{
 	FSize32,
 	FSize64
@@ -36,7 +36,7 @@ impl std::fmt::Display for FloatSize {
 	}
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum Ty{
 	Bool,
 	Int{signed: bool, size: IntSize},
@@ -65,12 +65,12 @@ impl std::fmt::Display for Ty {
 	}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum UnaryOp{
 	Neg, Lognot, Bitnot
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOp{
 	Add, Sub, Mul, Div, Mod,
 	Equ, Neq,
@@ -119,7 +119,7 @@ pub enum Stmt{
 
 pub type Block = Vec<Stmt>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PolymorphMode{
 	Separated,
 	Erased

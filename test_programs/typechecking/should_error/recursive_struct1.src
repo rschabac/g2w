@@ -1,0 +1,3 @@
+struct A@<separated 'a>{
+	struct A@<struct A@<'a> > x;
+}

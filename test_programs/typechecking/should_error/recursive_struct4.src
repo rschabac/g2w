@@ -1,0 +1,11 @@
+struct A@<separated 'a> {
+	struct B@<'a *> x;
+}
+
+struct B@<separated 'b> {
+	struct B@<'b *> x;
+}
+
+struct C@<separated 'c> {
+	struct A@<'c *> x;
+}

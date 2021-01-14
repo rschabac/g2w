@@ -5,13 +5,15 @@ pub enum FuncType{
 	NonGeneric{return_type: Option<ast::Ty>, args: Vec<ast::Ty>},
 	Generic{return_type: Option<ast::Ty>, mode: ast::PolymorphMode, type_var: String, args: Vec<ast::Ty>}
 }
+pub enum StructType{
+	NonGeneric(Vec<(String, ast::Ty)>),
+	Generic{mode: ast::PolymorphMode, type_var: String, fields: Vec<(String, ast::Ty)>}
+}
 
 type LocalContext = HashMap<String, ast::Ty>;
 type GlobalContext = HashMap<String, ast::Ty>;
-type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
-//TODO: complete type checker for regular structs, then see how StructContext is used,
-//use this to figure out what GenericStructContext and GenericFuncContext should be
-//type GenericStructContext = 
+//type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
+type StructContext = HashMap<String, StructType>;
 
 //FuncContext contains generic and non-generic functions
 //a generic and non-generic function cannot share the same name
@@ -21,9 +23,8 @@ pub struct LocalTypeContext{
 	pub locals: LocalContext,
 	pub globals: GlobalContext,
 	pub structs: StructContext,
-	pub type_var: Option<(String, ast::PolymorphMode)>,
-	//TODO: one typechecking is done, find out when to set this
 	pub type_for_lit_nulls: Option<ast::Ty>,
+	pub type_var: Option<(String, ast::PolymorphMode)>,
 	//TODO: add a optional mode field here, and figure out what the rules for it should be
 	//when typechecking a non-generic function, it will be None
 	//when typechecking a generic function, this will be set to the mode that the function is using
@@ -48,27 +49,24 @@ fn decay_type(t: ast::Ty) -> ast::Ty {
 	}
 }
 
-fn all_struct_names_valid_set(t: &ast::Ty, structs: &HashSet<String>, generic_structs: &HashSet<String>) -> Result<(), String> {
+fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext) -> Result<(), String> {
 	use ast::Ty::*;
+	use StructType::*;
 	match t {
-	Struct(s) => if structs.contains(s) { Ok(()) } else
-		{ Err(format!("struct {} does not exist, or is generic", s)) },
-	GenericStruct{name, ..} => if generic_structs.contains(name) { Ok(()) } else
-		{ Err(format!("struct {} does not exist, or is not generic", name)) },
-	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid_set(t, structs, generic_structs),
+	Struct(s) => match struct_context.get(s) {
+		None => Err(format!("struct {} does not exist", s)),
+		Some(Generic{..}) => Err(format!("struct {} is generic", s)),
+		Some(NonGeneric(_)) => Ok(())
+	},
+	GenericStruct{name, ..} => match struct_context.get(name) {
+		None => Err(format!("struct {} does not exist", name)),
+		Some(NonGeneric(_)) => Err(format!("struct {} is not generic", name)),
+		Some(Generic{..}) => Ok(())
+	},
+	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid(t, struct_context),
 	_ => Ok(())
-}}
-
-fn all_struct_names_valid_map<T, G>(t: &ast::Ty, structs: &HashMap<String, T>, generic_structs: &HashMap<String, G>) -> Result<(), String> {
-	use ast::Ty::*;
-	match t {
-	Struct(s) => if structs.contains_key(s) {Ok(())} else
-		{Err(format!("struct {} does not exist, or is generic", s))},
-	GenericStruct{name, ..} => if generic_structs.contains_key(name) {Ok(())} else
-		{Err(format!("struct {} does not exist, or is not generic", name))},
-	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid_map(t, structs, generic_structs),
-	_ => Ok(())
-}}
+	}
+}
 
 fn get_builtins() -> FuncContext {
 	//printf functions do not go here, they are handled specially
@@ -158,31 +156,34 @@ match e {
 		}
 	},
 	Proj(base, field) => {
+		use StructType::*;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
 		use std::borrow::Borrow;
 		match base_typ {
-			Struct(struct_name) => match ctxt.structs.get(&struct_name) {
+			Struct(ref struct_name) => match ctxt.structs.get(struct_name) {
 				None => Err(format!("could not find struct named '{}'", struct_name)),
-				Some(field_list) => {
+				Some(NonGeneric(field_list)) => {
 					for (field_name, typ) in field_list.iter() {
 						if field.eq(field_name) {
 							return Ok(typ.clone());
 						}
 					}
 					return Err(format!("struct {} does not have a {} field", struct_name, field));
-				}
+				},
+				Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
 			},
 			Ptr(Some(ref boxed)) => match boxed.borrow() {
 				Struct(struct_name) => match ctxt.structs.get(struct_name) {
 					None => Err(format!("could not find struct named '{}'", struct_name)),
-					Some(field_list) => {
+					Some(NonGeneric(field_list)) => {
 						for (field_name, typ) in field_list.iter() {
 							if field.eq(field_name) {
 								return Ok(typ.clone());
 							}
 						}
 						return Err(format!("struct {} does not have a {} field", struct_name, field));
-					}
+					},
+					Some(Generic{..}) => panic!("Proj: base had type {}, but when struct context contained a generic struct for {}", base_typ, struct_name)
 				},
 				GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
 				_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
@@ -223,7 +224,10 @@ match e {
 		}
 		for (index, (given_type, correct_type)) in args.iter()
 				.zip(arg_type_list.iter())
-				.map(|(arg, expected_type)| {ctxt.type_for_lit_nulls = Some(expected_type.clone()); (typecheck_expr(ctxt, funcs, arg), expected_type)})
+				.map(|(arg, expected_type)| {
+					ctxt.type_for_lit_nulls = Some(expected_type.clone());
+					(typecheck_expr(ctxt, funcs, arg), expected_type)
+					})
 				.enumerate(){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
@@ -236,8 +240,7 @@ match e {
 	},
 	GenericCall{name: func_name, type_var, args} => {
 		use FuncType::*;
-		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-		all_struct_names_valid_map(&type_var, &ctxt.structs, &temporary_generic_structs)?;
+		all_struct_names_valid(&type_var, &ctxt.structs)?;
 		let return_type;
 		let arg_type_list;
 		//TODO: once the rules for interop between erased/separated structs/functions are established,
@@ -259,7 +262,6 @@ match e {
 				arg_type_list = arg_types;
 				poly_mode = mode;
 				type_var_string = var_string;
-
 			}
 		};
 		if args.len() != arg_type_list.len() {
@@ -297,8 +299,7 @@ match e {
 		Ok(return_type)
 	},
 	Cast(dest_type, source) => {
-		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-		all_struct_names_valid_map(&dest_type, &ctxt.structs, &temporary_generic_structs)?;
+		all_struct_names_valid(&dest_type, &ctxt.structs)?;
 		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
@@ -322,7 +323,10 @@ match e {
 		let right_type = typecheck_expr(ctxt, funcs, right)?;
 		match bop {
 			Add | Sub => match (left_type, right_type) {
-				(original @ Ptr(_), Int{..}) | (Int{..}, original @ Ptr(_)) => Ok(original),
+				//when doing pointer arithmetic, the pointer must be the left hand side, and the integer must be the right hand side
+				//this avoids issues with subtraction of pointers
+				(original @ Ptr(_), Int{..}) => Ok(original),
+				(Int{..}, Ptr(_)) => Err("when doing pointer arithmetic, the pointer must be the left hand side, and the integer must be the right hand side".to_owned()),
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
 				(Int{..}, Int{..}) => Err("Cannot add/sub integers with different signedness".to_owned()),
 				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
@@ -400,8 +404,7 @@ match e {
 		}
 	},
 	Sizeof(t) => {
-		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-		all_struct_names_valid_map(&t, &ctxt.structs, &temporary_generic_structs)?;
+		all_struct_names_valid(&t, &ctxt.structs)?;
 		Ok(Int{signed:false, size: Size64})
 	}
 }
@@ -413,10 +416,11 @@ use ast::Expr::*;
 use ast::Stmt::*;
 match s {
 	Assign(lhs, rhs) => {
-		let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
 		match lhs {
 			Id(_) | Index(_,_) | Proj(_,_) | Deref(_) => {
 				let lhs_type = typecheck_expr(ctxt, funcs, &lhs)?;
+				ctxt.type_for_lit_nulls = Some(lhs_type.clone());
+				let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
 				if lhs_type != rhs_type {
 					Err(format!("Cannot assign value of type {:?} to something of type {:?}", rhs_type, lhs_type))
 				} else {
@@ -427,8 +431,7 @@ match s {
 		}
 	},
 	Decl(typ, name) => {
-		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-		all_struct_names_valid_map(&typ, &ctxt.structs, &temporary_generic_structs)?;
+		all_struct_names_valid(&typ, &ctxt.structs)?;
 		if ctxt.locals.contains_key(name){
 			Err(format!("redeclaration of local var {}", name))
 		} else {
@@ -444,17 +447,25 @@ match s {
 		}
 	},
 	Return(Some(e)) => {
-		let return_expr_type = typecheck_expr(ctxt, funcs, &e)?;
 		match expected_return_type {
 			None => Err("Cannot return a value from a void function".to_owned()),
-			Some(t) if return_expr_type.ne(t) => Err(format!("Cannot return a value of type {:?} in a function that returns {:?}", return_expr_type, t)),
-			Some(_) => Ok(true)
+			Some(t) => {
+				ctxt.type_for_lit_nulls = Some(t.clone());
+				let return_expr_type = typecheck_expr(ctxt, funcs, &e)?;
+				if return_expr_type.ne(t) {
+					Err(format!("Cannot return a value of type {:?} in a function that returns {:?}", return_expr_type, t))
+				} else {
+					Ok(true)
+				}
+			}
 		}
 	},
 	SCall(func_name, args) => {
 		use FuncType::*;
 		if PRINTF_FAMILY.contains(&func_name.as_str()){
 			for arg in args.iter(){
+				//nulls should be allowed in printf arguments, but it really doesn't matter what their type is
+				ctxt.type_for_lit_nulls = Some(Ptr(None));
 				let _ = typecheck_expr(ctxt, funcs, arg)?;
 			}
 			return Ok(false);
@@ -475,8 +486,11 @@ match s {
 			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
 		}
 		for (index, (given_type, correct_type)) in args.iter()
-				.map(|arg| typecheck_expr(ctxt, funcs, arg))
 				.zip(arg_type_list.iter())
+				.map(|(arg, expected_type)| {
+					ctxt.type_for_lit_nulls = Some(expected_type.clone());
+					(typecheck_expr(ctxt, funcs, arg), expected_type)
+				})
 				.enumerate(){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
@@ -489,8 +503,7 @@ match s {
 	},
 	GenericSCall{name: func_name, type_var, args} => {
 		use FuncType::*;
-		let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-		all_struct_names_valid_map(&type_var, &ctxt.structs, &temporary_generic_structs)?;
+		all_struct_names_valid(&type_var, &ctxt.structs)?;
 		let arg_type_list;
 		//TODO: once the rules for interop between erased/separated structs/functions are established,
 		//use this and the mod field in LocalTypeContext to check these rules
@@ -520,19 +533,24 @@ match s {
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
 		for (index, (given_type, correct_type)) in args.iter()
-				.map(|arg| typecheck_expr(ctxt, funcs, arg))
 				.zip(arg_type_list.iter())
+				.map(|(arg, expected_type)| {
+					let correct_type: &ast::Ty = match expected_type {
+						TypeVar(s) => if s == type_var_string {
+								&type_var
+							} else {
+								panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
+								This should have been detected when typechecking the function's declaration.")
+							},
+						t => &t
+					};
+					ctxt.type_for_lit_nulls = Some(correct_type.clone());
+					(typecheck_expr(ctxt, funcs, arg), correct_type)
+				})
 				.enumerate(){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
-			let correct_type: &ast::Ty = match correct_type {
-				TypeVar(s) => if s == type_var_string {&type_var} else {
-					panic!("argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-					This should have been detected when typechecking the function's declaration.")
-				},
-				t => &t
-			};
 			if given_type.ne(correct_type) {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
@@ -540,6 +558,7 @@ match s {
 		Ok(false)
 	},
 	If(cond, then_block, else_block) => {
+		ctxt.type_for_lit_nulls = Some(Bool);
 		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
 		if cond_type != Bool {
 			return Err(format!("condition of if statement must have type bool, not {:?}", cond_type));
@@ -549,6 +568,7 @@ match s {
 		Ok(then_returns && else_returns)
 	},
 	While(cond, body) => {
+		ctxt.type_for_lit_nulls = Some(Bool);
 		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
 		if cond_type != Bool {
 			return Err(format!("condition of while statement must have type bool, not {:?}", cond_type));
@@ -581,35 +601,204 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	}
 	let last_statement_definitely_returns = typecheck_block(ctxt, funcs, body, ret_type)?;
 	if ret_type.is_some() && !last_statement_definitely_returns {
-		return Err(format!("function '{}' might not return ", name));
+		return Err(format!("function '{}' might not return", name));
 	}
 	Ok(())
 	
 }
 
-fn check_for_recursive_types(struct_context: &StructContext) -> Result<(), String> {
-	let mut seen_names: HashSet<&str> = HashSet::with_capacity(struct_context.len());
-	use std::collections::VecDeque;
-	let mut queue: VecDeque<&str> = VecDeque::with_capacity(struct_context.len());
-	for name in struct_context.keys().map(|s| s.as_str()){
-		if seen_names.contains(name) { continue }
-		queue.push_back(name);
-		while !queue.is_empty() {
-			let current: &str = queue.pop_front().unwrap();
-			if seen_names.contains(current) {
-				return Err(format!("struct '{}' is recursive", name));
+fn recursively_find_type_var(t: &ast::Ty) -> Option<&str> {
+	use ast::Ty::*;
+	match t {
+		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => None,
+		Ptr(Some(boxed)) | Array{typ: boxed, ..} | GenericStruct{type_var: boxed, ..} 
+			=> recursively_find_type_var(&boxed as &ast::Ty),
+		TypeVar(s) => Some(s.as_str()),
+		
+	}
+}
+
+fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
+	use ast::Ty::*;
+	match original {
+		TypeVar(s) => {
+			if s == type_var_str {
+				replacement
+			} else {
+				panic!("when replacing '{}, found other type var, '{}", type_var_str, s);
 			}
-			seen_names.insert(current);
-			for field_type in struct_context.get(current)
-					.expect("why is this not in the struct context?")
-					.iter()
-					.map(|(_, t)| t){
-				match field_type {
-					ast::Ty::Struct(s) => {
-						queue.push_back(s.as_str());
-					},
-					_ => ()
+		},
+		Ptr(Some(t)) => {
+			let replaced = replace_type_var_with(*t, type_var_str, replacement);
+			Ptr(Some(Box::new(replaced)))
+		}
+		Array{typ, length} => {
+			let replaced = replace_type_var_with(*typ, type_var_str, replacement);
+			Array{typ: Box::new(replaced), length: length}
+		}
+		GenericStruct{type_var, name} => {
+			let replaced = replace_type_var_with(*type_var, type_var_str, replacement);
+			GenericStruct{type_var: Box::new(replaced), name: name}
+		}
+		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) =>
+			panic!("did not find '{} when replacing", type_var_str),
+	}
+}
+
+fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String> {
+	/*
+	nodes are (struct_name, type_param)
+	the edge (A, t1) -> (B, t2) exists iff there is a field in struct A@<t1> that has type
+	struct B@<t3>, where t3 is t2 with A's type var replaced with B's
+	*/
+	use std::collections::VecDeque;
+	use StructType::*;
+	//Possible Improvement: make type Node = (&str, Option<&Ty>)
+	//use pool allocator to wrap type_var in TypeVar
+	//this eliminates cloning of tys
+	type Node<'a> = (&'a str, Option<ast::Ty>);
+	//if the field type is not a TypeVar, but is a GenericStruct, this code does not do any substitution
+	//this might cause problems later
+	const MAX_STRUCT_DEPTH: i32 = 100;
+	let mut seen_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
+	let mut queue: VecDeque<Node> = VecDeque::with_capacity(struct_context.len());
+	for (name, struct_type) in struct_context.iter(){
+		let node = match struct_type {
+			NonGeneric(_) => (name.as_str(), None),
+			Generic{type_var, ..} => {
+				let new_ty = ast::Ty::TypeVar(type_var.clone());
+				(name.as_str(), Some(new_ty))
+			}
+		};
+		if seen_nodes.contains(&node) { continue }
+		queue.push_back(node);
+		let mut iterations = 0;
+		while !queue.is_empty() {
+			iterations += 1;
+			if iterations >= MAX_STRUCT_DEPTH {
+				return Err(format!("maximum struct depth ({}) reached when processing struct '{}'", MAX_STRUCT_DEPTH, name));
+			}
+			let current_node = queue.pop_front().unwrap();
+			if seen_nodes.contains(&current_node) {
+				return Err(format!("struct '{}' is recursive", current_node.0));
+			}
+			seen_nodes.insert(current_node.clone());
+			let struct_type = struct_context.get(current_node.0).expect("why is this not in the struct context?");
+			let fields = match struct_type {
+				NonGeneric(fields) => fields,
+				Generic{fields, ..} => fields
+			};
+			//investigating the fields in a generic struct is fundamentally different than in a non-generic struct,
+			//so they are handled dirrerently here
+			match current_node.1 {
+			//current node is a non-generic struct
+			None => {
+				for field_type in fields.iter().map(|(_, t)| t){
+					if recursively_find_type_var(&field_type).is_some() {
+						return Err(format!("non-generic struct {} has a field of type {}", current_node.0, field_type));
+					}
+					use ast::Ty::*;
+					match field_type {
+						Struct(s) => queue.push_back((s.as_str(), None)),
+						GenericStruct{type_var: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((&fully_concrete_type as &ast::Ty).clone()))),
+						_ => ()
+					}
 				}
+			},
+			//current node is a generic struct
+			Some(type_param) => {
+				//If the type_param is a concrete type, then I need to treat any instances of
+				//the current struct's type param string as this type
+				//to get the type param string, need to look up current_node.0 in struct_context
+
+				let type_param_string_of_current_struct: &str = match struct_context.get(current_node.0).expect("why is the current struct's name not in the context?") {
+					NonGeneric{..} => panic!("why is struct {} generic and non-generic?", current_node.0),
+					Generic{type_var, ..} => type_var.as_str()
+				};
+				//the current type param can be concrete even if it is just a TypeVar.
+				//It could be a different TypeVar
+				let type_param_is_concrete: bool = type_param != ast::Ty::TypeVar(type_param_string_of_current_struct.to_owned());
+				for field_type in fields.iter().map(|(_, t)| t){
+					use ast::Ty::*;
+					match (type_param_is_concrete, recursively_find_type_var(&field_type)) {
+						//make sure a struct with a TypeVar type param does not have any fields with other TypeVars
+						(false, Some(field_param_str)) => {
+							if type_param_string_of_current_struct != field_param_str {
+								return Err(format!("struct {}@<'{}> has a field with an unknown type param {}", current_node.0, type_param_string_of_current_struct, field_type));
+							}
+						},
+						//make sure a struct a concrete type param does not have any fields with a TypeVar that is not the current struct's type var
+						(true, Some(typevar)) if typevar != type_param_string_of_current_struct => {
+							dbg!(&type_param_is_concrete);
+							dbg!(&type_param_string_of_current_struct);
+							dbg!(&type_param);
+							dbg!(&field_type);
+							return Err(format!("struct {}@<{}> has a field with an unknown type param {}", current_node.0, type_param, field_type));
+						}
+						_ => ()
+					};
+					//any TypeVars encountered henceforth are guaranteed to be valid,
+					//but I will debug_assert them anyway
+					match field_type {
+						Struct(s) => queue.push_back((s.as_str(), None)),
+						GenericStruct{type_var, name} => {
+							match (type_param_is_concrete, &type_var as &ast::Ty) {
+								//struct A@<'a> has a field of type struct B@<'a>
+								//If the current node represents struct A@<'a>, and a field of type
+								//struct B@<'a> is seen, then there should really be an outgoing
+								//edge to B@<'b>, instead of B@<'a>
+								(false, TypeVar(field_type_var_string)) => {
+									debug_assert!(type_param_string_of_current_struct == field_type_var_string, format!("struct {}@<'{}> has a generic struct field with an unknown type param (struct {}@<'{}>), this should have been detected already", current_node.0, type_param_string_of_current_struct, name, field_type_var_string));
+									let type_param_of_field_struct: &str = match struct_context.get(name) {
+										Some(Generic{type_var, ..}) => type_var.as_str(),
+										Some(_) => panic!("How is struct {} generic and non-generic?", name),
+										None => panic!("struct {} does not exist. non-existant structs should have been detected before calling traverse_struct_context.", name)
+									};
+									queue.push_back((name.as_str(), Some(TypeVar(type_param_of_field_struct.to_owned()))));
+								},
+
+								//struct A@<'a> has a field of type struct B@<'b>
+								//already handled in above match arm
+
+								//struct A@<concrete_base_type> has a field of type struct B@<'b>
+								(true, TypeVar(field_type_var_string)) if field_type_var_string != type_param_string_of_current_struct => {
+									panic!("a generic struct with a concrete base type (struct {}@<{}>) was found to have a field that is a generic struct with an unresolved TypeVar ('{}).", current_node.0, type_param, field_type_var_string);
+								},
+
+								//struct A@<concrete_base_type> has a field of type struct B@<some type that includes 'a>
+								//there should really be an outgoing edge to B@<that type with 'a replaced with the current type param>
+								(true, field_type_var) => {
+									match recursively_find_type_var(field_type_var) {
+										//field has no TypeVars in it
+										None => queue.push_back((name.as_str(), Some(field_type_var.clone()))),
+
+										//field has a TypeVar in it
+										Some(found_typevar) => {
+											debug_assert!(type_param_string_of_current_struct == found_typevar, format!("struct {}@<{}> has a generic struct field with an unknown type param (struct {}@<'{}>)", current_node.0, type_param_string_of_current_struct, name, field_type_var));
+											let replaced = replace_type_var_with(field_type_var.clone(), found_typevar, type_param.clone());
+											queue.push_back((name.as_str(), Some(replaced)))
+										}
+									}
+								}
+
+								//field has type struct B@<concrete_type>
+								(_, concrete_type) => {
+									//above arm should catch all cases where type_param_is_concrete is true
+									debug_assert!(!type_param_is_concrete, "got to the last case when the type param is concrete, how did this happen?");
+									queue.push_back(
+										(name.as_str(), Some(concrete_type.clone()))
+									);
+								},
+
+							}
+						},
+						//If struct A@<concrete type> has a field that is 'a, 'a* or 'a[], I don't
+						//bother replacing it with the concrete type because I don't think this could
+						//cause any recursiveness/infinite sized structs
+						_ => ()
+					}
+				}
+			}
 			}
 		}
 	};
@@ -643,24 +832,46 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			if struct_context.contains_key(name){
 				return Err(format!("struct '{}' is declared more than once", name));
 			}
-			struct_context.insert(name.clone(), fields.iter().cloned().map(|(t, n)| {(n, t)}).collect());
+			struct_context.insert(name.clone(), StructType::NonGeneric(fields.iter().cloned().map(|(t, n)| {(n, t)}).collect()));
 		},
-		GGenericFuncDecl{..} | GGenericStructDecl{..} => panic!("not supporting generics yet"),
+		GGenericStructDecl{name, param, mode, fields} => {
+			if struct_context.contains_key(name){
+				return Err(format!("struct '{}' is declared more than once", name));
+			}
+			struct_context.insert(name.clone(), StructType::Generic{
+				mode: *mode,
+				type_var: param.clone(),
+				fields: fields.iter().cloned().map(|(t, n)| (n, t)).collect()
+			});
+		},
 		_ => ()
 	}}
 	//struct_context has been populated, now need to check for duplicate and invalid fields
-	for (name, fields) in struct_context.iter(){
-		let mut seen_fields: HashSet<&str> = HashSet::new();
-		for (field_name, field_type) in fields.iter(){
-			if seen_fields.contains(field_name.as_str()){
-				return Err(format!("struct {} contains two fields named {}", name, field_name));
+	for (name, struct_type) in struct_context.iter(){
+		use StructType::*;
+		match struct_type {
+		NonGeneric(fields) => {
+			let mut seen_fields: HashSet<&str> = HashSet::new();
+			for (field_name, field_type) in fields.iter(){
+				if seen_fields.contains(field_name.as_str()){
+					return Err(format!("struct {} contains two fields named {}", name, field_name));
+				}
+				all_struct_names_valid(field_type, &struct_context)?;
+				seen_fields.insert(field_name.as_str());
 			}
-			let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-			all_struct_names_valid_map(field_type, &struct_context, &temporary_generic_structs)?;
-			seen_fields.insert(field_name.as_str());
+		},
+		Generic{type_var: _, fields, mode: _mode} => {
+			let mut seen_fields: HashSet<&str> = HashSet::new();
+			for (field_name, field_type) in fields.iter(){
+				if seen_fields.contains(field_name.as_str()){
+					return Err(format!("struct {} contains two fields named {}", name, field_name));
+				}
+				all_struct_names_valid(field_type, &struct_context)?;
+				seen_fields.insert(field_name.as_str());
+			}
 		}
-	}
-	check_for_recursive_types(&struct_context)?;
+	}}
+	traverse_struct_context(&struct_context)?;
 
 	let mut func_context: FuncContext = get_builtins();
 	let mut global_context: GlobalContext = HashMap::new();
@@ -670,14 +881,12 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 		GFuncDecl{ret_type, name: func_name, args, ..} => {
 			if func_context.contains_key(func_name) {
 				return Err(format!("function '{}' is declared more than once", func_name));
-				//make sure generic funcs do not have any names in common with non-generic funcs
 			}
 			if global_context.contains_key(func_name) {
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type{
-				let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-				all_struct_names_valid_map(&ret, &struct_context, &temporary_generic_structs)?;
+				all_struct_names_valid(&ret, &struct_context)?;
 			}
 			let mut names: HashSet<String>  = HashSet::new();
 			for (arg_type, arg_name) in args.iter().by_ref(){
@@ -685,18 +894,41 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-				all_struct_names_valid_map(&arg_type, &struct_context, &temporary_generic_structs)?;
+				all_struct_names_valid(&arg_type, &struct_context)?;
 			}
 			func_context.insert(func_name.clone(), FuncType::NonGeneric{
 				return_type: ret_type.clone(),
 				args: args.iter().cloned().map(|(t, _)| t).collect()
 			});
 		},
+		GGenericFuncDecl{name: func_name, ret_type, args, param, mode, ..} => {
+			if func_context.contains_key(func_name) {
+				return Err(format!("function '{}' is declared more than once", func_name));
+			}
+			if global_context.contains_key(func_name) {
+				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
+			}
+			if let Some(ret) = ret_type {
+				all_struct_names_valid(&ret, &struct_context)?;
+			}
+			let mut names: HashSet<String> = HashSet::new();
+			for (arg_type, arg_name) in args.iter().by_ref(){
+				if names.contains(arg_name){
+					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
+				}
+				names.insert(arg_name.clone());
+				all_struct_names_valid(&arg_type, &struct_context)?;
+			}
+			func_context.insert(func_name.clone(), FuncType::Generic {
+				return_type: ret_type.clone(),
+				args: args.iter().cloned().map(|(t, _)| t).collect(),
+				mode: *mode,
+				type_var: param.clone(),
+			});
+		}
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
-			let temporary_generic_structs: HashMap<String, ()> = HashMap::new();
-			all_struct_names_valid_map(&t, &struct_context, &temporary_generic_structs)?;
+			all_struct_names_valid(&t, &struct_context)?;
 			if global_context.contains_key(name) {
 				return Err(format!("cannot have two global variables both named '{}'", name));
 			}
@@ -705,13 +937,18 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			}
 			global_context.insert(name.clone(), t.clone());
 		},
-		_ => ()
+		GStructDecl{..} | GGenericStructDecl{..} => ()
 	}};
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name, args, body} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
 		},
+		GGenericFuncDecl{ret_type, name, args, body, param, mode} => {
+			let (mut ctxt, _) = get_empty_localtypecontext();
+			ctxt.type_var = Some((param.clone(), *mode));		
+			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
+		}
 		_ => ()
 	}};
 	Ok(())
