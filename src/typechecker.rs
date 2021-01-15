@@ -25,10 +25,6 @@ pub struct LocalTypeContext{
 	pub structs: StructContext,
 	pub type_for_lit_nulls: Option<ast::Ty>,
 	pub type_var: Option<(String, ast::PolymorphMode)>,
-	//TODO: add a optional mode field here, and figure out what the rules for it should be
-	//when typechecking a non-generic function, it will be None
-	//when typechecking a generic function, this will be set to the mode that the function is using
-
 }
 
 pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
@@ -36,8 +32,8 @@ pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
 		locals: HashMap::new(),
 		globals: HashMap::new(),
 		structs: HashMap::new(),
+		type_for_lit_nulls: None,
 		type_var: None,
-		type_for_lit_nulls: None
 	},
 	HashMap::new())
 }
@@ -46,6 +42,32 @@ fn decay_type(t: ast::Ty) -> ast::Ty {
 	match t {
 		ast::Ty::Array{typ, ..} => ast::Ty::Ptr(Some(typ)),
 		t => t
+	}
+}
+
+fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
+	use ast::Ty::*;
+	match original {
+		TypeVar(s) => {
+			if s == type_var_str {
+				replacement
+			} else {
+				panic!("when replacing '{}, found other type var, '{}", type_var_str, s);
+			}
+		},
+		Ptr(Some(t)) => {
+			let replaced = replace_type_var_with(*t, type_var_str, replacement);
+			Ptr(Some(Box::new(replaced)))
+		}
+		Array{typ, length} => {
+			let replaced = replace_type_var_with(*typ, type_var_str, replacement);
+			Array{typ: Box::new(replaced), length: length}
+		}
+		GenericStruct{type_var, name} => {
+			let replaced = replace_type_var_with(*type_var, type_var_str, replacement);
+			GenericStruct{type_var: Box::new(replaced), name: name}
+		}
+		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => original
 	}
 }
 
@@ -274,22 +296,14 @@ match e {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type: &ast::Ty = match expected_type {
-						TypeVar(s) => {
-							assert!(s == type_var_string, "argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-							This should have been detected when typechecking the function's declaration.",
-							index, func_name, s);
-							&type_var
-						},
-						t => &t
-					};
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var.clone());
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
-			if given_type.ne(correct_type) {
+			if given_type != correct_type {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
 		};
@@ -533,22 +547,14 @@ match s {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type: &ast::Ty = match expected_type {
-						TypeVar(s) => {
-							assert!(s == type_var_string, "argument {} to function {} has type '{}, which is not the type var the function was declared with.\
-							This should have been detected when typechecking the function's declaration.",
-							index, func_name, s);
-							&type_var
-						},
-						t => &t
-					};
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var.clone());
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
 			let given_type = given_type?;
 			let given_type_str = format!("{:?}", given_type);
 			let given_type = decay_type(given_type);
-			if given_type.ne(correct_type) {
+			if given_type != correct_type {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
 		};
@@ -615,33 +621,6 @@ fn recursively_find_type_var(t: &ast::Ty) -> Option<&str> {
 	}
 }
 
-fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
-	use ast::Ty::*;
-	match original {
-		TypeVar(s) => {
-			if s == type_var_str {
-				replacement
-			} else {
-				panic!("when replacing '{}, found other type var, '{}", type_var_str, s);
-			}
-		},
-		Ptr(Some(t)) => {
-			let replaced = replace_type_var_with(*t, type_var_str, replacement);
-			Ptr(Some(Box::new(replaced)))
-		}
-		Array{typ, length} => {
-			let replaced = replace_type_var_with(*typ, type_var_str, replacement);
-			Array{typ: Box::new(replaced), length: length}
-		}
-		GenericStruct{type_var, name} => {
-			let replaced = replace_type_var_with(*type_var, type_var_str, replacement);
-			GenericStruct{type_var: Box::new(replaced), name: name}
-		}
-		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) =>
-			panic!("did not find '{} when replacing", type_var_str),
-	}
-}
-
 fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String> {
 	/*
 	nodes are (struct_name, type_param)
@@ -654,8 +633,6 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 	//use pool allocator to wrap type_var in TypeVar
 	//this eliminates cloning of tys
 	type Node<'a> = (&'a str, Option<ast::Ty>);
-	//if the field type is not a TypeVar, but is a GenericStruct, this code does not do any substitution
-	//this might cause problems later
 	const MAX_STRUCT_DEPTH: i32 = 100;
 	let mut seen_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
 	let mut queue: VecDeque<Node> = VecDeque::with_capacity(struct_context.len());
@@ -721,16 +698,12 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 						//make sure a struct with a TypeVar type param does not have any fields with other TypeVars
 						(false, Some(field_param_str)) => {
 							if type_param_string_of_current_struct != field_param_str {
-								return Err(format!("struct {}@<'{}> has a field with an unknown type param {}", current_node.0, type_param_string_of_current_struct, field_type));
+								return Err(format!("struct {}@<'{}> has a field with an unknown type param, {}", current_node.0, type_param_string_of_current_struct, field_type));
 							}
 						},
 						//make sure a struct a concrete type param does not have any fields with a TypeVar that is not the current struct's type var
 						(true, Some(typevar)) if typevar != type_param_string_of_current_struct => {
-							dbg!(&type_param_is_concrete);
-							dbg!(&type_param_string_of_current_struct);
-							dbg!(&type_param);
-							dbg!(&field_type);
-							return Err(format!("struct {}@<{}> has a field with an unknown type param {}", current_node.0, type_param, field_type));
+							return Err(format!("struct {}@<{}> has a field with an unknown type param, {}", current_node.0, type_param, field_type));
 						}
 						_ => ()
 					};
@@ -740,9 +713,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 						Struct(s) => queue.push_back((s.as_str(), None)),
 						GenericStruct{type_var, name} => {
 							match (type_param_is_concrete, &type_var as &ast::Ty) {
-								//struct A@<'a> has a field of type struct B@<'a>
+								//struct A@<'a> has a field of type struct B@<some type that contains 'a>
 								//If the current node represents struct A@<'a>, and a field of type
-								//struct B@<'a> is seen, then there should really be an outgoing
+								//struct B@<something with 'a> is seen, then there should really be an outgoing
 								//edge to B@<'b>, instead of B@<'a>
 								(false, TypeVar(field_type_var_string)) => {
 									debug_assert!(type_param_string_of_current_struct == field_type_var_string, format!("struct {}@<'{}> has a generic struct field with an unknown type param (struct {}@<'{}>), this should have been detected already", current_node.0, type_param_string_of_current_struct, name, field_type_var_string));
@@ -765,17 +738,8 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								//struct A@<concrete_base_type> has a field of type struct B@<some type that includes 'a>
 								//there should really be an outgoing edge to B@<that type with 'a replaced with the current type param>
 								(true, field_type_var) => {
-									match recursively_find_type_var(field_type_var) {
-										//field has no TypeVars in it
-										None => queue.push_back((name.as_str(), Some(field_type_var.clone()))),
-
-										//field has a TypeVar in it
-										Some(found_typevar) => {
-											debug_assert!(type_param_string_of_current_struct == found_typevar, format!("struct {}@<{}> has a generic struct field with an unknown type param (struct {}@<'{}>)", current_node.0, type_param_string_of_current_struct, name, field_type_var));
-											let replaced = replace_type_var_with(field_type_var.clone(), found_typevar, type_param.clone());
-											queue.push_back((name.as_str(), Some(replaced)))
-										}
-									}
+									let replaced = replace_type_var_with(field_type_var.clone(), found_typevar, type_param.clone());
+									queue.push_back((name.as_str(), Some(replaced)));
 								}
 
 								//field has type struct B@<concrete_type>
