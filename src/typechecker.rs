@@ -626,6 +626,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 	nodes are (struct_name, type_param)
 	the edge (A, t1) -> (B, t2) exists iff there is a field in struct A@<t1> that has type
 	struct B@<t3>, where t3 is t2 with A's type var replaced with B's
+	TODO: if I see a node (A, concrete_type) in this traversal and A is a separated struct, then
+	it is one of the struct instatiations I will need to create later. This function could return
+	this information for later use.
 	*/
 	use std::collections::VecDeque;
 	use StructType::*;
@@ -685,9 +688,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 				//the current struct's type param string as this type
 				//to get the type param string, need to look up current_node.0 in struct_context
 
-				let type_param_string_of_current_struct: &str = match struct_context.get(current_node.0).expect("why is the current struct's name not in the context?") {
+				let (current_mode, type_param_string_of_current_struct): (ast::PolymorphMode, &str) = match struct_context.get(current_node.0).expect("why is the current struct's name not in the context?") {
 					NonGeneric{..} => panic!("why is struct {} generic and non-generic?", current_node.0),
-					Generic{type_var, ..} => type_var.as_str()
+					Generic{type_var, mode, ..} => (*mode, type_var.as_str())
 				};
 				//the current type param can be concrete even if it is just a TypeVar.
 				//It could be a different TypeVar
@@ -712,6 +715,19 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 					match field_type {
 						Struct(s) => queue.push_back((s.as_str(), None)),
 						GenericStruct{type_var, name} => {
+							//if the current struct is erased, and the field struct is separated, and
+							//the current struct is passing its TypeVar to it (type param is not concrete),
+							//then there is an error
+							let field_mode = match struct_context.get(name).expect("field does not exist") {
+								NonGeneric{..} => panic!("why is struct {} generic and non-generic?", name),
+								Generic{mode, ..} => mode
+							};
+							use ast::PolymorphMode::*;
+							if current_mode == Erased
+								&& *field_mode == Separated
+								&& !type_param_is_concrete {
+								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
+							}
 							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, type_param.clone());
 							let type_param_string_of_field_struct: &str = match struct_context.get(name).expect(format!("why is struct {} not in the context?", name).as_str()) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),

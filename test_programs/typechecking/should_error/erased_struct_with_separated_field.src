@@ -1,0 +1,8 @@
+struct A@<erased 'a>{
+	struct B@<'a **> x;
+}
+
+struct B@<separated 'b>{
+	'b* data;
+	u64 len;
+}
