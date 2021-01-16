@@ -712,6 +712,15 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 					match field_type {
 						Struct(s) => queue.push_back((s.as_str(), None)),
 						GenericStruct{type_var, name} => {
+							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, type_param.clone());
+							let type_param_string_of_field_struct: &str = match struct_context.get(name).expect(format!("why is struct {} not in the context?", name).as_str()) {
+								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
+								Generic{type_var, ..} => type_var.as_str()
+							};
+							let substituted2 = replace_type_var_with(substituted1, type_param_string_of_current_struct, TypeVar(type_param_string_of_field_struct.to_owned()));
+							queue.push_back((name.as_str(), Some(substituted2)));
+
+							/*
 							match (type_param_is_concrete, &type_var as &ast::Ty) {
 								//struct A@<'a> has a field of type struct B@<some type that contains 'a>
 								//If the current node represents struct A@<'a>, and a field of type
@@ -752,6 +761,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								},
 
 							}
+							*/
 						},
 						//If struct A@<concrete type> has a field that is 'a, 'a* or 'a[], I don't
 						//bother replacing it with the concrete type because I don't think this could
