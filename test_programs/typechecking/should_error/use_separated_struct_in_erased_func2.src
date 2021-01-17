@@ -1,0 +1,9 @@
+void f@<erased 'f>(){
+	void *buf;
+	buf = malloc(256);
+	free(cast(struct A@<'f*>*, buf));
+}
+
+struct A@<separated 'a>{
+	'a* x;
+}

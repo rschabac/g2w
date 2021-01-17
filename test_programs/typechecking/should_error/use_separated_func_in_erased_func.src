@@ -1,0 +1,8 @@
+void f@<erased 'f>(){
+	g@<'f*>();
+}
+
+void g@<separated 'g>(){
+
+}
+

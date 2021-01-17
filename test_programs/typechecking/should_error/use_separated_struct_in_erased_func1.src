@@ -1,0 +1,7 @@
+void f@<erased 'f>(){
+	struct A@<'f*[4]> x;
+}
+
+struct A@<separated 'a>{
+	'a* x;
+}

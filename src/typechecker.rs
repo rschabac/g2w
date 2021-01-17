@@ -262,9 +262,7 @@ match e {
 		all_struct_names_valid(&type_var, &ctxt.structs)?;
 		let return_type;
 		let arg_type_list;
-		//TODO: once the rules for interop between erased/separated structs/functions are established,
-		//use this and the mod field in LocalTypeContext to check these rules
-		let poly_mode;
+		let callee_mode;
 		let type_var_string;
 		match funcs.get(func_name) {
 			None => {
@@ -279,8 +277,22 @@ match e {
 			Some(Generic{return_type: Some(ret), mode, type_var: var_string, args: arg_types}) => {
 				return_type = ret.clone();
 				arg_type_list = arg_types;
-				poly_mode = mode;
+				callee_mode = mode;
 				type_var_string = var_string;
+			}
+		};
+		let type_var_str_in_type_var = recursively_find_type_var(type_var);
+		match (type_var_str_in_type_var, &ctxt.type_var) {
+			(None, _) => (),
+			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
+			(Some(s), Some((current_func_type_var, current_func_mode))) => {
+				if s != current_func_type_var {
+					return Err(format!("type param passed to generic func {} contains unknown type var '{}", func_name, s));
+				}
+				use ast::PolymorphMode::*;
+				if *callee_mode == Separated && *current_func_mode == Erased {
+					return Err(format!("Cannot call separated function {} from erased function", func_name));
+				}
 			}
 		};
 		if args.len() != arg_type_list.len() {
@@ -311,6 +323,14 @@ match e {
 	},
 	Cast(dest_type, source) => {
 		all_struct_names_valid(&dest_type, &ctxt.structs)?;
+		let type_var_str_in_dest_type = recursively_find_type_var(dest_type);
+		match (type_var_str_in_dest_type, &ctxt.type_var) {
+			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
+			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
+				return Err(format!("Type used in cast contains unknown type var '{}", s));
+			},
+			_ => ()
+		};
 		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
 		let original_type_string = format!("{:?}", original_type);
@@ -321,6 +341,7 @@ match e {
 		  | (Float(_), Float(_))
 		  | (Bool, Int{..}) => Ok(dest_type.clone()),
 			
+			//TODO: casting to/from type vars?
 			(TypeVar(_), _) | (_, TypeVar(_)) => panic!("trying to cast with a TypeVar, I don't know what to do here yet"),
 			(_, _) => Err(format!("Cannot cast from {} to {:?}", original_type_string, dest_type))
 			
@@ -341,7 +362,6 @@ match e {
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
 				(Int{..}, Int{..}) => Err("Cannot add/sub integers with different signedness".to_owned()),
 				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
-				(TypeVar(_), _) | (_, TypeVar(_)) => panic!("not sure how to handle a typevar here"),
 				(left_type, right_type) => Err(format!("Cannot add/sub types {:?} and {:?}", left_type, right_type))
 			},
 			Mul | Div | Mod => match (left_type, right_type) {
@@ -384,17 +404,14 @@ match e {
 			original @ Int{signed: true, ..} 
 		  | original @ Float(_) => Ok(original),
 			Int{signed: false, ..} => Err("Cannot negate an unsigned int".to_owned()),
-			TypeVar(_) => panic!("not sure how to handle a typevar here"),
 			other => Err(format!("Cannot negate type {:?}", other))
 		},
 		Lognot => match typecheck_expr(ctxt, funcs, e)? {
 			Bool => Ok(Bool),
-			TypeVar(_) => panic!("not sure how to handle a typevar here"),
 			other => Err(format!("Cannot do logical not of type {:?}", other))
 		},
 		Bitnot => match typecheck_expr(ctxt, funcs, e)? {
 			original @ Int{..} => Ok(original),
-			TypeVar(_) => panic!("not sure how to handle a typevar here"),
 			other => Err(format!("Cannot bitwise negate type {:?}", other))
 		}
 	}},
@@ -416,6 +433,17 @@ match e {
 	},
 	Sizeof(t) => {
 		all_struct_names_valid(&t, &ctxt.structs)?;
+		//Not sure how to handle sizeof a type var
+		//current idea: size of a separated type var gets resolved after instatiation,
+		//size of an erased type var is just the size of a void pointer
+		let type_var_str_in_type = recursively_find_type_var(t);
+		match (type_var_str_in_type, &ctxt.type_var) {
+			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
+			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
+				return Err(format!("Type param used in sizeof contains unknown type var '{}", s));
+			},
+			_ => ()
+		};
 		Ok(Int{signed:false, size: Size64})
 	}
 }
@@ -443,6 +471,14 @@ match s {
 	},
 	Decl(typ, name) => {
 		all_struct_names_valid(&typ, &ctxt.structs)?;
+		let type_var_str_in_decl_type = recursively_find_type_var(typ);
+		match (type_var_str_in_decl_type, &ctxt.type_var) {
+			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
+			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
+				return Err(format!("Type used in declaration of {} contains unknown type var '{}", name, s));
+			},
+			_ => ()
+		};
 		if ctxt.locals.contains_key(name){
 			Err(format!("redeclaration of local var {}", name))
 		} else {
@@ -516,9 +552,7 @@ match s {
 		use FuncType::*;
 		all_struct_names_valid(&type_var, &ctxt.structs)?;
 		let arg_type_list;
-		//TODO: once the rules for interop between erased/separated structs/functions are established,
-		//use this and the mod field in LocalTypeContext to check these rules
-		let poly_mode;
+		let callee_mode;
 		let type_var_string;
 		match funcs.get(func_name) {
 			None => {
@@ -529,9 +563,23 @@ match s {
 			},
 			Some(Generic{mode, type_var: var_string, args: arg_types, ..}) => {
 				arg_type_list = arg_types;
-				poly_mode = mode;
+				callee_mode = mode;
 				type_var_string = var_string;
 
+			}
+		};
+		let type_var_str_in_type_var = recursively_find_type_var(type_var);
+		match (type_var_str_in_type_var, &ctxt.type_var) {
+			(None, _) => (),
+			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
+			(Some(s), Some((current_func_type_var, current_func_mode))) => {
+				if s != current_func_type_var {
+					return Err(format!("type param passed to generic func {} contains unknown type var '{}", func_name, s));
+				}
+				use ast::PolymorphMode::*;
+				if *callee_mode == Separated && *current_func_mode == Erased {
+					return Err(format!("Cannot call separated function {} from erased function", func_name));
+				}
 			}
 		};
 		if args.len() != arg_type_list.len() {
@@ -874,14 +922,20 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			}
 			if let Some(ret) = ret_type{
 				all_struct_names_valid(&ret, &struct_context)?;
+				if let Some(s) = recursively_find_type_var(ret) {
+					return Err(format!("found type variable '{} in return type of non-generic function {}", s, func_name));
+				}
 			}
-			let mut names: HashSet<String>  = HashSet::new();
+			let mut names: HashSet<String> = HashSet::new();
 			for (arg_type, arg_name) in args.iter().by_ref(){
 				if names.contains(arg_name){
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
 				all_struct_names_valid(&arg_type, &struct_context)?;
+				if let Some(s) = recursively_find_type_var(arg_type) {
+					return Err(format!("found type variable '{} in type signature of non-generic function {}", s, func_name));
+				}
 			}
 			func_context.insert(func_name.clone(), FuncType::NonGeneric{
 				return_type: ret_type.clone(),
@@ -897,6 +951,10 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			}
 			if let Some(ret) = ret_type {
 				all_struct_names_valid(&ret, &struct_context)?;
+				match recursively_find_type_var(ret) {
+					Some(s) if s != param => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
+					_ => ()
+				};
 			}
 			let mut names: HashSet<String> = HashSet::new();
 			for (arg_type, arg_name) in args.iter().by_ref(){
@@ -905,6 +963,10 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 				}
 				names.insert(arg_name.clone());
 				all_struct_names_valid(&arg_type, &struct_context)?;
+				match recursively_find_type_var(arg_type) {
+					Some(s) if s != param => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
+					_ => ()
+				}
 			}
 			func_context.insert(func_name.clone(), FuncType::Generic {
 				return_type: ret_type.clone(),
@@ -916,6 +978,9 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
 			all_struct_names_valid(&t, &struct_context)?;
+			if let Some(s) = recursively_find_type_var(t) {
+				return Err(format!("found type variable '{} in type of global variable", s));
+			}
 			if global_context.contains_key(name) {
 				return Err(format!("cannot have two global variables both named '{}'", name));
 			}
