@@ -15,5 +15,12 @@ maybe:
 
 interpreter may be helpful in testing, to compare compiler against
 
-lexing comments: http://lalrpop.github.io/lalrpop/lexer_tutorial/001_lexer_gen.html
 How to handle errno?
+on my laptop, errno is a c macro that expands to (*__errno_location())
+errno.h includes a declaration of the following function (with gcc attributes):
+extern int *__errno_location (void) __attribute__ ((__nothrow__ , __leaf__)) __attribute__ ((__const__));
+one way to handle this would be to add this function to the func context (along with all the
+other "std lib" functions), and call it manually to get or set errno
+For completeness, I would need to make sure no user-defined names ever get mangled to __errno_location
+Alternatively, I could add a function in runtime.c that will return a pointer to errno. This would
+be more portable to systems where errno is just a global int, not a macro to a function call

@@ -13,7 +13,7 @@ pub enum StructType{
 type LocalContext = HashMap<String, ast::Ty>;
 type GlobalContext = HashMap<String, ast::Ty>;
 //type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
-type StructContext = HashMap<String, StructType>;
+pub type StructContext = HashMap<String, StructType>;
 
 //FuncContext contains generic and non-generic functions
 //a generic and non-generic function cannot share the same name
@@ -45,7 +45,7 @@ fn decay_type(t: ast::Ty) -> ast::Ty {
 	}
 }
 
-fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
+pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
 	use ast::Ty::*;
 	match original {
 		TypeVar(s) => {
@@ -658,7 +658,7 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	
 }
 
-fn recursively_find_type_var(t: &ast::Ty) -> Option<&str> {
+pub fn recursively_find_type_var(t: &ast::Ty) -> Option<&str> {
 	use ast::Ty::*;
 	match t {
 		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => None,
@@ -771,9 +771,11 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								Generic{mode, ..} => mode
 							};
 							use ast::PolymorphMode::*;
+							let type_param_found_in_type_var = recursively_find_type_var(type_var);
+							let field_type_param_is_concrete = type_param_found_in_type_var.is_none();
 							if current_mode == Erased
 								&& *field_mode == Separated
-								&& !type_param_is_concrete {
+								&& !field_type_param_is_concrete {
 								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
 							}
 							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, type_param.clone());
@@ -840,7 +842,13 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 	Ok(())
 }
 
-pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
+pub struct ProgramContext {
+	pub structs: StructContext,
+	pub funcs: FuncContext,
+	pub globals: GlobalContext
+}
+
+pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, String>{
 	/*
 	create StructContext:
 		collect names of all structs, put all of them into struct_context
@@ -910,7 +918,6 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 
 	let mut func_context: FuncContext = get_builtins();
 	let mut global_context: GlobalContext = HashMap::new();
-	global_context.insert("errno".to_owned(), ast::Ty::Int{signed: true, size: ast::IntSize::Size32});
 	use ast::Gdecl::*;
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name: func_name, args, ..} => {
@@ -1012,7 +1019,8 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 			let return_type_is_correct = return_type == &Some(ast::Ty::Int{
 				signed: true, size: ast::IntSize::Size32
 			});
-			let args_are_correct =
+			let args_are_correct_simple = args.len() == 0;
+			let args_are_correct_extended =
 				args.len() == 2
 				&& args[0] == ast::Ty::Int{
 					signed: true, size: ast::IntSize::Size32
@@ -1023,10 +1031,15 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<(), String>{
 					}
 				)))
 			;
+			let args_are_correct = args_are_correct_simple || args_are_correct_extended;
 			if !return_type_is_correct || !args_are_correct {
-				return Err("main() must have type i32 main(i32, u8*)".to_owned());
+				return Err("main() must have type i32 main() or i32 main(i32, u8*)".to_owned());
 			}
 		}
 	}
-	Ok(())
+	Ok(ProgramContext{
+		structs: struct_context,
+		funcs: func_context,
+		globals: global_context
+	})
 }

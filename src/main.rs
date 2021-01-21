@@ -2,6 +2,7 @@
 extern crate lalrpop_util;
 mod ast;
 mod typechecker;
+mod llvm;
 
 //This seems to prevent clippy from checking the generated parser file
 #[allow(clippy::all)]
@@ -28,5 +29,6 @@ fn main() -> Result<(), String>{
 		program_source = read_to_string(filename).map_err(|e| format!("io error: {}", e))?;
 	}
 	let ast = program_parser.parse(program_source.as_str()).unwrap();
-	typechecker::typecheck_program(ast)
+	let _ = typechecker::typecheck_program(ast)?;
+	Ok(())
 }

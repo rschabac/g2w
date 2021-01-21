@@ -1,5 +1,6 @@
 use super::ast;
 use super::parser;
+
 #[test]
 fn parse_type_test(){
 	use ast::{Ty, IntSize, FloatSize};
