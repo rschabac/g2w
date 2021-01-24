@@ -24,3 +24,7 @@ other "std lib" functions), and call it manually to get or set errno
 For completeness, I would need to make sure no user-defined names ever get mangled to __errno_location
 Alternatively, I could add a function in runtime.c that will return a pointer to errno. This would
 be more portable to systems where errno is just a global int, not a macro to a function call
+
+doing type-specific things in generic functions requires function pointers, so that
+dictionary passing can be done manually
+http://okmij.org/ftp/Computation/typeclass.html

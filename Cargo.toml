@@ -16,7 +16,7 @@ build = "build.rs"
 #
 lalrpop-util = "0.19.1"
 regex = "1"
-llvm-ir = { version = "0.7.4", features = ["llvm-11"] }
+#llvm-ir = { version = "0.7.4", features = ["llvm-11"] }
 
 # Add a build-time dependency on the lalrpop library:
 [build-dependencies]
