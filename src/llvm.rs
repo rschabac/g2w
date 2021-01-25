@@ -64,6 +64,7 @@ pub enum Instruction{
 	Call{func_name: String, ret_typ: Ty, args: Vec<(Ty, Operand)>},
 	Bitcast{original_typ: Ty, op: Operand, new_typ: Ty},
 	Gep{typ: Ty, base: Operand, offsets: Vec<Operand>},
+	ExtractVal{base_typ: Ty, op: Operand, offsets: Vec<Operand>},
 	//will likely need to add more Instruction variants for floating point, etc.
 }
 

@@ -161,6 +161,7 @@ match e {
 		return Ok(Array{length: init.len() as u64, typ: Box::new(first_type)});
 	},
 	Index(base, index) => {
+		ctxt.type_for_lit_nulls = None;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
 		let result_type = match base_typ {
 			Ptr(Some(typ)) | Array{typ, ..} => Ok(*typ),
@@ -176,6 +177,8 @@ match e {
 	},
 	Proj(base, field) => {
 		use StructType::*;
+		//if base is LitNull, I can't determine what struct it is
+		ctxt.type_for_lit_nulls = None;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
 		use std::borrow::Borrow;
 		match base_typ {

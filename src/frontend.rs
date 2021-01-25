@@ -116,21 +116,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			stream,
 		}
 	},
-	ast::Expr::Id(s) => {
-		let (ll_ty, ll_op) = ctxt.get(s).unwrap_or_else(|| panic!("why is variable {} not in the context?", s));
-		//might need to do something about global strings here, convert array representation to i8*
-		let loaded_id = gensym(&format!("{}_loaded", s) as &str);
-		ExpResult{
-			llvm_typ: ll_ty.clone(),
-			llvm_op: llvm::Operand::Local(loaded_id.clone()),
-			stream: vec![
-				Component::Instr(loaded_id, llvm::Instruction::Load{
-					typ: llvm::Ty::Ptr(Box::new(ll_ty.clone())),
-					src: ll_op.clone()
-				})
-			]
-		}
-	},
+	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt, struct_context),
+	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt, struct_context),
+	ast::Expr::Proj(_,_) => cmp_lvalue_to_rvalue(e, "proj_loaded", ctxt, struct_context),
+	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt, struct_context),
 	ast::Expr::LitArr(exprs) => {
 		/*
 		%init0 = cmp_exp exprs[0]
@@ -180,9 +169,133 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			llvm_op: llvm::Operand::Local(arr_as_ptr),
 			stream
 		}
-	}
+	},
 	_ => todo!()
 }}
+
+//the op this function returns is a pointer to where the data is stored
+//the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
+fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult { match e {
+	ast::Expr::Id(s) => {
+		let (ll_ty, ll_op) = ctxt.get(s).unwrap_or_else(|| panic!("why is variable {} not in the context?", s));
+		ExpResult{
+			llvm_typ: ll_ty.clone(),
+			llvm_op: ll_op.clone(),
+			stream: vec![]
+		}
+	},
+	ast::Expr::Index(base, index) => {
+		/*
+		%index = cmp_exp(index)
+		%base_ptr = cmp_exp(base)
+		%result = getelementptr *base_typ, base_typ %base_ptr, %index
+		*/
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, &None, struct_context);
+		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, &None, struct_context);
+		let result_op = gensym("subscript");
+		let result_typ;
+		if let llvm::Ty::Ptr(t) = base_result.llvm_typ.clone() {
+			result_typ = *t;
+		} else {
+			panic!("index base llvm type is not a Ptr");
+		}
+		let mut stream = base_result.stream;
+		stream.append(&mut index_result.stream);
+		stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
+			typ: result_typ.clone(),
+			base: base_result.llvm_op,
+			offsets: vec![index_result.llvm_op]
+		}));
+		ExpResult{
+			llvm_typ: result_typ,
+			llvm_op: llvm::Operand::Local(result_op),
+			stream: stream
+		}
+	},
+	ast::Expr::Proj(base, field_name) => {
+		/*
+		%base = cmp_lvalue(base)
+		;if base points to a ptr
+		%base_loaded = load base_typ*, base_typ** %base
+		%field_ptr = getelementptr base_typ, base_typ* %base_loaded, i32 0, field_index(field_name, struct_context)
+		*/
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, &None, struct_context);
+		let mut stream = base_result.stream;
+		let (base_is_ptr, struct_name) = match base_result.llvm_typ.clone() {
+			llvm::Ty::NamedStruct(s) => (false, s),
+			llvm::Ty::Ptr(boxed) => match *boxed {
+				llvm::Ty::NamedStruct(s) => (true, s),
+				t => panic!("Proj base has llvm type Ptr({:?})", t)
+			}
+			t => panic!("Proj base has llvm type {:?}", t)
+		};
+		let fields: &Vec<(String, ast::Ty)> = match struct_context.get(&struct_name) {
+			None => panic!("struct {} not in struct_context", &struct_name),
+			Some(typechecker::StructType::NonGeneric(fields)) => fields,
+			Some(typechecker::StructType::Generic{fields, ..}) => {
+				eprintln!("Warning: Projecting off of generic struct, generics not yet implemented");
+				fields
+			}
+		};
+		let mut field_index: Option<u32> = None;
+		let mut result_ty: Option<llvm::Ty> = None;
+		for (i, (name, src_ty)) in fields.iter().enumerate() {
+			if name == field_name {
+				use std::convert::TryFrom;
+				field_index = Some(u32::try_from(i).unwrap_or_else(|_| panic!("error converting field index {} to u32", i) ));
+				result_ty = Some(cmp_ty(src_ty, struct_context));
+			}
+		}
+		let base_loaded_op: llvm::Operand;
+		if base_is_ptr {
+			let base_loaded_uid = gensym("base_loaded");
+			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
+			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
+				typ: base_result.llvm_typ.clone(),
+				src: base_result.llvm_op
+			}));
+		} else {
+			base_loaded_op = base_result.llvm_op;
+		}
+		let field_index = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name) );
+		let result_ty = result_ty.unwrap();
+		let field_ptr_uid = gensym("field_ptr");
+		stream.push(Component::Instr(field_ptr_uid.clone(), llvm::Instruction::Gep{
+			typ: base_result.llvm_typ,
+			base: base_loaded_op,
+			offsets: vec![
+				llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: 0}),
+				llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: field_index as u64})
+			]
+		}));
+		ExpResult{
+			llvm_typ: result_ty,
+			llvm_op: llvm::Operand::Local(field_ptr_uid),
+			stream: stream
+		}
+	},
+	ast::Expr::Deref(base) => {
+		let base = base as &ast::Expr;
+		let base_result = cmp_exp(base, ctxt, &None, struct_context);
+		base_result
+	},
+	other => panic!("{:?} is not a valid lvalue")
+}}
+
+fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
+	let mut lvalue_result = cmp_lvalue(e, ctxt, struct_context);
+	let loaded_id = gensym(gensym_seed);
+	let new_stream: Stream = vec![
+		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+			typ: llvm::Ty::Ptr(Box::new(lvalue_result.llvm_typ.clone())),
+			src: lvalue_result.llvm_op
+		})
+	];
+	lvalue_result.stream = new_stream;
+	//don't need to change the typ, it is already the type of the var
+	lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
+	lvalue_result
+}
 
 /*
 actually figuring out the size of a type is not possible/difficult due to struct packing,
