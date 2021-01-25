@@ -6,8 +6,7 @@ mod llvm;
 mod frontend;
 
 //This seems to prevent clippy from checking the generated parser file
-#[allow(clippy::all)]
-lalrpop_mod!(pub parser); //synthesized by LALRPOP
+lalrpop_mod!(#[allow(clippy::all)] pub parser);
 
 #[cfg(test)]
 mod tests;
