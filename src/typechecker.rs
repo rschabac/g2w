@@ -342,6 +342,7 @@ match e {
 			(Int{..}, Int{..})
 		  | (Ptr(_), Ptr(_))
 		  | (Float(_), Float(_))
+		  | (Float(_), Int{..}) | (Int{..}, Float(_))
 		  | (Bool, Int{..}) => Ok(dest_type.clone()),
 			
 			//TODO: casting to/from type vars?
@@ -1017,7 +1018,6 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, Stri
 	//make sure main has the right type signature
 	match func_context.get("main") {
 		Some(FuncType::Generic{..}) => return Err("main() cannot be a generic function".to_owned()),
-		None => return Err("main() must have type i32 main(i32, u8*)".to_owned()),
 		Some(FuncType::NonGeneric{return_type, args}) => {
 			let return_type_is_correct = return_type == &Some(ast::Ty::Int{
 				signed: true, size: ast::IntSize::Size32
@@ -1038,7 +1038,8 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, Stri
 			if !return_type_is_correct || !args_are_correct {
 				return Err("main() must have type i32 main() or i32 main(i32, u8*)".to_owned());
 			}
-		}
+		},
+		None => ()
 	}
 	Ok(ProgramContext{
 		structs: struct_context,

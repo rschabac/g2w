@@ -5,6 +5,16 @@ pub enum IntSize{
 	Size32,
 	Size64
 }
+impl IntSize{
+	pub fn num_bits(&self) -> u8 {
+		match self {
+			IntSize::Size8 => 8,
+			IntSize::Size16 => 16,
+			IntSize::Size32 => 32,
+			IntSize::Size64 => 64
+		}
+	}
+}
 impl std::fmt::Display for IntSize {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		use IntSize::*;

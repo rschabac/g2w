@@ -64,8 +64,18 @@ pub enum Instruction{
 	Call{func_name: String, ret_typ: Ty, args: Vec<(Ty, Operand)>},
 	Bitcast{original_typ: Ty, op: Operand, new_typ: Ty},
 	Gep{typ: Ty, base: Operand, offsets: Vec<Operand>},
-	ExtractVal{base_typ: Ty, op: Operand, offsets: Vec<Operand>},
 	//will likely need to add more Instruction variants for floating point, etc.
+	Trunc{old_bits: u32, op: Operand, new_bits: u32},
+	SExt{old_bits: u32, op: Operand, new_bits: u32},
+	ZExt{old_bits: u32, op: Operand, new_bits: u32},
+	//I only truncate floats from 64 bits to 32 bits, and only extend floats from 32 bits to 64 bits,
+	//so only the operand is needed.
+	FloatTrunc(Operand),
+	FloatExt(Operand),
+	SignedToFloat{old_bits: u32, op: Operand, result_is_64_bit: bool},
+	UnsignedToFloat{old_bits: u32, op: Operand, result_is_64_bit: bool},
+	FloatToSigned{src_is_64_bit: bool, op: Operand, new_bits: u32},
+	FloatToUnsigned{src_is_64_bit: bool, op: Operand, new_bits: u32},
 }
 
 pub struct Block{

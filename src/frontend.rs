@@ -170,6 +170,152 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			stream
 		}
 	},
+	ast::Expr::Cast(new_type, src) => {
+		let src_result = cmp_exp(src as &ast::Expr, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let new_llvm_typ = cmp_ty(new_type, struct_context);
+		use llvm::Ty::*;
+		match (&new_llvm_typ, &src_result.llvm_typ) {
+			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
+				if new_bits == old_bits {
+					//llvm does not care about the signs
+					return src_result;
+				}
+				if new_bits < old_bits {
+					let truncated_uid = gensym("truncated");
+					let mut stream = src_result.stream;
+					stream.push(Component::Instr(truncated_uid.clone(), llvm::Instruction::Trunc{
+						old_bits: *old_bits,
+						op: src_result.llvm_op,
+						new_bits: *new_bits,
+					}));
+					ExpResult{
+						llvm_typ: new_llvm_typ,
+						llvm_op: llvm::Operand::Local(truncated_uid),
+						stream: stream
+					}
+				} else {
+					let extended_uid = gensym("extended");
+					let mut stream = src_result.stream;
+					if *old_signed {
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::SExt{
+							old_bits: *old_bits,
+							op: src_result.llvm_op,
+							new_bits: *new_bits,
+						}));
+					} else {
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::ZExt{
+							old_bits: *old_bits,
+							op: src_result.llvm_op,
+							new_bits: *new_bits,
+						}));
+					}
+					ExpResult{
+						llvm_typ: new_llvm_typ,
+						llvm_op: llvm::Operand::Local(extended_uid),
+						stream: stream
+					}
+				}
+			},
+			(Float32, Float32) | (Float64, Float64) => src_result,
+			(Float32, Float64) => {
+				let truncated_uid = gensym("float_truncated");
+				let mut stream = src_result.stream;
+				stream.push(Component::Instr(truncated_uid.clone(), 
+					llvm::Instruction::FloatTrunc(src_result.llvm_op)
+				));
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(truncated_uid),
+					stream: stream
+				}
+			},
+			(Float64, Float32) => {
+				let extended_uid = gensym("float_truncated");
+				let mut stream = src_result.stream;
+				stream.push(Component::Instr(extended_uid.clone(), 
+					llvm::Instruction::FloatTrunc(src_result.llvm_op)
+				));
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(extended_uid),
+					stream: stream
+				}
+			},
+			(Float32, Int{bits, signed}) | (Float64, Int{bits, signed}) => {
+				let converted_uid = gensym("int_to_float");
+				let mut stream = src_result.stream;
+				if *signed {
+					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::SignedToFloat{
+						old_bits: *bits,
+						op: src_result.llvm_op,
+						result_is_64_bit: matches!(new_llvm_typ, Float64)
+					}));
+				} else {
+					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::UnsignedToFloat{
+						old_bits: *bits,
+						op: src_result.llvm_op,
+						result_is_64_bit: matches!(new_llvm_typ, Float64)
+					}));
+				}
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(converted_uid),
+					stream: stream
+				}
+			},
+			(Int{bits, signed}, Float32) | (Int{bits, signed}, Float64) => {
+				let converted_uid = gensym("float_to_int");
+				let mut stream = src_result.stream;
+				if *signed {
+					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToSigned{
+						new_bits: *bits,
+						op: src_result.llvm_op,
+						src_is_64_bit: matches!(new_llvm_typ, Float64)
+					}));
+				} else {
+					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToUnsigned{
+						new_bits: *bits,
+						op: src_result.llvm_op,
+						src_is_64_bit: matches!(new_llvm_typ, Float64)
+					}));
+				}
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(converted_uid),
+					stream: stream
+				}
+			},
+			(Int{bits, ..}, Bool) => {
+				let truncated_uid = gensym("int_to_bool");
+				let mut stream = src_result.stream;
+				stream.push(Component::Instr(truncated_uid.clone(), llvm::Instruction::Trunc{
+					old_bits: *bits,
+					op: src_result.llvm_op,
+					new_bits: 1
+				}));
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(truncated_uid),
+					stream: stream
+				}
+			},
+			(Ptr(_), Ptr(_)) => {
+				let casted_uid = gensym("ptr_cast");
+				let mut stream = src_result.stream;
+				stream.push(Component::Instr(casted_uid.clone(), llvm::Instruction::Bitcast{
+					original_typ: src_result.llvm_typ,
+					op: src_result.llvm_op,
+					new_typ: new_llvm_typ.clone()
+				}));
+				ExpResult{
+					llvm_typ: new_llvm_typ,
+					llvm_op: llvm::Operand::Local(casted_uid),
+					stream: stream
+				}
+			}
+			(new, old) => panic!("trying to cast from {:?} to {:?}", old, new)
+		}
+	},
 	_ => todo!()
 }}
 
@@ -279,7 +425,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		let base_result = cmp_exp(base, ctxt, &None, struct_context);
 		base_result
 	},
-	other => panic!("{:?} is not a valid lvalue")
+	other => panic!("{:?} is not a valid lvalue", other)
 }}
 
 fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
