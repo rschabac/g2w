@@ -3,6 +3,8 @@ extern crate lalrpop_util;
 mod ast;
 mod typechecker;
 mod llvm;
+
+#[allow(dead_code)] //TODO: remove this later
 mod frontend;
 
 //This seems to prevent clippy from checking the generated parser file

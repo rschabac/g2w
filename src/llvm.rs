@@ -3,8 +3,8 @@
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty{
-	Void,
-	Bool,
+	//Void,
+	//Bool,
 	Int{bits: u32, signed: bool},
 	Float32,
 	Float64,
@@ -66,8 +66,7 @@ pub enum Instruction{
 	Gep{typ: Ty, base: Operand, offsets: Vec<Operand>},
 	//will likely need to add more Instruction variants for floating point, etc.
 	Trunc{old_bits: u32, op: Operand, new_bits: u32},
-	SExt{old_bits: u32, op: Operand, new_bits: u32},
-	ZExt{old_bits: u32, op: Operand, new_bits: u32},
+	Ext{old_bits: u32, op: Operand, new_bits: u32, signed: bool},
 	//I only truncate floats from 64 bits to 32 bits, and only extend floats from 32 bits to 64 bits,
 	//so only the operand is needed.
 	FloatTrunc(Operand),

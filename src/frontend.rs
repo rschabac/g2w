@@ -3,6 +3,8 @@ use crate::typechecker;
 use crate::llvm;
 use std::collections::HashMap;
 
+
+
 type Context = HashMap<String, (llvm::Ty, llvm::Operand)>;
 
 enum Component{
@@ -32,7 +34,7 @@ pub fn gensym(s: &str) -> String {
 
 fn cmp_ty(t: &ast::Ty, struct_context: &typechecker::StructContext) -> llvm::Ty {
 	match t {
-		ast::Ty::Bool => llvm::Ty::Bool,
+		ast::Ty::Bool => llvm::Ty::Int{bits: 1, signed: false},
 		ast::Ty::Int{size: ast::IntSize::Size8, signed} => llvm::Ty::Int{bits: 8, signed: *signed},
 		ast::Ty::Int{size: ast::IntSize::Size16, signed} => llvm::Ty::Int{bits: 16, signed: *signed},
 		ast::Ty::Int{size: ast::IntSize::Size32, signed} => llvm::Ty::Int{bits: 32, signed: *signed},
@@ -73,7 +75,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 		Some(t) => panic!("type_for_lit_nulls in cmp_exp is not a pointer: {:?}", t)
 	},
 	ast::Expr::LitBool(b) => ExpResult{
-		llvm_typ: llvm::Ty::Bool,
+		llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 		llvm_op: llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: if *b {1} else {0} }),
 		stream: vec![],
 	},
@@ -196,19 +198,12 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 				} else {
 					let extended_uid = gensym("extended");
 					let mut stream = src_result.stream;
-					if *old_signed {
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::SExt{
-							old_bits: *old_bits,
-							op: src_result.llvm_op,
-							new_bits: *new_bits,
-						}));
-					} else {
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::ZExt{
-							old_bits: *old_bits,
-							op: src_result.llvm_op,
-							new_bits: *new_bits,
-						}));
-					}
+					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+						old_bits: *old_bits,
+						op: src_result.llvm_op,
+						new_bits: *new_bits,
+						signed: *old_signed
+					}));
 					ExpResult{
 						llvm_typ: new_llvm_typ,
 						llvm_op: llvm::Operand::Local(extended_uid),
@@ -285,20 +280,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 					stream: stream
 				}
 			},
-			(Int{bits, ..}, Bool) => {
-				let truncated_uid = gensym("int_to_bool");
-				let mut stream = src_result.stream;
-				stream.push(Component::Instr(truncated_uid.clone(), llvm::Instruction::Trunc{
-					old_bits: *bits,
-					op: src_result.llvm_op,
-					new_bits: 1
-				}));
-				ExpResult{
-					llvm_typ: new_llvm_typ,
-					llvm_op: llvm::Operand::Local(truncated_uid),
-					stream: stream
-				}
-			},
 			(Ptr(_), Ptr(_)) => {
 				let casted_uid = gensym("ptr_cast");
 				let mut stream = src_result.stream;
@@ -316,6 +297,243 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			(new, old) => panic!("trying to cast from {:?} to {:?}", old, new)
 		}
 	},
+	ast::Expr::Binop(left, bop, right) => {
+		let left_result = cmp_exp(left, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let mut right_result = cmp_exp(right, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let mut stream = left_result.stream;
+		stream.append(&mut right_result.stream);
+		use ast::BinaryOp::*;
+		match (bop, &left_result.llvm_typ, &right_result.llvm_typ) {
+			//Arithmetic between Ints
+			(_, llvm::Ty::Int{bits: l_bits, signed: l_signed}, llvm::Ty::Int{bits: r_bits, signed: r_signed})
+			if matches!(bop, Add | Sub | Mul | Div | Mod | And | Or | Bitand | Bitor | Bitxor | Shl | Shr | Sar)=> {
+				let uid = gensym("bool_op");
+				let mut extended_left_op = left_result.llvm_op;
+				let mut extended_right_op = right_result.llvm_op;
+				use std::cmp::Ordering;
+				match l_bits.cmp(r_bits) {
+					Ordering::Less => {
+						let extended_uid = gensym("extend_for_binop");
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+							old_bits: *l_bits,
+							op: extended_left_op,
+							new_bits: *r_bits,
+							signed: *l_signed
+						}));
+						extended_left_op = llvm::Operand::Local(extended_uid);
+					},
+					Ordering::Greater => {
+						let extended_uid = gensym("extend_for_binop");
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+							old_bits: *r_bits,
+							op: extended_right_op,
+							new_bits: *l_bits,
+							signed: *r_signed
+						}));
+						extended_right_op = llvm::Operand::Local(extended_uid);
+					},
+					Ordering::Equal => ()
+				};
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					op: cmp_binary_op(bop),
+					typ: llvm::Ty::Int{bits: std::cmp::max(*l_bits, *r_bits), signed: false},
+					left: extended_left_op,
+					right: extended_right_op
+				}));
+				ExpResult{
+					llvm_typ: left_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			//Comparisons between Ints
+			(cond_op, llvm::Ty::Int{bits: l_bits, signed}, llvm::Ty::Int{bits: r_bits, ..}) => {
+				let uid = gensym("cmp");
+				let mut extended_left_op = left_result.llvm_op;
+				let mut extended_right_op = right_result.llvm_op;
+				use std::cmp::Ordering;
+				match l_bits.cmp(r_bits) {
+					Ordering::Less => {
+						let extended_uid = gensym("extend_for_binop");
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+							old_bits: *l_bits,
+							op: extended_left_op,
+							new_bits: *r_bits,
+							signed: *signed
+						}));
+						extended_left_op = llvm::Operand::Local(extended_uid);
+					},
+					Ordering::Greater => {
+						let extended_uid = gensym("extend_for_binop");
+						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+							old_bits: *r_bits,
+							op: extended_right_op,
+							new_bits: *l_bits,
+							signed: *signed
+						}));
+						extended_right_op = llvm::Operand::Local(extended_uid);
+					},
+					Ordering::Equal => ()
+				};
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+					cond: cmp_cond_op(cond_op),
+					typ: llvm::Ty::Int{bits: std::cmp::max(*l_bits, *r_bits), signed: *signed},
+					left: extended_left_op,
+					right: extended_right_op
+				}));
+				ExpResult{
+					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			//Arithmetic and Comparisons between Floats
+			(_, llvm::Ty::Float32, llvm::Ty::Float32) | (_, llvm::Ty::Float64, llvm::Ty::Float64) => match bop {
+				Equ | Neq | Gt | Gte | Lt | Lte => {
+					let uid = gensym("float_cmp");
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+						cond: cmp_cond_op(bop),
+						typ: left_result.llvm_typ,
+						left: left_result.llvm_op,
+						right: right_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				},
+				arith => {
+					let uid = gensym("float_arith");
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+						op: cmp_binary_op(arith),
+						typ: left_result.llvm_typ,
+						left: left_result.llvm_op,
+						right: right_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: right_result.llvm_typ,
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				}
+			},
+			(_, llvm::Ty::Float32, llvm::Ty::Float64) => match bop {
+				Equ | Neq | Gt | Gte | Lt | Lte => {
+					let uid = gensym("float_cmp");
+					let extended_uid = gensym("float_ext");
+					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+						cond: cmp_cond_op(bop),
+						typ: llvm::Ty::Float64,
+						left: llvm::Operand::Local(extended_uid),
+						right: right_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: llvm::Ty::Float64,
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				},
+				_arith => {
+					let uid = gensym("float_arith");
+					let extended_uid = gensym("float_ext");
+					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+						op: cmp_binary_op(bop),
+						typ: llvm::Ty::Float64,
+						left: llvm::Operand::Local(extended_uid),
+						right: right_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: llvm::Ty::Float64,
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				}
+			},
+			(_, llvm::Ty::Float64, llvm::Ty::Float32) => match bop {
+				Equ | Neq | Gt | Gte | Lt | Lte => {
+					let uid = gensym("float_cmp");
+					let extended_uid = gensym("float_ext");
+					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+						cond: cmp_cond_op(bop),
+						typ: llvm::Ty::Float64,
+						right: llvm::Operand::Local(extended_uid),
+						left: left_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: llvm::Ty::Float64,
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				},
+				_arith => {
+					let uid = gensym("float_arith");
+					let extended_uid = gensym("float_ext");
+					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
+					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+						op: cmp_binary_op(bop),
+						typ: llvm::Ty::Float64,
+						right: llvm::Operand::Local(extended_uid),
+						left: left_result.llvm_op
+					}));
+					ExpResult{
+						llvm_typ: llvm::Ty::Float64,
+						llvm_op: llvm::Operand::Local(uid),
+						stream: stream
+					}
+				}
+			},
+			//Pointer arithmetic
+			(Add, llvm::Ty::Ptr(_), llvm::Ty::Int{bits, ..}) | 
+			(Sub, llvm::Ty::Ptr(_), llvm::Ty::Int{bits, ..}) => {
+				let ptr_arith_uid = gensym("ptr_arith");
+				let offset_op;
+				if matches!(bop, ast::BinaryOp::Sub) {
+					let negated_offset_uid = gensym("negated_offset");
+					stream.push(Component::Instr(negated_offset_uid.clone(), llvm::Instruction::Binop{
+						op: llvm::BinaryOp::Mul,
+						typ: right_result.llvm_typ.clone(),
+						left: right_result.llvm_op,
+						right: llvm::Operand::Const(llvm::Constant::SInt{bits: *bits, val: -1})
+					}));
+					offset_op = llvm::Operand::Local(negated_offset_uid);
+				} else {
+					offset_op = right_result.llvm_op;
+				}
+				stream.push(Component::Instr(ptr_arith_uid.clone(), llvm::Instruction::Gep{
+					typ: left_result.llvm_typ.clone(),
+					base: left_result.llvm_op,
+					offsets: vec![
+						offset_op
+					]
+				}));
+				ExpResult{
+					llvm_typ: left_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(ptr_arith_uid),
+					stream: stream
+				}
+			},
+			//Pointer Comparison
+			(_cond_op, llvm::Ty::Ptr(_), llvm::Ty::Ptr(_)) => {
+				let uid = gensym("ptr_cmp");
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+					cond: cmp_cond_op(bop),
+					typ: left_result.llvm_typ,
+					left: left_result.llvm_op,
+					right: right_result.llvm_op
+				}));
+				ExpResult{
+					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			_ => panic!("cannot use binop {:?} on llvm types {:?} and {:?}", bop, left_result.llvm_typ, right_result.llvm_typ)
+		}
+	}
 	_ => todo!()
 }}
 
@@ -441,6 +659,41 @@ fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context, struct
 	//don't need to change the typ, it is already the type of the var
 	lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
 	lvalue_result
+}
+
+fn cmp_binary_op(bop: &ast::BinaryOp) -> llvm::BinaryOp {
+	use ast::BinaryOp as SrcOp;
+	use llvm::BinaryOp as LOp;
+	match bop {
+		SrcOp::Add => LOp::Add,
+		SrcOp::Sub => LOp::Sub,
+		SrcOp::Mul => LOp::Mul,
+		SrcOp::Div => LOp::Div,
+		SrcOp::Mod => LOp::Mod,
+		SrcOp::And => LOp::And,
+		SrcOp::Or => LOp::Or,
+		SrcOp::Bitand => LOp::Bitand,
+		SrcOp::Bitor => LOp::Bitor,
+		SrcOp::Bitxor => LOp::Bitxor,
+		SrcOp::Shl => LOp::Shl,
+		SrcOp::Shr => LOp::Shr,
+		SrcOp::Sar => LOp::Sar,
+		_ => panic!("{:?} cannot be converted to an llvm BinaryOp", bop)
+	}
+}
+
+fn cmp_cond_op(bop: &ast::BinaryOp) -> llvm::Cond {
+	use ast::BinaryOp as SrcOp;
+	use llvm::Cond as LOp;
+	match bop {
+		SrcOp::Equ => LOp::Equ,
+		SrcOp::Neq => LOp::Neq,
+		SrcOp::Gt => LOp::Gt,
+		SrcOp::Gte => LOp::Gte,
+		SrcOp::Lt => LOp::Lt,
+		SrcOp::Lte => LOp::Lte,
+		_ => panic!("{:?} cannot be converted to an llvm Cond", bop)
+	}
 }
 
 /*
