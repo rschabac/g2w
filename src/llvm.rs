@@ -75,6 +75,8 @@ pub enum Instruction{
 	UnsignedToFloat{old_bits: u32, op: Operand, result_is_64_bit: bool},
 	FloatToSigned{src_is_64_bit: bool, op: Operand, new_bits: u32},
 	FloatToUnsigned{src_is_64_bit: bool, op: Operand, new_bits: u32},
+	FloatNeg{is_64_bit: bool, op: Operand},
+	PtrToInt{ptr_ty: Ty, op: Operand}, //size of the resulting integer will always be 64 bits
 }
 
 pub struct Block{

@@ -533,7 +533,100 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			},
 			_ => panic!("cannot use binop {:?} on llvm types {:?} and {:?}", bop, left_result.llvm_typ, right_result.llvm_typ)
 		}
-	}
+	},
+	ast::Expr::Unop(uop, base) => {
+		let base_result = cmp_exp(base, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let mut stream = base_result.stream;
+		use ast::UnaryOp::*;
+		match (uop, &base_result.llvm_typ) {
+			(Neg, llvm::Ty::Int{bits, signed}) => {
+				debug_assert!(*signed, "negating an unsigned int");
+				let uid = gensym("neg_int");
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					op: llvm::BinaryOp::Mul,
+					typ: llvm::Ty::Int{bits: *bits, signed: *signed},
+					left: base_result.llvm_op,
+					right: llvm::Operand::Const(llvm::Constant::SInt{bits: *bits, val: -1})
+				}));
+				ExpResult{
+					llvm_typ: base_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			(Neg, llvm::Ty::Float32) | (Neg, llvm::Ty::Float64) => {
+				let uid = gensym("neg_float");
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::FloatNeg{
+					is_64_bit: base_result.llvm_typ == llvm::Ty::Float64,
+					op: base_result.llvm_op
+				}));
+				ExpResult{
+					llvm_typ: base_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			(Neg, t) => panic!("neg of type {:?}", t),
+			(Lognot, llvm::Ty::Int{bits, signed}) => {
+				debug_assert!(*bits == 1 && !signed);
+				let uid = gensym("lognot");
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					op: llvm::BinaryOp::Sub,
+					typ: llvm::Ty::Int{bits: 1, signed: false},
+					left: llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 1}),
+					right: base_result.llvm_op
+				}));
+				ExpResult{
+					llvm_typ: base_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			(Lognot, t) => panic!("neg of type {:?}", t),
+			(Bitnot, llvm::Ty::Int{bits, signed}) => {
+				let uid = gensym("bitnot");
+				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					op: llvm::BinaryOp::Bitxor,
+					typ: llvm::Ty::Int{bits: *bits, signed: *signed},
+					left: base_result.llvm_op,
+					right: llvm::Operand::Const(llvm::Constant::SInt{bits: *bits, val: -1})
+				}));
+				ExpResult{
+					llvm_typ: base_result.llvm_typ,
+					llvm_op: llvm::Operand::Local(uid),
+					stream: stream
+				}
+			},
+			(Bitnot, t) => panic!("lognot of type {:?}", t)
+		}
+	},
+	ast::Expr::GetRef(boxed) => {
+		let mut result = cmp_lvalue(boxed as &ast::Expr, ctxt, struct_context);
+		result.llvm_typ = llvm::Ty::Ptr(Box::new(result.llvm_typ));
+		result
+	},
+	ast::Expr::Sizeof(t) => {
+		let size_uid = gensym("sizeof");
+		let size_int_uid = gensym("sizeof_int");
+		let llvm_typ = cmp_ty(t, struct_context);
+		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
+		let stream = vec![
+			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
+				typ: llvm_ptr_typ.clone(),
+				base: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
+				offsets: vec![llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1})]
+			}),
+			Component::Instr(size_int_uid.clone(), llvm::Instruction::PtrToInt{
+				ptr_ty: llvm_ptr_typ,
+				op: llvm::Operand::Local(size_uid)
+			})
+		];
+		ExpResult{
+			llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
+			llvm_op: llvm::Operand::Local(size_int_uid),
+			stream: stream
+		}
+	},
 	_ => todo!()
 }}
 
