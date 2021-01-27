@@ -113,7 +113,7 @@ fn get_builtins() -> FuncContext {
 //when typechecking a function call, it the function is one of these, the
 //number and type of arguments are not checked (each individual argument must
 //still be well-typed though).
-static PRINTF_FAMILY: &[&str] = &[
+pub static PRINTF_FAMILY: &[&str] = &[
 	"printf",
 	"sprintf",
 	"fprintf",

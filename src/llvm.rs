@@ -3,8 +3,7 @@
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty{
-	//Void,
-	//Bool,
+	Void,
 	Int{bits: u32, signed: bool},
 	Float32,
 	Float64,
@@ -14,6 +13,18 @@ pub enum Ty{
 	Array{length: usize, typ: Box<Ty>},
 	NamedStruct(String),
 }
+/*
+impl std::fmt::Display for Ty{
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		use Ty::*;
+		match self {
+			Void => write!(f, "void"),
+			Int{bits, ..} => write!(f, "i{}", bits),
+			Float32
+		}
+	}
+}
+*/
 
 pub enum Terminator{
 	Ret(Option<Operand>),

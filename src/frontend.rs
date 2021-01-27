@@ -5,7 +5,10 @@ use std::collections::HashMap;
 
 
 
-type Context = HashMap<String, (llvm::Ty, llvm::Operand)>;
+struct Context<'a>{
+	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
+	funcs: &'a typechecker::FuncContext,
+}
 
 enum Component{
 	Label(String),							//label of a block
@@ -627,14 +630,65 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			stream: stream
 		}
 	},
-	_ => todo!()
+	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt, struct_context),
+	ast::Expr::GenericCall{..} => panic!("generic_call not implemented yet")
 }}
+
+fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
+	//TODO: PRINTF_FAMILY
+	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
+	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
+	let printf_expected_args_vec;
+	let printf_ret_ty;
+	let (return_type, expected_arg_types) = match ctxt.funcs.get(func_name.as_str()) {
+		Some(typechecker::FuncType::NonGeneric{return_type, args}) => (return_type, args),
+		None => {
+			if typechecker::PRINTF_FAMILY.contains(&func_name.as_str()){
+				printf_ret_ty = Some(ast::Ty::Int{size: ast::IntSize::Size32, signed: true});
+				//create an iterator that continuously yields void*, then take the first n from it
+				printf_expected_args_vec = Some(ast::Ty::Ptr(None)).into_iter()
+					.cycle()
+					.take(args.len())
+					.collect();
+				(&printf_ret_ty, &printf_expected_args_vec)
+			} else {
+				panic!("function {} does not exist", func_name)
+			}
+		}
+		Some(typechecker::FuncType::Generic{..}) => panic!("function {} is generic", func_name)
+	};
+	for (arg, expected_ty) in args.iter().zip(expected_arg_types) {
+		//only need to compute this if the arg is a LitNull
+		let type_for_lit_nulls = match arg {
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, struct_context)),
+			_ => None
+		};
+		let mut arg_result = cmp_exp(arg, ctxt, &type_for_lit_nulls, struct_context);
+		arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
+		stream.append(&mut arg_result.stream);
+	}
+	let uid = gensym("call");
+	let llvm_ret_ty = match return_type {
+		None => llvm::Ty::Void,
+		Some(t) => cmp_ty(t, struct_context)
+	};
+	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
+		func_name: func_name.clone(),
+		ret_typ: llvm_ret_ty.clone(),
+		args: arg_ty_ops
+	}));
+	ExpResult{
+		llvm_typ: llvm_ret_ty,
+		llvm_op: llvm::Operand::Local(uid),
+		stream: stream
+	}
+}
 
 //the op this function returns is a pointer to where the data is stored
 //the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
 fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult { match e {
 	ast::Expr::Id(s) => {
-		let (ll_ty, ll_op) = ctxt.get(s).unwrap_or_else(|| panic!("why is variable {} not in the context?", s));
+		let (ll_ty, ll_op) = ctxt.locals.get(s).unwrap_or_else(|| panic!("why is variable {} not in the context?", s));
 		ExpResult{
 			llvm_typ: ll_ty.clone(),
 			llvm_op: ll_op.clone(),
