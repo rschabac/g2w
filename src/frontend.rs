@@ -105,10 +105,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			typ: Box::new(llvm::Ty::Int{bits: 8, signed: false})
 		};
 		let stream = vec![
-			Component::GlobalString(global_string_ident.clone(), llvm::GlobalDecl{
-				typ: global_typ.clone(),
-				init: llvm::GlobalInit::GString(s.clone())
-			}),
+			Component::GlobalString(global_string_ident.clone(), llvm::GlobalDecl::GString(s.clone())),
 			Component::Instr(casted_local_ident.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm::Ty::Ptr(Box::new(global_typ)),
 				new_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
@@ -510,7 +507,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 					typ: left_result.llvm_typ.clone(),
 					base: left_result.llvm_op,
 					offsets: vec![
-						offset_op
+						(right_result.llvm_typ, offset_op)
 					]
 				}));
 				ExpResult{
@@ -617,7 +614,9 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
 				typ: llvm_ptr_typ.clone(),
 				base: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
-				offsets: vec![llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1})]
+				offsets: vec![
+					(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1}))
+				]
 			}),
 			Component::Instr(size_int_uid.clone(), llvm::Instruction::PtrToInt{
 				ptr_ty: llvm_ptr_typ,
@@ -715,7 +714,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
 			typ: result_typ.clone(),
 			base: base_result.llvm_op,
-			offsets: vec![index_result.llvm_op]
+			offsets: vec![(index_result.llvm_typ, index_result.llvm_op)]
 		}));
 		ExpResult{
 			llvm_typ: result_typ,
@@ -762,7 +761,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 			let base_loaded_uid = gensym("base_loaded");
 			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
 			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
-				typ: base_result.llvm_typ.clone(),
+				typ: base_result.llvm_typ.clone().remove_ptr(),
 				src: base_result.llvm_op
 			}));
 		} else {
@@ -775,8 +774,8 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 			typ: base_result.llvm_typ,
 			base: base_loaded_op,
 			offsets: vec![
-				llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: 0}),
-				llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: field_index as u64})
+				(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 0})),
+				(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: field_index as u64}))
 			]
 		}));
 		ExpResult{
@@ -798,7 +797,7 @@ fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context, struct
 	let loaded_id = gensym(gensym_seed);
 	let new_stream: Stream = vec![
 		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
-			typ: llvm::Ty::Ptr(Box::new(lvalue_result.llvm_typ.clone())),
+			typ: lvalue_result.llvm_typ.clone(),
 			src: lvalue_result.llvm_op
 		})
 	];
