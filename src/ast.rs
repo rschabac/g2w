@@ -143,3 +143,78 @@ pub enum Gdecl{
 	GGenericStructDecl{name: String, param: String, mode: PolymorphMode, fields: Vec<(Ty, String)>},
 	GGenericFuncDecl{name: String, ret_type: Option<Ty>, args: Vec<(Ty, String)>, body: Block, param: String, mode: PolymorphMode}
 }
+
+pub struct Func{
+	pub ret_type: Option<Ty>,
+	pub name: String,
+	pub args: Vec<(Ty, String)>,
+	pub body: Block
+}
+
+pub struct Struct{
+	pub name: String,
+	pub fields: Vec<(Ty, String)>
+}
+
+pub struct GenericStruct{
+	pub name: String,
+	pub param: String,
+	pub fields: Vec<(Ty, String)>
+}
+
+pub struct GenericFunc{
+	pub name: String,
+	pub ret_type: Option<Ty>,
+	pub args: Vec<(Ty, String)>,
+	pub body: Block,
+	pub param: String,
+}
+
+pub struct Program{
+	global_vars: Vec<(Ty, String)>,
+	funcs: Vec<Func>,
+	structs: Vec<Struct>,
+	erased_structs: Vec<GenericStruct>,
+	separated_structs: Vec<GenericStruct>,
+	erased_funcs: Vec<GenericFunc>,
+	separated_funcs: Vec<GenericFunc>
+}
+
+impl std::convert::From<Vec<Gdecl>> for Program {
+	fn from(mut gdecls: Vec<Gdecl>) -> Self {
+		let mut result = Program{
+			global_vars: Vec::new(),
+			funcs: Vec::new(),
+			structs: Vec::new(),
+			erased_structs: Vec::new(),
+			separated_structs: Vec::new(),
+			erased_funcs: Vec::new(),
+			separated_funcs: Vec::new(),
+		};
+		use Gdecl::*;
+		for gdecl in gdecls.drain(..) {
+			match gdecl {
+				GVarDecl(t, s) => result.global_vars.push((t, s)),
+				GFuncDecl{ret_type, name, args, body} => result.funcs.push(Func{
+					ret_type, name, args, body
+				}),
+				GStructDecl{name, fields} => result.structs.push(Struct{
+					name, fields
+				}),
+				GGenericStructDecl{name, param, mode: PolymorphMode::Erased, fields} => result.erased_structs.push(GenericStruct{
+					name, param, fields
+				}),
+				GGenericStructDecl{name, param, mode: PolymorphMode::Separated, fields} => result.separated_structs.push(GenericStruct{
+					name, param, fields
+				}),
+				GGenericFuncDecl{name, ret_type, args, body, param, mode: PolymorphMode::Erased} => result.erased_funcs.push(GenericFunc{
+					name, ret_type, args, body, param
+				}),
+				GGenericFuncDecl{name, ret_type, args, body, param, mode: PolymorphMode::Separated} => result.separated_funcs.push(GenericFunc{
+					name, ret_type, args, body, param
+				})
+			}
+		}
+		result
+	}
+}
