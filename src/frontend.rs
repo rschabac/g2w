@@ -7,10 +7,18 @@ use std::collections::HashMap;
 
 struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
+	globals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	funcs: &'a typechecker::FuncContext,
 }
+impl<'a> Context<'a> {
+	fn get_var(&self, name: &String) -> &(llvm::Ty, llvm::Operand) {
+		self.locals.get(name)
+			.or_else(|| self.globals.get(name))
+			.unwrap_or_else(|| panic!("why is variable {} not in the context", name))
+	}
+}
 
-enum Component{
+pub enum Component{
 	Label(String),							//label of a block
 	Instr(String, llvm::Instruction),		//regular instruction
 	Term(llvm::Terminator),					//terminator of a block
@@ -20,7 +28,7 @@ enum Component{
 	//Entry(String, llvm::Instruction),		//instruction that needs to be moved to the entry block (usually an Alloca Instruction)
 }
 
-type Stream = Vec<Component>;
+pub type Stream = Vec<Component>;
 
 static mut GENSYM_COUNT: usize = 0;
 pub fn gensym(s: &str) -> String {
@@ -53,10 +61,10 @@ fn cmp_ty(t: &ast::Ty, struct_context: &typechecker::StructContext) -> llvm::Ty 
 	}
 }
 
-struct ExpResult{
-	llvm_typ: llvm::Ty,
-	llvm_op: llvm::Operand,
-	stream: Stream,
+pub struct ExpResult{
+	pub llvm_typ: llvm::Ty,
+	pub llvm_op: llvm::Operand,
+	pub stream: Stream,
 
 	/*Not doing this currently, because I would have to store ast::Tys in the context as well
 	//only include this field when running with debug assertions to verify llvm_typ == cmp(src_typ)
@@ -65,7 +73,7 @@ struct ExpResult{
 	*/
 }
 
-fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>, struct_context: &typechecker::StructContext) -> ExpResult { match e {
+fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>, struct_context: &typechecker::StructContext) -> ExpResult { match e {
 	ast::Expr::LitNull => match type_for_lit_nulls {
 		None => panic!("type_for_lit_nulls is None in cmp_exp"),
 		Some(t @ llvm::Ty::Ptr(_)) => {
@@ -143,9 +151,9 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 			llvm_type_of_first_expr = init_0_result.llvm_typ;
 			stream.append(&mut init_0_result.stream);
 			expr_operands.push(init_0_result.llvm_op);
-			let new_type_for_lit_nulls = Some(llvm_type_of_first_expr.clone());
+			let new_type_for_lit_nulls = Some(&llvm_type_of_first_expr);
 			for init in exprs[1..].iter() {
-				let mut result = cmp_exp(init, ctxt, &new_type_for_lit_nulls, struct_context);
+				let mut result = cmp_exp(init, ctxt, new_type_for_lit_nulls, struct_context);
 				debug_assert_eq!(llvm_type_of_first_expr, result.llvm_typ);
 				stream.append(&mut result.stream);
 				expr_operands.push(result.llvm_op);
@@ -173,7 +181,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 		}
 	},
 	ast::Expr::Cast(new_type, src) => {
-		let src_result = cmp_exp(src as &ast::Expr, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
 		let new_llvm_typ = cmp_ty(new_type, struct_context);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
@@ -298,8 +306,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 		}
 	},
 	ast::Expr::Binop(left, bop, right) => {
-		let left_result = cmp_exp(left, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
-		let mut right_result = cmp_exp(right, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let left_result = cmp_exp(left, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let mut right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
 		let mut stream = left_result.stream;
 		stream.append(&mut right_result.stream);
 		use ast::BinaryOp::*;
@@ -535,7 +543,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 		}
 	},
 	ast::Expr::Unop(uop, base) => {
-		let base_result = cmp_exp(base, ctxt, &Some(llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let base_result = cmp_exp(base, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
 		let mut stream = base_result.stream;
 		use ast::UnaryOp::*;
 		match (uop, &base_result.llvm_typ) {
@@ -634,7 +642,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: &Option<llvm::Ty>,
 }}
 
 fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
-	//TODO: PRINTF_FAMILY
 	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
 	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
 	let printf_expected_args_vec;
@@ -662,7 +669,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_con
 			ast::Expr::LitNull => Some(cmp_ty(expected_ty, struct_context)),
 			_ => None
 		};
-		let mut arg_result = cmp_exp(arg, ctxt, &type_for_lit_nulls, struct_context);
+		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref(), struct_context);
 		arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
 		stream.append(&mut arg_result.stream);
 	}
@@ -687,7 +694,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_con
 //the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
 fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult { match e {
 	ast::Expr::Id(s) => {
-		let (ll_ty, ll_op) = ctxt.locals.get(s).unwrap_or_else(|| panic!("why is variable {} not in the context?", s));
+		let (ll_ty, ll_op) = ctxt.get_var(s);
 		ExpResult{
 			llvm_typ: ll_ty.clone(),
 			llvm_op: ll_op.clone(),
@@ -700,8 +707,8 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		%base_ptr = cmp_exp(base)
 		%result = getelementptr *base_typ, base_typ %base_ptr, %index
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, &None, struct_context);
-		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, &None, struct_context);
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, None, struct_context);
+		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None, struct_context);
 		let result_op = gensym("subscript");
 		let result_typ;
 		if let llvm::Ty::Ptr(t) = base_result.llvm_typ.clone() {
@@ -729,7 +736,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		%base_loaded = load base_typ*, base_typ** %base
 		%field_ptr = getelementptr base_typ, base_typ* %base_loaded, i32 0, field_index(field_name, struct_context)
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, &None, struct_context);
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, None, struct_context);
 		let mut stream = base_result.stream;
 		let (base_is_ptr, struct_name) = match base_result.llvm_typ.clone() {
 			llvm::Ty::NamedStruct(s) => (false, s),
@@ -786,7 +793,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 	},
 	ast::Expr::Deref(base) => {
 		let base = base as &ast::Expr;
-		let base_result = cmp_exp(base, ctxt, &None, struct_context);
+		let base_result = cmp_exp(base, ctxt, None, struct_context);
 		base_result
 	},
 	other => panic!("{:?} is not a valid lvalue", other)
@@ -842,58 +849,97 @@ fn cmp_cond_op(bop: &ast::BinaryOp) -> llvm::Cond {
 	}
 }
 
-/*
-actually figuring out the size of a type is not possible/difficult due to struct packing,
-which llvm controls. instead, sizeof will be replaced with llvm instructions that compute the size
-of the type. This is technically a runtime operation, but will almost certainly get optimized out.
-https://stackoverflow.com/questions/14608250/how-can-i-find-the-size-of-a-type
-
-this function is left here just in case I need it later
-fn sizeof(t: &ast::Ty, struct_context: &typechecker::StructContext, instantiation: Option<&ast::Ty>) -> u64 {
-	//instantiation (current idea):
-	//in a separated function instantiation, this will be set to Some(concrete_type)
-	//in an erased function, this will be set to None
-	use ast::IntSize::*;
-	use ast::FloatSize::*;
-	use ast::Ty::*;
-	use typechecker::StructType::*;
-	match t {
-		Bool | Int{size: Size8, ..} => 1,
-		Int{size: Size16, ..} => 2,
-		Int{size: Size32, ..} | Float(FSize32) => 4,
-		Int{size: Size64, ..} | Float(FSize64) | Ptr(_) => 8,
-		Array{length, typ} => sizeof(typ, struct_context, instantiation) * *length,
-		Struct(name) => {
-			let names_and_types= match struct_context.get(name) {
-				None => panic!("struct {} is not in the struct_context", name),
-				Some(Generic{..}) => panic!("struct {} is generic, expected non-generic struct", name),
-				Some(NonGeneric(names_and_types)) => names_and_types
-			};
-			names_and_types.iter().map(|(_name, t)| sizeof(t, struct_context, instantiation)).sum()
-		},
-		//There should be only be one TypeVar in a function, so I can ignore the string here
-		TypeVar(_) => {
-			match instantiation {
-				None => 8,
-				Some(t) => sizeof(t, struct_context, instantiation)
-			}
-		},
-		GenericStruct{type_var: type_param, name} => {
-			match struct_context.get(name) {
-				None => panic!("generic struct {} is not in the struct_context", name),
-				Some(NonGeneric(_)) => panic!("struct {} is not generic, expected generic struct", name),
-				Some(Generic{mode: _, type_var, fields: names_and_types}) => {
-					//mode is unused here, is this ok?
-					names_and_types.iter().map(|(_name, field_type)| {
-						//replace type_var with type_param in all fields
-						use crate::typechecker::replace_type_var_with;
-						let cloned_field_type = field_type.clone();
-						let replaced_field_type = replace_type_var_with(cloned_field_type, type_var, (type_param as &ast::Ty).clone());
-						sizeof(&replaced_field_type, struct_context, instantiation)
-					}).sum()
-				}
-			}
-		}
+fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, struct_context: &typechecker::StructContext) -> Stream { match stmt {
+	ast::Stmt::Assign(lhs, rhs) => {
+		let dest_result = cmp_lvalue(lhs, ctxt, struct_context);
+		let mut data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ), struct_context);
+		debug_assert_eq!(dest_result.llvm_typ, data_result.llvm_typ);
+		let mut stream = dest_result.stream;
+		stream.append(&mut data_result.stream);
+		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+			typ: data_result.llvm_typ,
+			data: data_result.llvm_op,
+			dest: dest_result.llvm_op
+		}));
+		stream
+	},
+	ast::Stmt::Decl(typ, var_name) => {
+		let uid = gensym(format!("{}_loc", var_name).as_str());
+		let llvm_typ = cmp_ty(typ, struct_context);
+		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
+		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ))]
+	},
+	ast::Stmt::Return(Some(expr)) => {
+		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty), struct_context);
+		expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
+			Some((expr_result.llvm_typ, expr_result.llvm_op))
+		)));
+		expr_result.stream
+	},
+	ast::Stmt::Return(None) => {
+		vec![Component::Term(llvm::Terminator::Ret(None))]
+	},
+	ast::Stmt::SCall(func_name, args) => {
+		let call_result = cmp_call(func_name.clone(), args, ctxt, struct_context);
+		//I can just ignore the operand that this produces
+		call_result.stream
+	},
+	ast::Stmt::GenericSCall{..} => panic!("generic_scall not implemented yet"),
+	ast::Stmt::If(cond, then_block, else_block) => {
+		let cond_result = cmp_exp(cond, ctxt, None, struct_context);
+		let then_lbl = gensym("then");
+		let else_lbl = gensym("else");
+		let merge_lbl = gensym("merge");
+		let mut then_stream = cmp_block(then_block, ctxt, expected_ret_ty, struct_context);
+		let mut else_stream = cmp_block(else_block, ctxt, expected_ret_ty, struct_context);
+		let mut stream = cond_result.stream;
+		stream.reserve(then_stream.len() + else_stream.len() + 6);
+		stream.push(Component::Term(llvm::Terminator::CondBr{
+			condition: cond_result.llvm_op,
+			true_dest: then_lbl.clone(),
+			false_dest: else_lbl.clone(),
+		}));
+		stream.push(Component::Label(then_lbl));
+		stream.append(&mut then_stream);
+		stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
+		stream.push(Component::Label(else_lbl));
+		stream.append(&mut else_stream);
+		stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
+		stream.push(Component::Label(merge_lbl));
+		stream
+	},
+	ast::Stmt::While(cond, body) => {
+		let mut cond_result = cmp_exp(cond, ctxt, None, struct_context);
+		let check_lbl = gensym("check_cond");
+		let body_lbl = gensym("body");
+		let after_lbl = gensym("after");
+		let mut body_stream = cmp_block(body, ctxt, expected_ret_ty, struct_context);
+		let mut stream = Vec::new();
+		stream.reserve(cond_result.stream.len() + body_stream.len() + 6);
+		stream.push(Component::Term(llvm::Terminator::Br(check_lbl.clone())));
+		stream.push(Component::Label(check_lbl.clone()));
+		stream.append(&mut cond_result.stream);
+		stream.push(Component::Term(llvm::Terminator::CondBr{
+			condition: cond_result.llvm_op,
+			true_dest: body_lbl.clone(),
+			false_dest: after_lbl.clone()
+		}));
+		stream.push(Component::Label(body_lbl));
+		stream.append(&mut body_stream);
+		stream.push(Component::Term(llvm::Terminator::Br(check_lbl)));
+		stream.push(Component::Label(after_lbl));
+		stream
 	}
+}}
+
+fn cmp_block(block: &ast::Block, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, struct_context: &typechecker::StructContext) -> Stream {
+	let mut stream = Vec::new();
+	for stmt in block.iter() {
+		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty, struct_context));
+	}
+	stream
 }
-*/
+
+fn cmp_prog(prog: &Vec<ast::Gdecl>, prog_context: &typechecker::ProgramContext) -> llvm::Program {
+	todo!()
+}
