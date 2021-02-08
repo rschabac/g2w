@@ -9,6 +9,7 @@ struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	funcs: &'a typechecker::FuncContext,
+	structs: &'a typechecker::StructContext
 }
 impl<'a> Context<'a> {
 	fn get_var(&self, name: &String) -> &(llvm::Ty, llvm::Operand) {
@@ -37,7 +38,8 @@ pub fn gensym(s: &str) -> String {
 		GENSYM_COUNT += 1;
 		n_string = GENSYM_COUNT.to_string();
 	}
-	let mut result_string = String::with_capacity(s.len() + n_string.len());
+	let mut result_string = String::with_capacity(s.len() + n_string.len() + 1);
+	result_string.push('_');
 	result_string.push_str(s);
 	result_string.push_str(&n_string);
 	result_string
@@ -73,7 +75,7 @@ pub struct ExpResult{
 	*/
 }
 
-fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>, struct_context: &typechecker::StructContext) -> ExpResult { match e {
+fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>) -> ExpResult { match e {
 	ast::Expr::LitNull => match type_for_lit_nulls {
 		None => panic!("type_for_lit_nulls is None in cmp_exp"),
 		Some(t @ llvm::Ty::Ptr(_)) => {
@@ -126,10 +128,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 			stream,
 		}
 	},
-	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt, struct_context),
-	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt, struct_context),
-	ast::Expr::Proj(_,_) => cmp_lvalue_to_rvalue(e, "proj_loaded", ctxt, struct_context),
-	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt, struct_context),
+	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt),
+	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt),
+	ast::Expr::Proj(_,_) => cmp_lvalue_to_rvalue(e, "proj_loaded", ctxt),
+	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt),
 	ast::Expr::LitArr(exprs) => {
 		/*
 		%init0 = cmp_exp exprs[0]
@@ -147,13 +149,13 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 			llvm_type_of_first_expr = llvm::Ty::Int{bits: 64, signed: true};
 		} else {
 			//ignoring the possibility of the first expr being a LitNull, not setting type_for_lit_nulls
-			let mut init_0_result = cmp_exp(&exprs[0], ctxt, type_for_lit_nulls, struct_context);
+			let mut init_0_result = cmp_exp(&exprs[0], ctxt, type_for_lit_nulls);
 			llvm_type_of_first_expr = init_0_result.llvm_typ;
 			stream.append(&mut init_0_result.stream);
 			expr_operands.push(init_0_result.llvm_op);
 			let new_type_for_lit_nulls = Some(&llvm_type_of_first_expr);
 			for init in exprs[1..].iter() {
-				let mut result = cmp_exp(init, ctxt, new_type_for_lit_nulls, struct_context);
+				let mut result = cmp_exp(init, ctxt, new_type_for_lit_nulls);
 				debug_assert_eq!(llvm_type_of_first_expr, result.llvm_typ);
 				stream.append(&mut result.stream);
 				expr_operands.push(result.llvm_op);
@@ -181,8 +183,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 		}
 	},
 	ast::Expr::Cast(new_type, src) => {
-		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
-		let new_llvm_typ = cmp_ty(new_type, struct_context);
+		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let new_llvm_typ = cmp_ty(new_type, ctxt.structs);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
@@ -306,8 +308,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 		}
 	},
 	ast::Expr::Binop(left, bop, right) => {
-		let left_result = cmp_exp(left, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
-		let mut right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let left_result = cmp_exp(left, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let mut right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
 		let mut stream = left_result.stream;
 		stream.append(&mut right_result.stream);
 		use ast::BinaryOp::*;
@@ -543,7 +545,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 		}
 	},
 	ast::Expr::Unop(uop, base) => {
-		let base_result = cmp_exp(base, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))), struct_context);
+		let base_result = cmp_exp(base, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
 		let mut stream = base_result.stream;
 		use ast::UnaryOp::*;
 		match (uop, &base_result.llvm_typ) {
@@ -609,14 +611,14 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 		}
 	},
 	ast::Expr::GetRef(boxed) => {
-		let mut result = cmp_lvalue(boxed as &ast::Expr, ctxt, struct_context);
+		let mut result = cmp_lvalue(boxed as &ast::Expr, ctxt);
 		result.llvm_typ = llvm::Ty::Ptr(Box::new(result.llvm_typ));
 		result
 	},
 	ast::Expr::Sizeof(t) => {
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
-		let llvm_typ = cmp_ty(t, struct_context);
+		let llvm_typ = cmp_ty(t, ctxt.structs);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		let stream = vec![
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
@@ -637,11 +639,11 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>,
 			stream: stream
 		}
 	},
-	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt, struct_context),
+	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt),
 	ast::Expr::GenericCall{..} => panic!("generic_call not implemented yet")
 }}
 
-fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
+fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResult {
 	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
 	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
 	let printf_expected_args_vec;
@@ -666,17 +668,17 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_con
 	for (arg, expected_ty) in args.iter().zip(expected_arg_types) {
 		//only need to compute this if the arg is a LitNull
 		let type_for_lit_nulls = match arg {
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, struct_context)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, ctxt.structs)),
 			_ => None
 		};
-		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref(), struct_context);
+		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
 		arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
 		stream.append(&mut arg_result.stream);
 	}
 	let uid = gensym("call");
 	let llvm_ret_ty = match return_type {
 		None => llvm::Ty::Void,
-		Some(t) => cmp_ty(t, struct_context)
+		Some(t) => cmp_ty(t, ctxt.structs)
 	};
 	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
 		func_name: func_name.clone(),
@@ -692,7 +694,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context, struct_con
 
 //the op this function returns is a pointer to where the data is stored
 //the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
-fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult { match e {
+fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 	ast::Expr::Id(s) => {
 		let (ll_ty, ll_op) = ctxt.get_var(s);
 		ExpResult{
@@ -707,8 +709,8 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		%base_ptr = cmp_exp(base)
 		%result = getelementptr *base_typ, base_typ %base_ptr, %index
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, None, struct_context);
-		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None, struct_context);
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
+		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None);
 		let result_op = gensym("subscript");
 		let result_typ;
 		if let llvm::Ty::Ptr(t) = base_result.llvm_typ.clone() {
@@ -736,7 +738,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 		%base_loaded = load base_typ*, base_typ** %base
 		%field_ptr = getelementptr base_typ, base_typ* %base_loaded, i32 0, field_index(field_name, struct_context)
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, None, struct_context);
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
 		let mut stream = base_result.stream;
 		let (base_is_ptr, struct_name) = match base_result.llvm_typ.clone() {
 			llvm::Ty::NamedStruct(s) => (false, s),
@@ -746,7 +748,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 			}
 			t => panic!("Proj base has llvm type {:?}", t)
 		};
-		let fields: &Vec<(String, ast::Ty)> = match struct_context.get(&struct_name) {
+		let fields: &Vec<(String, ast::Ty)> = match ctxt.structs.get(&struct_name) {
 			None => panic!("struct {} not in struct_context", &struct_name),
 			Some(typechecker::StructType::NonGeneric(fields)) => fields,
 			Some(typechecker::StructType::Generic{fields, ..}) => {
@@ -760,7 +762,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 			if name == field_name {
 				use std::convert::TryFrom;
 				field_index = Some(u32::try_from(i).unwrap_or_else(|_| panic!("error converting field index {} to u32", i) ));
-				result_ty = Some(cmp_ty(src_ty, struct_context));
+				result_ty = Some(cmp_ty(src_ty, ctxt.structs));
 			}
 		}
 		let base_loaded_op: llvm::Operand;
@@ -793,14 +795,14 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context, struct_context: &typechecker::Struc
 	},
 	ast::Expr::Deref(base) => {
 		let base = base as &ast::Expr;
-		let base_result = cmp_exp(base, ctxt, None, struct_context);
+		let base_result = cmp_exp(base, ctxt, None);
 		base_result
 	},
 	other => panic!("{:?} is not a valid lvalue", other)
 }}
 
-fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context, struct_context: &typechecker::StructContext) -> ExpResult {
-	let mut lvalue_result = cmp_lvalue(e, ctxt, struct_context);
+fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
+	let mut lvalue_result = cmp_lvalue(e, ctxt);
 	let loaded_id = gensym(gensym_seed);
 	let new_stream: Stream = vec![
 		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
@@ -849,10 +851,10 @@ fn cmp_cond_op(bop: &ast::BinaryOp) -> llvm::Cond {
 	}
 }
 
-fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, struct_context: &typechecker::StructContext) -> Stream { match stmt {
+fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream { match stmt {
 	ast::Stmt::Assign(lhs, rhs) => {
-		let dest_result = cmp_lvalue(lhs, ctxt, struct_context);
-		let mut data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ), struct_context);
+		let dest_result = cmp_lvalue(lhs, ctxt);
+		let mut data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ));
 		debug_assert_eq!(dest_result.llvm_typ, data_result.llvm_typ);
 		let mut stream = dest_result.stream;
 		stream.append(&mut data_result.stream);
@@ -865,12 +867,12 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, st
 	},
 	ast::Stmt::Decl(typ, var_name) => {
 		let uid = gensym(format!("{}_loc", var_name).as_str());
-		let llvm_typ = cmp_ty(typ, struct_context);
+		let llvm_typ = cmp_ty(typ, ctxt.structs);
 		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
 		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ))]
 	},
 	ast::Stmt::Return(Some(expr)) => {
-		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty), struct_context);
+		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
 		expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
 			Some((expr_result.llvm_typ, expr_result.llvm_op))
 		)));
@@ -880,18 +882,18 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, st
 		vec![Component::Term(llvm::Terminator::Ret(None))]
 	},
 	ast::Stmt::SCall(func_name, args) => {
-		let call_result = cmp_call(func_name.clone(), args, ctxt, struct_context);
+		let call_result = cmp_call(func_name.clone(), args, ctxt);
 		//I can just ignore the operand that this produces
 		call_result.stream
 	},
 	ast::Stmt::GenericSCall{..} => panic!("generic_scall not implemented yet"),
 	ast::Stmt::If(cond, then_block, else_block) => {
-		let cond_result = cmp_exp(cond, ctxt, None, struct_context);
+		let cond_result = cmp_exp(cond, ctxt, None);
 		let then_lbl = gensym("then");
 		let else_lbl = gensym("else");
 		let merge_lbl = gensym("merge");
-		let mut then_stream = cmp_block(then_block, ctxt, expected_ret_ty, struct_context);
-		let mut else_stream = cmp_block(else_block, ctxt, expected_ret_ty, struct_context);
+		let mut then_stream = cmp_block(then_block, ctxt, expected_ret_ty);
+		let mut else_stream = cmp_block(else_block, ctxt, expected_ret_ty);
 		let mut stream = cond_result.stream;
 		stream.reserve(then_stream.len() + else_stream.len() + 6);
 		stream.push(Component::Term(llvm::Terminator::CondBr{
@@ -909,11 +911,11 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, st
 		stream
 	},
 	ast::Stmt::While(cond, body) => {
-		let mut cond_result = cmp_exp(cond, ctxt, None, struct_context);
+		let mut cond_result = cmp_exp(cond, ctxt, None);
 		let check_lbl = gensym("check_cond");
 		let body_lbl = gensym("body");
 		let after_lbl = gensym("after");
-		let mut body_stream = cmp_block(body, ctxt, expected_ret_ty, struct_context);
+		let mut body_stream = cmp_block(body, ctxt, expected_ret_ty);
 		let mut stream = Vec::new();
 		stream.reserve(cond_result.stream.len() + body_stream.len() + 6);
 		stream.push(Component::Term(llvm::Terminator::Br(check_lbl.clone())));
@@ -932,14 +934,42 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, st
 	}
 }}
 
-fn cmp_block(block: &ast::Block, ctxt: &mut Context, expected_ret_ty: &llvm::Ty, struct_context: &typechecker::StructContext) -> Stream {
+fn cmp_block(block: &ast::Block, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream {
 	let mut stream = Vec::new();
 	for stmt in block.iter() {
-		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty, struct_context));
+		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty));
 	}
 	stream
 }
 
-fn cmp_prog(prog: &Vec<ast::Gdecl>, prog_context: &typechecker::ProgramContext) -> llvm::Program {
+fn mangle_type(t: &ast::Ty, output: &mut String) {
+	use ast::Ty::*;
+	use std::fmt::Write;
+	//'.' is used in place of '*' for pointers
+	match t {
+		Bool | Int{..} | Float(_) => write!(output, "{}", t).unwrap(),
+		Ptr(None) => output.push_str("void."),
+		Ptr(Some(boxed)) => {
+			write!(output, "{}", boxed as &ast::Ty).unwrap();
+			output.push('.');
+		},
+		Array{length, typ: boxed} => write!(output, "{}{}", boxed as &ast::Ty, length).unwrap(),
+		Struct(s) => write!(output, "struct{}", s).unwrap(),
+		TypeVar(s) => panic!("Cannot mangle a TypeVar {}", s),
+		GenericStruct{type_var, name} => panic!("Cannot mangle a generic struct with type param {} and name {}", type_var, name)
+	}
+}
+
+//functions and type defs can have the same name, so only one mangling function is needed
+fn mangle(name: &str, ty: &ast::Ty) -> String {
+	let mut result_string = name.to_owned();
+	result_string.push('$');
+	mangle_type(ty, &mut result_string);
+	result_string
+}
+
+
+
+fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
 	todo!()
 }
