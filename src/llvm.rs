@@ -292,6 +292,14 @@ impl std::fmt::Display for Block {
 		write!(f, "\t{}\n", self.term)
 	}
 }
+impl std::default::Default for Block {
+	fn default() -> Self {
+		Self{
+			insns: Vec::new(),
+			term: Terminator::Br("$$$_Default_Term_$$$".to_owned())
+		}
+	}
+}
 
 pub struct CFG{
 	pub entry: Block,

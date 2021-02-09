@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
-	globals: HashMap<String, (llvm::Ty, llvm::Operand)>,
+	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
 	funcs: &'a typechecker::FuncContext,
 	structs: &'a typechecker::StructContext
 }
@@ -968,8 +968,95 @@ fn mangle(name: &str, ty: &ast::Ty) -> String {
 	result_string
 }
 
+enum Instantiation<'a>{
+	NonGeneric(ast::Func),
+	Erased(ast::GenericFunc),
+	Separated(ast::GenericFunc, &'a ast::Ty)
+}
+fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>) -> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
+	//compiling a non-generic function and an erased function are nearly the same thing
+	let mut context = Context{
+		locals: HashMap::new(),
+		globals: global_locs,
+		funcs: &prog_context.funcs,
+		structs: &prog_context.structs
+	};
+	let (args, ret_ty, func_name, body) = match f {
+		Instantiation::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
+		Instantiation::Erased(_) | Instantiation::Separated(_,_) => todo!()
+	};
+	let mut stream = Vec::with_capacity(args.len() * 2);
+	let mut params = Vec::with_capacity(args.len());
+	for (arg_ty, arg_name) in args.iter() {
+		let alloca_slot_id = gensym("arg_slot");
+		let ll_ty = cmp_ty(arg_ty, &prog_context.structs);
+		let ll_arg_id = gensym("arg");
+		stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone())));
+		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+			typ: ll_ty.clone(),
+			data: llvm::Operand::Local(ll_arg_id.clone()),
+			dest: llvm::Operand::Local(alloca_slot_id)
+		}));
+		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(ll_arg_id.clone())));
+		params.push( (ll_ty, ll_arg_id) );
+	}
+	let ll_ret_ty = ret_ty.as_ref().map(|t| cmp_ty(t, &prog_context.structs))
+		.unwrap_or(llvm::Ty::Void);
+	let mut body_stream = cmp_block(body, &mut context, &ll_ret_ty);
+	//convert stream + body_stream to CFG
+	let mut cfg = llvm::CFG{
+		entry: Default::default(),
+		other_blocks: Vec::new()
+	};
+	//let mut current_block: Option<(&str, llvm::Block)> = Some("", Vec::new());
+	//if GlobalString(ident, GString("abc")) appears in the stream,
+	//the Program.global_decls needs to have (ident, GString("abc") appended to it.
+	let mut additional_gdecls = Vec::new();
+	let mut seen_first_term = false;
+	for component in stream.drain(..).chain(body_stream.drain(..)) { match component {
+		Component::Label(s) => {
+			debug_assert!(seen_first_term, "entry block of function {} does not have a terminator", func_name);
+			cfg.other_blocks.push( (s, Default::default()) );
+		},
+		Component::Instr(dest, insn) => {
+			if seen_first_term {
+				let (_, current_block): &mut (_, llvm::Block) = cfg.other_blocks.last_mut().expect("instruction after terminator, but without label before it");
+				current_block.insns.push( (dest, insn) );
+			} else {
+				cfg.entry.insns.push( (dest, insn) );
+			}
+		},
+		Component::Term(term) => {
+			if seen_first_term {
+				let (_, current_block) = cfg.other_blocks.last_mut().expect("terminator without label");
+				current_block.term = term;
+			} else {
+				cfg.entry.term = term;
+				seen_first_term = true;
+			}
+		},
+		Component::GlobalString(ident, decl) => {
+			additional_gdecls.push( (ident, decl) );
+		}
+	}}
+
+	let possibly_mangled_name: String = match f {
+		Instantiation::NonGeneric(_) | Instantiation::Erased(_) => func_name.to_owned(),
+		Instantiation::Separated(_, ty) => mangle(func_name, ty)
+	};
+	let func_result = llvm::Func{
+		ret_ty: ll_ret_ty,
+		params,
+		cfg,
+		name: possibly_mangled_name
+	};
+	(func_result, additional_gdecls)
+}
 
 
 fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
+	//create hashmap from global var names to (llvm::Ty, llvm::Operand)
+	let global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = todo!();
+
 	todo!()
 }
