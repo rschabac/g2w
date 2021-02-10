@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use crate::typechecker;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty{
@@ -354,15 +355,22 @@ impl std::fmt::Display for GlobalDecl{
 }
 
 pub struct Program{
-	pub type_decls: Vec<(String, Ty)>,
+	pub type_decls: HashMap<String, Vec<Ty>>,
 	pub global_decls: Vec<(String, GlobalDecl)>,
 	pub func_decls: Vec<Func>,
 	pub external_decls: Vec<(String, Ty, Vec<Ty>)>
 }
 impl std::fmt::Display for Program {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		for (name, typ) in self.type_decls.iter() {
-			write!(f, "%{} = type {}\n", name, typ)?;
+		for (name, types) in self.type_decls.iter() {
+			write!(f, "%{} = type {{", name)?;
+			for (i, ty) in types.iter().enumerate() {
+				write!(f, "{}", ty)?;
+				if i < types.len() - 1 {
+					write!(f, ", ")?;
+				}
+			}
+			write!(f, "}}\n")?;
 		}
 		for (name, gdecl) in self.global_decls.iter() {
 			write!(f, "@{} = global {}\n", name, gdecl)?;

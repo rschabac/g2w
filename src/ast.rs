@@ -171,13 +171,13 @@ pub struct GenericFunc{
 }
 
 pub struct Program{
-	global_vars: Vec<(Ty, String)>,
-	funcs: Vec<Func>,
-	structs: Vec<Struct>,
-	erased_structs: Vec<GenericStruct>,
-	separated_structs: Vec<GenericStruct>,
-	erased_funcs: Vec<GenericFunc>,
-	separated_funcs: Vec<GenericFunc>
+	pub global_vars: Vec<(Ty, String)>,
+	pub funcs: Vec<Func>,
+	pub structs: Vec<Struct>,
+	pub erased_structs: Vec<GenericStruct>,
+	pub separated_structs: Vec<GenericStruct>,
+	pub erased_funcs: Vec<GenericFunc>,
+	pub separated_funcs: Vec<GenericFunc>
 }
 
 impl std::convert::From<Vec<Gdecl>> for Program {
@@ -192,7 +192,7 @@ impl std::convert::From<Vec<Gdecl>> for Program {
 			separated_funcs: Vec::new(),
 		};
 		use Gdecl::*;
-		for gdecl in gdecls.drain(..) {
+		for gdecl in gdecls.into_iter() {
 			match gdecl {
 				GVarDecl(t, s) => result.global_vars.push((t, s)),
 				GFuncDecl{ret_type, name, args, body} => result.funcs.push(Func{

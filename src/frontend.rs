@@ -1,7 +1,7 @@
 use crate::ast;
 use crate::typechecker;
 use crate::llvm;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 
 
@@ -45,7 +45,15 @@ pub fn gensym(s: &str) -> String {
 	result_string
 }
 
-fn cmp_ty(t: &ast::Ty, struct_context: &typechecker::StructContext) -> llvm::Ty {
+/*
+to cmp struct A@<bool>, this function needs to know if A is separated or not (needs a typechecker::StructContext)
+if cmp_ty(struct A@<'f>) is called from a generic function,
+	cmp_{exp,stmt,...} is responsible for replacing 'f with the right type
+	(either void* if it is an erased function, or its type param if it is separated)
+
+this function should not be called on a TypeVar
+*/
+fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext) -> llvm::Ty {
 	match t {
 		ast::Ty::Bool => llvm::Ty::Int{bits: 1, signed: false},
 		ast::Ty::Int{size: ast::IntSize::Size8, signed} => llvm::Ty::Int{bits: 8, signed: *signed},
@@ -55,11 +63,23 @@ fn cmp_ty(t: &ast::Ty, struct_context: &typechecker::StructContext) -> llvm::Ty 
 		ast::Ty::Float(ast::FloatSize::FSize32) => llvm::Ty::Float32,
 		ast::Ty::Float(ast::FloatSize::FSize64) => llvm::Ty::Float64,
 		ast::Ty::Ptr(None) => llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, struct_context))),
-		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, struct_context))},
+		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs))),
+		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs))},
 		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone()),
-		ast::Ty::TypeVar(_) => panic!("cmp_ty of TypeVar not implemented yet"),
-		ast::Ty::GenericStruct{..} => panic!("cmp_ty of GenericStruct not implemented yet"),
+		ast::Ty::GenericStruct{type_var: type_param, name} => {
+			debug_assert!(typechecker::recursively_find_type_var(type_param as &ast::Ty).is_none(), "cmp_ty called on generic struct that is not completely concrete, {:?}", t);
+			match structs.get(name) {
+				None => panic!("could not find {} in struct context", name),
+				Some(typechecker::StructType::NonGeneric(_)) => panic!("struct {} is not generic", name),
+				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, ..}) => {
+					llvm::Ty::NamedStruct(name.clone())
+				},
+				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, ..}) => {
+					llvm::Ty::NamedStruct(mangle(name, type_param))
+				}
+			}
+		},
+		ast::Ty::TypeVar(s) => panic!("cmp_ty called on TypeVar '{}", s),
 	}
 }
 
@@ -184,7 +204,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Cast(new_type, src) => {
 		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let new_llvm_typ = cmp_ty(new_type, ctxt.structs);
+		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
@@ -618,7 +638,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	ast::Expr::Sizeof(t) => {
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
-		let llvm_typ = cmp_ty(t, ctxt.structs);
+		let llvm_typ = cmp_ty(t, &ctxt.structs);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		let stream = vec![
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
@@ -668,7 +688,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResu
 	for (arg, expected_ty) in args.iter().zip(expected_arg_types) {
 		//only need to compute this if the arg is a LitNull
 		let type_for_lit_nulls = match arg {
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, ctxt.structs)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs)),
 			_ => None
 		};
 		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
@@ -678,7 +698,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResu
 	let uid = gensym("call");
 	let llvm_ret_ty = match return_type {
 		None => llvm::Ty::Void,
-		Some(t) => cmp_ty(t, ctxt.structs)
+		Some(t) => cmp_ty(t, &ctxt.structs)
 	};
 	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
 		func_name: func_name.clone(),
@@ -762,7 +782,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			if name == field_name {
 				use std::convert::TryFrom;
 				field_index = Some(u32::try_from(i).unwrap_or_else(|_| panic!("error converting field index {} to u32", i) ));
-				result_ty = Some(cmp_ty(src_ty, ctxt.structs));
+				result_ty = Some(cmp_ty(src_ty, &ctxt.structs));
 			}
 		}
 		let base_loaded_op: llvm::Operand;
@@ -867,7 +887,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 	},
 	ast::Stmt::Decl(typ, var_name) => {
 		let uid = gensym(format!("{}_loc", var_name).as_str());
-		let llvm_typ = cmp_ty(typ, ctxt.structs);
+		let llvm_typ = cmp_ty(typ, &ctxt.structs);
 		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
 		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ))]
 	},
@@ -1013,7 +1033,7 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 	//the Program.global_decls needs to have (ident, GString("abc") appended to it.
 	let mut additional_gdecls = Vec::new();
 	let mut seen_first_term = false;
-	for component in stream.drain(..).chain(body_stream.drain(..)) { match component {
+	for component in stream.into_iter().chain(body_stream.into_iter()) { match component {
 		Component::Label(s) => {
 			debug_assert!(seen_first_term, "entry block of function {} does not have a terminator", func_name);
 			cfg.other_blocks.push( (s, Default::default()) );
@@ -1053,10 +1073,87 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 	(func_result, additional_gdecls)
 }
 
+type LLStructContext = HashMap<String, Vec<llvm::Ty>>;
+
+fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Constant {
+	use llvm::Ty::*;
+	match ll_ty {
+		Int{..} => llvm::Constant::SInt{bits: 0, val: 0},
+		Float32 | Float64 => llvm::Constant::Float64(0.0),
+		Ptr(_) => llvm::Constant::Null(llvm::Ty::Void),
+		Array{length, typ} => llvm::Constant::Array{
+			typ: (typ as &llvm::Ty).clone(),
+			elements: std::iter::once(get_default_constant(typ, structs)).cycle().take(*length).collect()
+		},
+		NamedStruct(s) => llvm::Constant::Struct{
+			name: s.clone(),
+			values: structs.get(s).expect("types of global vars should be instantiated by now")
+				.iter()
+				.map(|t| get_default_constant(t, structs))
+				.collect()
+		},
+		Void => panic!("global cannot have void type")
+	}
+}
+
+fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_structs: &LLStructContext) -> (llvm::Ty, llvm::GlobalDecl) {
+	let ll_ty = cmp_ty(typ, structs);
+	let initializer: llvm::Constant = get_default_constant(&ll_ty, ll_structs);
+	(ll_ty.clone(), llvm::GlobalDecl::GConst(ll_ty, initializer))
+}
+
+struct StructInstantiation<'a>{
+	type_var: &'a str,
+	fields: &'a Vec<(String, ast::Ty)>,
+	type_param: &'a ast::Ty
+}
+
+fn possibly_add_struct_instantiation<'a>(type_param: &'a ast::Ty,
+	queue: &mut VecDeque<StructInstantiation<'a>>,
+	type_decls: &HashMap<String, Vec<llvm::Ty>>,
+	structs: &'a typechecker::StructContext)
+{
+	match type_param {
+		ast::Ty::GenericStruct{type_var, name} => {
+			match structs.get(name).unwrap() {
+				typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, type_var, fields} => {
+					queue.push_back(StructInstantiation{
+						type_var: name.as_str(),
+						fields,
+						type_param
+					});
+				},
+				_ => ()
+			}
+		},
+		_ => ()
+	}
+}
 
 fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
-	//create hashmap from global var names to (llvm::Ty, llvm::Operand)
-	let global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = todo!();
+	let mut type_decls: LLStructContext = HashMap::new();
+	let mut struct_instantiation_queue: VecDeque<StructInstantiation> = VecDeque::new();
+	//initially, put all non-generic and erased structs in the type_decls
+	for s in prog.structs.iter() {
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs)).collect();
+		type_decls.insert(s.name.clone(), cmped_tys);
+	}
+	for s in prog.erased_structs.iter() {
+		//TODO: This will panic, because it will cmp_ty a TypeVar
+		//cmp_ty will need some instantiation info
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs)).collect();
+		type_decls.insert(s.name.clone(), cmped_tys);
+	}
+
+	let mut global_decls: Vec<(String, llvm::GlobalDecl)> = Vec::with_capacity(prog.global_vars.len());
+	let mut global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = HashMap::new();
+	for (typ, name) in prog.global_vars.iter() {
+		possibly_add_struct_instantiation(typ, &mut struct_instantiation_queue, &type_decls, &prog_context.structs);
+		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &type_decls);
+		global_decls.push( (name.clone(), ll_gdecl) );
+		global_locs.insert(name.clone(), (ll_typ, llvm::Operand::Global(name.clone())));
+	}
+
 
 	todo!()
 }
