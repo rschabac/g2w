@@ -1,5 +1,6 @@
 //These types should reflect https://docs.rs/llvm-ir/0.7.4/llvm_ir/
 #![allow(dead_code)]
+#![allow(clippy::write_with_newline)]
 
 use crate::typechecker;
 use std::collections::HashMap;

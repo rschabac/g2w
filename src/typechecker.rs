@@ -61,11 +61,11 @@ pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement:
 		}
 		Array{typ, length} => {
 			let replaced = replace_type_var_with(*typ, type_var_str, replacement);
-			Array{typ: Box::new(replaced), length: length}
+			Array{typ: Box::new(replaced), length}
 		}
 		GenericStruct{type_var, name} => {
 			let replaced = replace_type_var_with(*type_var, type_var_str, replacement);
-			GenericStruct{type_var: Box::new(replaced), name: name}
+			GenericStruct{type_var: Box::new(replaced), name}
 		}
 		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => original
 	}
@@ -106,8 +106,7 @@ fn get_builtins() -> FuncContext {
 			Ptr(None)
 		]
 	});
-	return result;
-
+	result
 }
 
 //when typechecking a function call, it the function is one of these, the
@@ -144,7 +143,7 @@ match e {
 		}
 	},
 	LitArr(init) => {
-		if init.len() == 0 {
+		if init.is_empty() {
 			eprintln!("Warning: Array literal has length 0, defaulting its type to i64[0]");
 			return Ok(Array{length: 0, typ: Box::new(Int{signed:true, size:Size64})})
 		}
@@ -158,7 +157,7 @@ match e {
 				return Err(format!("Array literal has mismatching types, element 0 has type {:?}, element {} has type {:?}", first_type, index, typ));
 			}
 		}
-		return Ok(Array{length: init.len() as u64, typ: Box::new(first_type)});
+		Ok(Array{length: init.len() as u64, typ: Box::new(first_type)})
 	},
 	Index(base, index) => {
 		ctxt.type_for_lit_nulls = None;
@@ -190,7 +189,7 @@ match e {
 							return Ok(typ.clone());
 						}
 					}
-					return Err(format!("struct {} does not have a {} field", struct_name, field));
+					Err(format!("struct {} does not have a {} field", struct_name, field))
 				},
 				Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
 			},
@@ -203,7 +202,7 @@ match e {
 								return Ok(typ.clone());
 							}
 						}
-						return Err(format!("struct {} does not have a {} field", struct_name, field));
+						Err(format!("struct {} does not have a {} field", struct_name, field))
 					},
 					Some(Generic{..}) => panic!("Proj: base had type {}, but when struct context contained a generic struct for {}", base_typ, struct_name)
 				},
@@ -258,7 +257,7 @@ match e {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
 		}
-		return Ok(return_type);
+		Ok(return_type)
 	},
 	GenericCall{name: func_name, type_var, args} => {
 		use FuncType::*;
@@ -550,7 +549,7 @@ match s {
 				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
 			}
 		}
-		return Ok(false);
+		Ok(false)
 	},
 	GenericSCall{name: func_name, type_var, args} => {
 		use FuncType::*;
@@ -634,7 +633,7 @@ match s {
 }
 }
 
-pub fn typecheck_block(ctxt: &mut LocalTypeContext, funcs: &FuncContext, block: &ast::Block, expected_return_type: &Option<ast::Ty>) -> Result<bool, String> {
+pub fn typecheck_block(ctxt: &mut LocalTypeContext, funcs: &FuncContext, block: &[ast::Stmt], expected_return_type: &Option<ast::Ty>) -> Result<bool, String> {
 	let mut stmt_returns = false;
 	for stmt in block.iter(){
 		if stmt_returns {
@@ -645,7 +644,7 @@ pub fn typecheck_block(ctxt: &mut LocalTypeContext, funcs: &FuncContext, block: 
 	Ok(stmt_returns)
 }
 
-pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, name: String, args: &Vec<(ast::Ty, String)>, body: &ast::Block, ret_type: &Option<ast::Ty>) -> Result<(), String>{
+pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, name: String, args: &[(ast::Ty, String)], body: &[ast::Stmt], ret_type: &Option<ast::Ty>) -> Result<(), String>{
 	/*
 	create a LocalTypeContext
 	add all args to it as locals
@@ -783,7 +782,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
 							}
 							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, type_param.clone());
-							let type_param_string_of_field_struct: &str = match struct_context.get(name).expect(format!("why is struct {} not in the context?", name).as_str()) {
+							let type_param_string_of_field_struct: &str = match struct_context.get(name).unwrap_or_else(|| panic!("why is struct {} not in the context?", name)) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
 								Generic{type_var, ..} => type_var.as_str()
 							};
@@ -1022,7 +1021,7 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, Stri
 			let return_type_is_correct = return_type == &Some(ast::Ty::Int{
 				signed: true, size: ast::IntSize::Size32
 			});
-			let args_are_correct_simple = args.len() == 0;
+			let args_are_correct_simple = args.is_empty();
 			let args_are_correct_extended =
 				args.len() == 2
 				&& args[0] == ast::Ty::Int{

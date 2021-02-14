@@ -3,8 +3,6 @@ use crate::typechecker;
 use crate::llvm;
 use std::collections::{HashMap, VecDeque};
 
-
-
 struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
@@ -12,7 +10,7 @@ struct Context<'a>{
 	structs: &'a typechecker::StructContext
 }
 impl<'a> Context<'a> {
-	fn get_var(&self, name: &String) -> &(llvm::Ty, llvm::Operand) {
+	fn get_var(&self, name: &str) -> &(llvm::Ty, llvm::Operand) {
 		self.locals.get(name)
 			.or_else(|| self.globals.get(name))
 			.unwrap_or_else(|| panic!("why is variable {} not in the context", name))
@@ -31,6 +29,7 @@ pub enum Component{
 
 pub type Stream = Vec<Component>;
 
+//If I want to parallelize compilation, each thread will need its own gensym
 static mut GENSYM_COUNT: usize = 0;
 pub fn gensym(s: &str) -> String {
 	let n_string;
@@ -48,12 +47,10 @@ pub fn gensym(s: &str) -> String {
 /*
 to cmp struct A@<bool>, this function needs to know if A is separated or not (needs a typechecker::StructContext)
 if cmp_ty(struct A@<'f>) is called from a generic function,
-	cmp_{exp,stmt,...} is responsible for replacing 'f with the right type
+	cmp_{exp,stmt,...} is responsible for knowing the right type for 'f
 	(either void* if it is an erased function, or its type param if it is separated)
-
-this function should not be called on a TypeVar
 */
-fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext) -> llvm::Ty {
+fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacement: llvm::Ty) -> llvm::Ty {
 	match t {
 		ast::Ty::Bool => llvm::Ty::Int{bits: 1, signed: false},
 		ast::Ty::Int{size: ast::IntSize::Size8, signed} => llvm::Ty::Int{bits: 8, signed: *signed},
@@ -63,23 +60,26 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext) -> llvm::Ty {
 		ast::Ty::Float(ast::FloatSize::FSize32) => llvm::Ty::Float32,
 		ast::Ty::Float(ast::FloatSize::FSize64) => llvm::Ty::Float64,
 		ast::Ty::Ptr(None) => llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs))),
-		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs))},
+		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs, type_var_replacement))),
+		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs, type_var_replacement))},
 		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone()),
 		ast::Ty::GenericStruct{type_var: type_param, name} => {
 			debug_assert!(typechecker::recursively_find_type_var(type_param as &ast::Ty).is_none(), "cmp_ty called on generic struct that is not completely concrete, {:?}", t);
 			match structs.get(name) {
-				None => panic!("could not find {} in struct context", name),
-				Some(typechecker::StructType::NonGeneric(_)) => panic!("struct {} is not generic", name),
 				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, ..}) => {
 					llvm::Ty::NamedStruct(name.clone())
 				},
 				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, ..}) => {
 					llvm::Ty::NamedStruct(mangle(name, type_param))
 				}
+				None => panic!("could not find {} in struct context", name),
+				Some(typechecker::StructType::NonGeneric(_)) => panic!("struct {} is not generic", name),
 			}
 		},
-		ast::Ty::TypeVar(s) => panic!("cmp_ty called on TypeVar '{}", s),
+		ast::Ty::TypeVar(_) => {
+			debug_assert!(type_var_replacement != llvm::Ty::Void, "cannot replace type var with llvm::void");
+			type_var_replacement
+		}
 	}
 }
 
@@ -139,7 +139,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			Component::Instr(casted_local_ident.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm::Ty::Ptr(Box::new(global_typ)),
 				new_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-				op: llvm::Operand::Global(global_string_ident.clone())
+				op: llvm::Operand::Global(global_string_ident)
 			})
 		];
 		ExpResult{
@@ -165,7 +165,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let mut stream: Stream = Vec::new();
 		let llvm_type_of_first_expr;
 		let mut expr_operands: Vec<llvm::Operand> = Vec::with_capacity(exprs.len());
-		if exprs.len() == 0 {
+		if exprs.is_empty() {
 			llvm_type_of_first_expr = llvm::Ty::Int{bits: 64, signed: true};
 		} else {
 			//ignoring the possibility of the first expr being a LitNull, not setting type_for_lit_nulls
@@ -204,7 +204,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Cast(new_type, src) => {
 		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs);
+		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs, llvm::Ty::Void);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
@@ -223,7 +223,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: new_llvm_typ,
 						llvm_op: llvm::Operand::Local(truncated_uid),
-						stream: stream
+						stream
 					}
 				} else {
 					let extended_uid = gensym("extended");
@@ -237,7 +237,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: new_llvm_typ,
 						llvm_op: llvm::Operand::Local(extended_uid),
-						stream: stream
+						stream
 					}
 				}
 			},
@@ -251,7 +251,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(truncated_uid),
-					stream: stream
+					stream
 				}
 			},
 			(Float64, Float32) => {
@@ -263,7 +263,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(extended_uid),
-					stream: stream
+					stream
 				}
 			},
 			(Float32, Int{bits, signed}) | (Float64, Int{bits, signed}) => {
@@ -285,7 +285,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(converted_uid),
-					stream: stream
+					stream
 				}
 			},
 			(Int{bits, signed}, Float32) | (Int{bits, signed}, Float64) => {
@@ -307,7 +307,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(converted_uid),
-					stream: stream
+					stream
 				}
 			},
 			(Ptr(_), Ptr(_)) => {
@@ -321,7 +321,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(casted_uid),
-					stream: stream
+					stream
 				}
 			}
 			(new, old) => panic!("trying to cast from {:?} to {:?}", old, new)
@@ -373,7 +373,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: left_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			//Comparisons between Ints
@@ -414,7 +414,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			//Arithmetic and Comparisons between Floats
@@ -430,7 +430,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				},
 				arith => {
@@ -444,7 +444,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: right_result.llvm_typ,
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				}
 			},
@@ -462,7 +462,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				},
 				_arith => {
@@ -478,7 +478,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				}
 			},
@@ -496,7 +496,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				},
 				_arith => {
@@ -512,7 +512,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream: stream
+						stream
 					}
 				}
 			},
@@ -543,7 +543,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: left_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(ptr_arith_uid),
-					stream: stream
+					stream
 				}
 			},
 			//Pointer Comparison
@@ -558,7 +558,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			_ => panic!("cannot use binop {:?} on llvm types {:?} and {:?}", bop, left_result.llvm_typ, right_result.llvm_typ)
@@ -581,7 +581,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			(Neg, llvm::Ty::Float32) | (Neg, llvm::Ty::Float64) => {
@@ -593,7 +593,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			(Neg, t) => panic!("neg of type {:?}", t),
@@ -609,7 +609,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			(Lognot, t) => panic!("neg of type {:?}", t),
@@ -624,7 +624,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream: stream
+					stream
 				}
 			},
 			(Bitnot, t) => panic!("lognot of type {:?}", t)
@@ -638,7 +638,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	ast::Expr::Sizeof(t) => {
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
-		let llvm_typ = cmp_ty(t, &ctxt.structs);
+		let llvm_typ = cmp_ty(t, &ctxt.structs, llvm::Ty::Void);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		let stream = vec![
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
@@ -656,14 +656,14 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		ExpResult{
 			llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
 			llvm_op: llvm::Operand::Local(size_int_uid),
-			stream: stream
+			stream
 		}
 	},
 	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt),
 	ast::Expr::GenericCall{..} => panic!("generic_call not implemented yet")
 }}
 
-fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResult {
+fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context) -> ExpResult {
 	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
 	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
 	let printf_expected_args_vec;
@@ -688,7 +688,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResu
 	for (arg, expected_ty) in args.iter().zip(expected_arg_types) {
 		//only need to compute this if the arg is a LitNull
 		let type_for_lit_nulls = match arg {
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, llvm::Ty::Void)),
 			_ => None
 		};
 		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
@@ -698,7 +698,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResu
 	let uid = gensym("call");
 	let llvm_ret_ty = match return_type {
 		None => llvm::Ty::Void,
-		Some(t) => cmp_ty(t, &ctxt.structs)
+		Some(t) => cmp_ty(t, &ctxt.structs, llvm::Ty::Void)
 	};
 	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
 		func_name: func_name.clone(),
@@ -708,7 +708,7 @@ fn cmp_call(func_name: String, args: &Vec<ast::Expr>, ctxt: &Context) -> ExpResu
 	ExpResult{
 		llvm_typ: llvm_ret_ty,
 		llvm_op: llvm::Operand::Local(uid),
-		stream: stream
+		stream
 	}
 }
 
@@ -748,7 +748,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		ExpResult{
 			llvm_typ: result_typ,
 			llvm_op: llvm::Operand::Local(result_op),
-			stream: stream
+			stream
 		}
 	},
 	ast::Expr::Proj(base, field_name) => {
@@ -782,7 +782,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			if name == field_name {
 				use std::convert::TryFrom;
 				field_index = Some(u32::try_from(i).unwrap_or_else(|_| panic!("error converting field index {} to u32", i) ));
-				result_ty = Some(cmp_ty(src_ty, &ctxt.structs));
+				result_ty = Some(cmp_ty(src_ty, &ctxt.structs, llvm::Ty::Void));
 			}
 		}
 		let base_loaded_op: llvm::Operand;
@@ -810,13 +810,12 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		ExpResult{
 			llvm_typ: result_ty,
 			llvm_op: llvm::Operand::Local(field_ptr_uid),
-			stream: stream
+			stream
 		}
 	},
 	ast::Expr::Deref(base) => {
 		let base = base as &ast::Expr;
-		let base_result = cmp_exp(base, ctxt, None);
-		base_result
+		cmp_exp(base, ctxt, None)
 	},
 	other => panic!("{:?} is not a valid lvalue", other)
 }}
@@ -887,7 +886,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 	},
 	ast::Stmt::Decl(typ, var_name) => {
 		let uid = gensym(format!("{}_loc", var_name).as_str());
-		let llvm_typ = cmp_ty(typ, &ctxt.structs);
+		let llvm_typ = cmp_ty(typ, &ctxt.structs, llvm::Ty::Void);
 		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
 		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ))]
 	},
@@ -954,7 +953,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 	}
 }}
 
-fn cmp_block(block: &ast::Block, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream {
+fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream {
 	let mut stream = Vec::new();
 	for stmt in block.iter() {
 		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty));
@@ -965,7 +964,9 @@ fn cmp_block(block: &ast::Block, ctxt: &mut Context, expected_ret_ty: &llvm::Ty)
 fn mangle_type(t: &ast::Ty, output: &mut String) {
 	use ast::Ty::*;
 	use std::fmt::Write;
-	//'.' is used in place of '*' for pointers
+	//if it ends in ., it's a pointer
+	//if it ends in .123, it's an array
+	//if it ends in .struct, it's a struct
 	match t {
 		Bool | Int{..} | Float(_) => write!(output, "{}", t).unwrap(),
 		Ptr(None) => output.push_str("void."),
@@ -973,8 +974,8 @@ fn mangle_type(t: &ast::Ty, output: &mut String) {
 			write!(output, "{}", boxed as &ast::Ty).unwrap();
 			output.push('.');
 		},
-		Array{length, typ: boxed} => write!(output, "{}{}", boxed as &ast::Ty, length).unwrap(),
-		Struct(s) => write!(output, "struct{}", s).unwrap(),
+		Array{length, typ: boxed} => write!(output, "{}.{}", boxed as &ast::Ty, length).unwrap(),
+		Struct(s) => write!(output, "{}.struct", s).unwrap(),
 		TypeVar(s) => panic!("Cannot mangle a TypeVar {}", s),
 		GenericStruct{type_var, name} => panic!("Cannot mangle a generic struct with type param {} and name {}", type_var, name)
 	}
@@ -1009,7 +1010,7 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 	let mut params = Vec::with_capacity(args.len());
 	for (arg_ty, arg_name) in args.iter() {
 		let alloca_slot_id = gensym("arg_slot");
-		let ll_ty = cmp_ty(arg_ty, &prog_context.structs);
+		let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void);
 		let ll_arg_id = gensym("arg");
 		stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone())));
 		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
@@ -1020,9 +1021,9 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(ll_arg_id.clone())));
 		params.push( (ll_ty, ll_arg_id) );
 	}
-	let ll_ret_ty = ret_ty.as_ref().map(|t| cmp_ty(t, &prog_context.structs))
+	let ll_ret_ty = ret_ty.as_ref().map(|t| cmp_ty(t, &prog_context.structs, llvm::Ty::Void))
 		.unwrap_or(llvm::Ty::Void);
-	let mut body_stream = cmp_block(body, &mut context, &ll_ret_ty);
+	let body_stream = cmp_block(body, &mut context, &ll_ret_ty);
 	//convert stream + body_stream to CFG
 	let mut cfg = llvm::CFG{
 		entry: Default::default(),
@@ -1097,36 +1098,33 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 }
 
 fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_structs: &LLStructContext) -> (llvm::Ty, llvm::GlobalDecl) {
-	let ll_ty = cmp_ty(typ, structs);
+	let ll_ty = cmp_ty(typ, structs, llvm::Ty::Void);
 	let initializer: llvm::Constant = get_default_constant(&ll_ty, ll_structs);
 	(ll_ty.clone(), llvm::GlobalDecl::GConst(ll_ty, initializer))
 }
 
+//when instantiating this, replace all occurences of type_var in fields with type_param
 struct StructInstantiation<'a>{
 	type_var: &'a str,
 	fields: &'a Vec<(String, ast::Ty)>,
 	type_param: &'a ast::Ty
 }
 
-fn possibly_add_struct_instantiation<'a>(type_param: &'a ast::Ty,
+//If typ is a separated generic struct, then add a new StructInstantiation to the queue
+fn possibly_add_struct_instantiation<'a>(typ: &'a ast::Ty,
 	queue: &mut VecDeque<StructInstantiation<'a>>,
-	type_decls: &HashMap<String, Vec<llvm::Ty>>,
 	structs: &'a typechecker::StructContext)
 {
-	match type_param {
-		ast::Ty::GenericStruct{type_var, name} => {
-			match structs.get(name).unwrap() {
-				typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, type_var, fields} => {
-					queue.push_back(StructInstantiation{
-						type_var: name.as_str(),
-						fields,
-						type_param
-					});
-				},
-				_ => ()
-			}
-		},
-		_ => ()
+	//if typ is struct name@<type_param>
+	if let ast::Ty::GenericStruct{type_var: type_param, name} = typ {
+		//and struct name is declared as struct name@<separated 'type_var>{fields}
+		if let typechecker::StructType::Generic{ mode: ast::PolymorphMode::Separated, type_var, fields } = structs.get(name).unwrap() {
+			queue.push_back(StructInstantiation{
+				type_var,
+				fields,
+				type_param
+			});
+		}
 	}
 }
 
@@ -1135,20 +1133,19 @@ fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> 
 	let mut struct_instantiation_queue: VecDeque<StructInstantiation> = VecDeque::new();
 	//initially, put all non-generic and erased structs in the type_decls
 	for s in prog.structs.iter() {
-		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs)).collect();
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, llvm::Ty::Void)).collect();
 		type_decls.insert(s.name.clone(), cmped_tys);
 	}
 	for s in prog.erased_structs.iter() {
-		//TODO: This will panic, because it will cmp_ty a TypeVar
-		//cmp_ty will need some instantiation info
-		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs)).collect();
+		//any type vars in the fields of s should be compiled as void*
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})))).collect();
 		type_decls.insert(s.name.clone(), cmped_tys);
 	}
 
 	let mut global_decls: Vec<(String, llvm::GlobalDecl)> = Vec::with_capacity(prog.global_vars.len());
 	let mut global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = HashMap::new();
 	for (typ, name) in prog.global_vars.iter() {
-		possibly_add_struct_instantiation(typ, &mut struct_instantiation_queue, &type_decls, &prog_context.structs);
+		possibly_add_struct_instantiation(typ, &mut struct_instantiation_queue, &prog_context.structs);
 		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &type_decls);
 		global_decls.push( (name.clone(), ll_gdecl) );
 		global_locs.insert(name.clone(), (ll_typ, llvm::Operand::Global(name.clone())));

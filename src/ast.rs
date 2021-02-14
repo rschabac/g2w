@@ -180,8 +180,8 @@ pub struct Program{
 	pub separated_funcs: Vec<GenericFunc>
 }
 
-impl std::convert::From<Vec<Gdecl>> for Program {
-	fn from(mut gdecls: Vec<Gdecl>) -> Self {
+impl From<Vec<Gdecl>> for Program {
+	fn from(gdecls: Vec<Gdecl>) -> Self {
 		let mut result = Program{
 			global_vars: Vec::new(),
 			funcs: Vec::new(),
