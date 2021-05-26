@@ -15,7 +15,6 @@ mod tests;
 
 fn main() -> Result<(), String>{
 	use std::env::args;
-	use std::fs::read_to_string;
 	let program_parser = parser::ProgramParser::new();
 	let argv: Vec<String> = args().collect();
 	let mut program_source = String::new();
@@ -28,9 +27,17 @@ fn main() -> Result<(), String>{
 	} else {
 		//read source from file given as argument
 		let filename = &argv[1];
-		program_source = read_to_string(filename).map_err(|e| format!("io error: {}", e))?;
+		program_source = std::fs::read_to_string(filename).map_err(|e| format!("io error: {}", e))?;
 	}
-	let ast = program_parser.parse(program_source.as_str()).unwrap();
-	let _ = typechecker::typecheck_program(ast)?;
+	let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).unwrap();
+	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
+		let mut result = "Type Error: ".to_owned();
+		result.push_str(err_msg.as_str());
+		result
+	})?;
+	let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context);
+	let mut output_file = std::fs::File::create("./output.ll").map_err(|e| format!("could not open output file: {}", e))?;
+	use std::io::Write;
+	write!(output_file, "{}", llvm_prog).map_err(|e| format!("io error: {}", e))?;
 	Ok(())
 }

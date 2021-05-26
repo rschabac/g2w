@@ -51,8 +51,8 @@ impl std::fmt::Display for Terminator{
 		match self {
 			Ret(None) => write!(f, "ret void"),
 			Ret(Some((typ, op))) => write!(f, "ret {} {}", typ, op),
-			Br(s) => write!(f, "br label {}", s),
-			CondBr{condition, true_dest, false_dest} => write!(f, "br i1 {}, label {}, label {}", condition, true_dest, false_dest),
+			Br(s) => write!(f, "br label %{}", s),
+			CondBr{condition, true_dest, false_dest} => write!(f, "br i1 {}, label %{}, label %{}", condition, true_dest, false_dest),
 		}
 	}
 }
@@ -199,6 +199,7 @@ pub enum Instruction{
 	Call{func_name: String, ret_typ: Ty, args: Vec<(Ty, Operand)>},
 	Bitcast{original_typ: Ty, op: Operand, new_typ: Ty},
 	Gep{typ: Ty, base: Operand, offsets: Vec<(Ty, Operand)>},
+	Extract{typ: Ty, base: Operand, offset: u64}, //needed for projecting off of structs (maybe)
 	//will likely need to add more Instruction variants for floating point, etc.
 	Trunc{old_bits: u32, op: Operand, new_bits: u32},
 	Ext{old_bits: u32, op: Operand, new_bits: u32, signed: bool},
@@ -256,6 +257,7 @@ impl std::fmt::Display for Instruction{
 				write!(f, ")")
 			},
 			Bitcast{original_typ, op, new_typ} => write!(f, "bitcast {} {} to {}", original_typ, op, new_typ),
+			Extract{typ, base, offset} => write!(f, "extractvalue {} {}, {}", typ, base, offset),
 			Gep{typ, base, offsets} => {
 				write!(f, "getelementptr {}, {}* {}", typ, typ, base)?;
 				//write ", {typ} {op} for each op, after figuring out what type the op is
@@ -327,7 +329,7 @@ impl std::fmt::Display for Func{
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "define {} @{}(", self.ret_ty, self.name)?;
 		for (i, (param_ty, param_name)) in self.params.iter().enumerate() {
-			write!(f, "{} {}", param_ty, param_name)?;
+			write!(f, "{} %{}", param_ty, param_name)?;
 			if i < self.params.len() - 1 {
 				write!(f, ", ")?;
 			}
@@ -355,6 +357,7 @@ impl std::fmt::Display for GlobalDecl{
 	}
 }
 
+#[derive(Default)]
 pub struct Program{
 	pub type_decls: HashMap<String, Vec<Ty>>,
 	pub global_decls: Vec<(String, GlobalDecl)>,
@@ -363,6 +366,7 @@ pub struct Program{
 }
 impl std::fmt::Display for Program {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		write!(f, "target triple = \"x86_64-unknown-linux\"\n")?;
 		for (name, types) in self.type_decls.iter() {
 			write!(f, "%{} = type {{", name)?;
 			for (i, ty) in types.iter().enumerate() {

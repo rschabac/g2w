@@ -25,6 +25,7 @@ pub struct LocalTypeContext{
 	pub structs: StructContext,
 	pub type_for_lit_nulls: Option<ast::Ty>,
 	pub type_var: Option<(String, ast::PolymorphMode)>,
+	pub is_lhs: bool,
 }
 
 pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
@@ -34,6 +35,7 @@ pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
 		structs: HashMap::new(),
 		type_for_lit_nulls: None,
 		type_var: None,
+		is_lhs: false
 	},
 	HashMap::new())
 }
@@ -179,21 +181,8 @@ match e {
 		//if base is LitNull, I can't determine what struct it is
 		ctxt.type_for_lit_nulls = None;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
-		use std::borrow::Borrow;
 		match base_typ {
-			Struct(ref struct_name) => match ctxt.structs.get(struct_name) {
-				None => Err(format!("could not find struct named '{}'", struct_name)),
-				Some(NonGeneric(field_list)) => {
-					for (field_name, typ) in field_list.iter() {
-						if field.eq(field_name) {
-							return Ok(typ.clone());
-						}
-					}
-					Err(format!("struct {} does not have a {} field", struct_name, field))
-				},
-				Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
-			},
-			Ptr(Some(ref boxed)) => match boxed.borrow() {
+			Ptr(Some(ref boxed)) => match boxed as &ast::Ty {
 				Struct(struct_name) => match ctxt.structs.get(struct_name) {
 					None => Err(format!("could not find struct named '{}'", struct_name)),
 					Some(NonGeneric(field_list)) => {
@@ -208,6 +197,24 @@ match e {
 				},
 				GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
 				_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
+			},
+			Struct(ref struct_name) => match ctxt.structs.get(struct_name) {
+				None => Err(format!("could not find struct named '{}'", struct_name)),
+				Some(NonGeneric(field_list)) => {
+					/*
+					if is_lhs is set and base is not a pointer and base itself is not an lvalue, error
+					*/
+					if ctxt.is_lhs && !matches!(base as &ast::Expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
+						return Err("Cannot assign to field that of struct that is not an lvalue".to_owned());
+					}
+					for (field_name, typ) in field_list.iter() {
+						if field.eq(field_name) {
+							return Ok(typ.clone());
+						}
+					}
+					Err(format!("struct {} does not have a {} field", struct_name, field))
+				},
+				Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
 			},
 			GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
 			_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
@@ -460,7 +467,9 @@ match s {
 	Assign(lhs, rhs) => {
 		match lhs {
 			Id(_) | Index(_,_) | Proj(_,_) | Deref(_) => {
+				ctxt.is_lhs = true;
 				let lhs_type = typecheck_expr(ctxt, funcs, &lhs)?;
+				ctxt.is_lhs = false;
 				ctxt.type_for_lit_nulls = Some(lhs_type.clone());
 				let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
 				if lhs_type != rhs_type {
@@ -851,7 +860,7 @@ pub struct ProgramContext {
 	pub globals: GlobalContext
 }
 
-pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, String>{
+pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, String>{
 	/*
 	create StructContext:
 		collect names of all structs, put all of them into struct_context
@@ -1004,12 +1013,19 @@ pub fn typecheck_program(gdecls: Vec<ast::Gdecl>) -> Result<ProgramContext, Stri
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name, args, body} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
+			//kind of weird, but in order to avoid keep the LocalTypeContext the same and avoid
+			//cloning the struct_context all the time, I need to move it into this temporary
+			//ctxt variable, then move it back out
+			ctxt.structs = struct_context;
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
+			struct_context = ctxt.structs;
 		},
 		GGenericFuncDecl{ret_type, name, args, body, param, mode} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
 			ctxt.type_var = Some((param.clone(), *mode));		
+			ctxt.structs = struct_context;
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
+			struct_context = ctxt.structs;
 		}
 		_ => ()
 	}};

@@ -1,8 +1,9 @@
 use crate::ast;
 use crate::typechecker;
 use crate::llvm;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, HashMap, VecDeque};
 
+//TODO: too many contexts! make an AllContext, might need multiple lifetime parameters
 struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
@@ -150,8 +151,73 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt),
 	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt),
-	ast::Expr::Proj(_,_) => cmp_lvalue_to_rvalue(e, "proj_loaded", ctxt),
 	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt),
+	ast::Expr::Proj(base, field_name) => {
+		/*
+		Whenever this function is called, an "rvalue" is expected (i.e. the real struct,
+		not a pointer to it), so this case only handles the rvalue case
+
+		for something like v.x or f().x as an rvalue
+		cmp_exp gets the struct itself, so %v_loaded
+		%field = extractvalue %vec_i32 %v_loaded, index
+
+		for something like v->x as an rvalue
+		cmp_exp(v) gets the pointer, %v_pointer
+		%v_loaded = load %vec_i32, %vec_i32* %v_pointer
+		%field = extractvalue %vec_i32 %v_loaded, index
+		*/
+		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
+		let mut stream = base_result.stream;
+		let (base_is_ptr, struct_name) = match &base_result.llvm_typ {
+			llvm::Ty::NamedStruct(s) => (false, s.clone()),
+			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
+				llvm::Ty::NamedStruct(s) => (true, s.clone()),
+				t => panic!("Proj base has llvm type Ptr({:?})", t)
+			},
+			t => panic!("Proj base has llvm type Ptr({:?})", t)
+		};
+		let fields: &[(String, ast::Ty)] = match ctxt.structs.get(&struct_name) {
+			None => panic!("struct {} not in struct_context", &struct_name),
+			Some(typechecker::StructType::NonGeneric(fields)) => fields as &[_],
+			Some(typechecker::StructType::Generic{fields, ..}) => {
+				eprintln!("Warning: Projecting off of generic struct, generics not yet implemented");
+				fields
+			}
+		};
+		let mut field_index: Option<u64> = None;
+		let mut result_ty: Option<llvm::Ty> = None;
+		for (i, (name, src_ty)) in fields.iter().enumerate() {
+			if name == field_name {
+				use std::convert::TryFrom;
+				field_index = Some(u64::try_from(i).expect("could not convert from usize to u64"));
+				result_ty = Some(cmp_ty(src_ty, &ctxt.structs, llvm::Ty::Void));
+			}
+		}
+		let field_index = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name));
+		let result_ty = result_ty.unwrap();
+		let base_loaded_op: llvm::Operand;
+		if base_is_ptr {
+			let base_loaded_uid = gensym("base_loaded");
+			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
+			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
+				typ: base_result.llvm_typ.clone().remove_ptr(),
+				src: base_result.llvm_op
+			}));
+		} else {
+			base_loaded_op = base_result.llvm_op;
+		}
+		let extracted_uid = gensym("extract");
+		stream.push(Component::Instr(extracted_uid.clone(), llvm::Instruction::Extract{
+			typ: base_result.llvm_typ,
+			base: base_loaded_op,
+			offset: field_index
+		}));
+		ExpResult{
+			llvm_typ: result_ty,
+			llvm_op: llvm::Operand::Local(extracted_uid),
+			stream
+		}
+	},
 	ast::Expr::LitArr(exprs) => {
 		/*
 		%init0 = cmp_exp exprs[0]
@@ -203,13 +269,14 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		}
 	},
 	ast::Expr::Cast(new_type, src) => {
-		let src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let mut src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
 		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs, llvm::Ty::Void);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
 				if new_bits == old_bits {
-					//llvm does not care about the signs
+					//llvm does not care about the signs, but I do, so set the signedness to whatever the new type is
+					src_result.llvm_typ = new_llvm_typ.clone();
 					return src_result;
 				}
 				if new_bits < old_bits {
@@ -753,63 +820,69 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 	},
 	ast::Expr::Proj(base, field_name) => {
 		/*
-		%base = cmp_lvalue(base)
-		;if base points to a ptr
-		%base_loaded = load base_typ*, base_typ** %base
-		%field_ptr = getelementptr base_typ, base_typ* %base_loaded, i32 0, field_index(field_name, struct_context)
+		
+		for something like v.x as an lvalue, cmp_lvalue(v) gets the address of the struct, %v_addr
+		%field_addr = getelementptr %vec_i32, %vec_i32* %v_addr, 0, i64 index
+
+		for something like v->x as an lvalue, cmp_exp(v) gets the pointer, %v_addr
+		%field_addr = getelementptr %vec_i32, %vec_i32* %v_addr, 0, i64 index
+		how to tell whether to use cmp_value or cmp_exp?
+		do cmp_lvalue first, if the Ty it returns is a Ptr, then copypaste code from
+		cmp_lvalue_to_rvalue to turn this into the result of calling cmp_exp, then use second method
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
-		let mut stream = base_result.stream;
-		let (base_is_ptr, struct_name) = match base_result.llvm_typ.clone() {
-			llvm::Ty::NamedStruct(s) => (false, s),
-			llvm::Ty::Ptr(boxed) => match *boxed {
-				llvm::Ty::NamedStruct(s) => (true, s),
+		let mut base_lvalue_result = cmp_lvalue(base as &ast::Expr, ctxt);
+		let struct_name: String;
+		match &base_lvalue_result.llvm_typ {
+			llvm::Ty::NamedStruct(s) => {
+				struct_name = s.clone();
+			},
+			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
+				llvm::Ty::NamedStruct(s) => {
+					struct_name = s.clone();
+					let loaded_id = gensym("struct_deref");
+					base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+						typ: base_lvalue_result.llvm_typ.clone(),
+						src: base_lvalue_result.llvm_op
+					}));
+					base_lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
+				}
 				t => panic!("Proj base has llvm type Ptr({:?})", t)
 			}
-			t => panic!("Proj base has llvm type {:?}", t)
+			t => panic!("Proj base has llvm type Ptr({:?})", t)
 		};
-		let fields: &Vec<(String, ast::Ty)> = match ctxt.structs.get(&struct_name) {
+		//base_lvalue_result is now the address of the struct, just need to do one more Gep
+		let fields: &[(String, ast::Ty)] = match ctxt.structs.get(&struct_name) {
 			None => panic!("struct {} not in struct_context", &struct_name),
-			Some(typechecker::StructType::NonGeneric(fields)) => fields,
+			Some(typechecker::StructType::NonGeneric(fields)) => fields as &[_],
 			Some(typechecker::StructType::Generic{fields, ..}) => {
 				eprintln!("Warning: Projecting off of generic struct, generics not yet implemented");
 				fields
 			}
 		};
-		let mut field_index: Option<u32> = None;
+		let mut field_index: Option<u64> = None;
 		let mut result_ty: Option<llvm::Ty> = None;
 		for (i, (name, src_ty)) in fields.iter().enumerate() {
 			if name == field_name {
 				use std::convert::TryFrom;
-				field_index = Some(u32::try_from(i).unwrap_or_else(|_| panic!("error converting field index {} to u32", i) ));
+				field_index = Some(u64::try_from(i).expect("could not convert from usize to u64"));
 				result_ty = Some(cmp_ty(src_ty, &ctxt.structs, llvm::Ty::Void));
 			}
 		}
-		let base_loaded_op: llvm::Operand;
-		if base_is_ptr {
-			let base_loaded_uid = gensym("base_loaded");
-			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
-			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
-				typ: base_result.llvm_typ.clone().remove_ptr(),
-				src: base_result.llvm_op
-			}));
-		} else {
-			base_loaded_op = base_result.llvm_op;
-		}
-		let field_index = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name) );
+		let field_index = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name));
 		let result_ty = result_ty.unwrap();
-		let field_ptr_uid = gensym("field_ptr");
-		stream.push(Component::Instr(field_ptr_uid.clone(), llvm::Instruction::Gep{
-			typ: base_result.llvm_typ,
-			base: base_loaded_op,
+		let mut stream = base_lvalue_result.stream;
+		let field_addr_uid = gensym("field");
+		stream.push(Component::Instr(field_addr_uid.clone(), llvm::Instruction::Gep{
+			typ: llvm::Ty::NamedStruct(struct_name),
+			base: base_lvalue_result.llvm_op,
 			offsets: vec![
-				(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 0})),
-				(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: field_index as u64}))
+				(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0})),
+				(llvm::Ty::Int{bits: 64, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: field_index}))
 			]
 		}));
 		ExpResult{
 			llvm_typ: result_ty,
-			llvm_op: llvm::Operand::Local(field_ptr_uid),
+			llvm_op: llvm::Operand::Local(field_addr_uid),
 			stream
 		}
 	},
@@ -823,13 +896,12 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
 	let mut lvalue_result = cmp_lvalue(e, ctxt);
 	let loaded_id = gensym(gensym_seed);
-	let new_stream: Stream = vec![
+	lvalue_result.stream.push(
 		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 			typ: lvalue_result.llvm_typ.clone(),
 			src: lvalue_result.llvm_op
 		})
-	];
-	lvalue_result.stream = new_stream;
+	);
 	//don't need to change the typ, it is already the type of the var
 	lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
 	lvalue_result
@@ -874,7 +946,8 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 	ast::Stmt::Assign(lhs, rhs) => {
 		let dest_result = cmp_lvalue(lhs, ctxt);
 		let mut data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ));
-		debug_assert_eq!(dest_result.llvm_typ, data_result.llvm_typ);
+		//debug_assert_eq!(dest_result.llvm_typ, data_result.llvm_typ);
+		debug_assert!(dest_result.llvm_typ == data_result.llvm_typ, "dest_result type = {:?}\ndata_result type = {:?}\nstmt = {:?}", dest_result.llvm_typ, data_result.llvm_typ, stmt);
 		let mut stream = dest_result.stream;
 		stream.append(&mut data_result.stream);
 		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
@@ -989,12 +1062,12 @@ fn mangle(name: &str, ty: &ast::Ty) -> String {
 	result_string
 }
 
-enum Instantiation<'a>{
-	NonGeneric(ast::Func),
-	Erased(ast::GenericFunc),
-	Separated(ast::GenericFunc, &'a ast::Ty)
+enum FuncInst<'a, 'b>{
+	NonGeneric(&'a ast::Func),
+	Erased(&'a ast::GenericFunc),
+	Separated(&'a ast::GenericFunc, &'b ast::Ty)
 }
-fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>) -> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
+fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>) -> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
 	//compiling a non-generic function and an erased function are nearly the same thing
 	let mut context = Context{
 		locals: HashMap::new(),
@@ -1003,8 +1076,8 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 		structs: &prog_context.structs
 	};
 	let (args, ret_ty, func_name, body) = match f {
-		Instantiation::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
-		Instantiation::Erased(_) | Instantiation::Separated(_,_) => todo!()
+		FuncInst::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
+		FuncInst::Erased(_) | FuncInst::Separated(_,_) => todo!()
 	};
 	let mut stream = Vec::with_capacity(args.len() * 2);
 	let mut params = Vec::with_capacity(args.len());
@@ -1062,8 +1135,8 @@ fn cmp_func(f: &Instantiation, prog_context: &typechecker::ProgramContext, globa
 	}}
 
 	let possibly_mangled_name: String = match f {
-		Instantiation::NonGeneric(_) | Instantiation::Erased(_) => func_name.to_owned(),
-		Instantiation::Separated(_, ty) => mangle(func_name, ty)
+		FuncInst::NonGeneric(_) | FuncInst::Erased(_) => func_name.to_owned(),
+		FuncInst::Separated(_, ty) => mangle(func_name, ty)
 	};
 	let func_result = llvm::Func{
 		ret_ty: ll_ret_ty,
@@ -1088,7 +1161,7 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 		},
 		NamedStruct(s) => llvm::Constant::Struct{
 			name: s.clone(),
-			values: structs.get(s).expect("types of global vars should be instantiated by now")
+			values: structs.get(s).expect("types of global vars should be insted by now")
 				.iter()
 				.map(|t| get_default_constant(t, structs))
 				.collect()
@@ -1103,34 +1176,38 @@ fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_struct
 	(ll_ty.clone(), llvm::GlobalDecl::GConst(ll_ty, initializer))
 }
 
-//when instantiating this, replace all occurences of type_var in fields with type_param
-struct StructInstantiation<'a>{
-	type_var: &'a str,
-	fields: &'a Vec<(String, ast::Ty)>,
-	type_param: &'a ast::Ty
+//when insting this, replace all occurences of its type var in fields with type_param
+struct StructInst<'prog>{
+	name: &'prog str,
+	type_param: &'prog ast::Ty
 }
 
-//If typ is a separated generic struct, then add a new StructInstantiation to the queue
-fn possibly_add_struct_instantiation<'a>(typ: &'a ast::Ty,
-	queue: &mut VecDeque<StructInstantiation<'a>>,
-	structs: &'a typechecker::StructContext)
-{
-	//if typ is struct name@<type_param>
-	if let ast::Ty::GenericStruct{type_var: type_param, name} = typ {
-		//and struct name is declared as struct name@<separated 'type_var>{fields}
-		if let typechecker::StructType::Generic{ mode: ast::PolymorphMode::Separated, type_var, fields } = structs.get(name).unwrap() {
-			queue.push_back(StructInstantiation{
-				type_var,
-				fields,
+#[derive(Default)]
+struct InstQueue<'prog>{
+	queue: VecDeque<StructInst<'prog>>,
+	already_insted: HashSet<(&'prog str, &'prog ast::Ty)>
+}
+impl<'s, 'prog> InstQueue<'prog>{
+	fn push(&'s mut self, struct_name: &'prog str, type_param: &'prog ast::Ty) -> bool {
+		if self.already_insted.contains(&(struct_name, type_param)){
+			false
+		} else {
+			self.queue.push_back(StructInst{
+				name: struct_name,
 				type_param
 			});
+			self.already_insted.insert((struct_name, type_param));
+			true
 		}
+	}
+	fn poll(&'s mut self) -> Option<StructInst<'prog>>{
+		self.queue.pop_front()
 	}
 }
 
-fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
+pub fn cmp_prog<'prog>(prog: &'prog ast::Program, prog_context: &'prog typechecker::ProgramContext) -> llvm::Program {
 	let mut type_decls: LLStructContext = HashMap::new();
-	let mut struct_instantiation_queue: VecDeque<StructInstantiation> = VecDeque::new();
+	let mut struct_inst_queue: InstQueue<'prog> = Default::default();
 	//initially, put all non-generic and erased structs in the type_decls
 	for s in prog.structs.iter() {
 		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, llvm::Ty::Void)).collect();
@@ -1145,12 +1222,36 @@ fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> 
 	let mut global_decls: Vec<(String, llvm::GlobalDecl)> = Vec::with_capacity(prog.global_vars.len());
 	let mut global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = HashMap::new();
 	for (typ, name) in prog.global_vars.iter() {
-		possibly_add_struct_instantiation(typ, &mut struct_instantiation_queue, &prog_context.structs);
+		//if typ is a struct name@<type_param>
+		if let ast::Ty::GenericStruct{type_var: type_param, name} = typ {
+			//..and struct name is declared as a struct using struct name@<separated 'type_var>{...}
+			if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, ..} = prog_context.structs.get(name).unwrap() {
+				struct_inst_queue.push(name, type_param);
+			}
+		}
 		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &type_decls);
 		global_decls.push( (name.clone(), ll_gdecl) );
 		global_locs.insert(name.clone(), (ll_typ, llvm::Operand::Global(name.clone())));
 	}
+	let mut cmped_funcs = Vec::new();
+	for func in prog.funcs.iter() {
+		let (func, extra_globals) = cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs);
+		cmped_funcs.push(func);
+		global_decls.extend(extra_globals.into_iter());
+	}
+	llvm::Program {
+		type_decls,
+		global_decls,
+		func_decls: cmped_funcs,
+		external_decls: vec![
+				("malloc".to_owned(),
+				llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
+				vec![llvm::Ty::Int{bits: 64, signed: false}]),
 
-
-	todo!()
+				("free".to_owned(),
+				llvm::Ty::Void,
+				vec![llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))]
+				)
+			]
+	}
 }
