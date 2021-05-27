@@ -296,7 +296,7 @@ impl std::fmt::Display for Block {
 		write!(f, "\t{}\n", self.term)
 	}
 }
-impl std::default::Default for Block {
+impl Default for Block {
 	fn default() -> Self {
 		Self{
 			insns: Vec::new(),

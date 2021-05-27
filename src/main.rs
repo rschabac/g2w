@@ -39,5 +39,8 @@ fn main() -> Result<(), String>{
 	let mut output_file = std::fs::File::create("./output.ll").map_err(|e| format!("could not open output file: {}", e))?;
 	use std::io::Write;
 	write!(output_file, "{}", llvm_prog).map_err(|e| format!("io error: {}", e))?;
-	Ok(())
+	use std::process::Command;
+	use std::os::unix::process::CommandExt;
+	let err = Command::new("clang").args(&["output.ll", "-o", "output"]).exec();
+	Err(err.to_string())
 }

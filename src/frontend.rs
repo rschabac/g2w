@@ -95,6 +95,21 @@ pub struct ExpResult{
 	src_typ: ast::Ty,
 	*/
 }
+impl std::fmt::Debug for ExpResult {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		writeln!(f, "llvm_typ: {:?}", self.llvm_typ)?;
+		writeln!(f, "llvm_op: {}", self.llvm_op)?;
+		writeln!(f, "stream:")?;
+		use Component::*;
+		for component in self.stream.iter() { match component {
+			Label(s) => writeln!(f, "label '{}'", s)?,
+			Instr(dest, instr) => writeln!(f, "instr %{} = {}", dest, instr)?,
+			Term(t) => writeln!(f, "term {}", t)?,
+			GlobalString(s, gdecl) => writeln!(f, "GlobalString '{}', {}", s, gdecl)?
+		}}
+		Ok(())
+	}
+}
 
 fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>) -> ExpResult { match e {
 	ast::Expr::LitNull => match type_for_lit_nulls {
@@ -158,7 +173,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		not a pointer to it), so this case only handles the rvalue case
 
 		for something like v.x or f().x as an rvalue
-		cmp_exp gets the struct itself, so %v_loaded
+		cmp_exp gets the struct itself, %v_loaded
 		%field = extractvalue %vec_i32 %v_loaded, index
 
 		for something like v->x as an rvalue
@@ -166,7 +181,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		%v_loaded = load %vec_i32, %vec_i32* %v_pointer
 		%field = extractvalue %vec_i32 %v_loaded, index
 		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
+		let mut base_result = cmp_exp(base as &ast::Expr, ctxt, None);
 		let mut stream = base_result.stream;
 		let (base_is_ptr, struct_name) = match &base_result.llvm_typ {
 			llvm::Ty::NamedStruct(s) => (false, s.clone()),
@@ -197,10 +212,11 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let result_ty = result_ty.unwrap();
 		let base_loaded_op: llvm::Operand;
 		if base_is_ptr {
+			base_result.llvm_typ = base_result.llvm_typ.remove_ptr();
 			let base_loaded_uid = gensym("base_loaded");
 			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
 			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
-				typ: base_result.llvm_typ.clone().remove_ptr(),
+				typ: base_result.llvm_typ.clone(),
 				src: base_result.llvm_op
 			}));
 		} else {
@@ -208,7 +224,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		}
 		let extracted_uid = gensym("extract");
 		stream.push(Component::Instr(extracted_uid.clone(), llvm::Instruction::Extract{
-			typ: base_result.llvm_typ,
+			typ: base_result.llvm_typ.clone(),
 			base: base_loaded_op,
 			offset: field_index
 		}));
@@ -808,12 +824,12 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		let mut stream = base_result.stream;
 		stream.append(&mut index_result.stream);
 		stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
-			typ: result_typ.clone(),
+			typ: result_typ,
 			base: base_result.llvm_op,
 			offsets: vec![(index_result.llvm_typ, index_result.llvm_op)]
 		}));
 		ExpResult{
-			llvm_typ: result_typ,
+			llvm_typ: base_result.llvm_typ.remove_ptr(),
 			llvm_op: llvm::Operand::Local(result_op),
 			stream
 		}
@@ -827,25 +843,37 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		for something like v->x as an lvalue, cmp_exp(v) gets the pointer, %v_addr
 		%field_addr = getelementptr %vec_i32, %vec_i32* %v_addr, 0, i64 index
 		how to tell whether to use cmp_value or cmp_exp?
-		do cmp_lvalue first, if the Ty it returns is a Ptr, then copypaste code from
-		cmp_lvalue_to_rvalue to turn this into the result of calling cmp_exp, then use second method
+		if base is not a valid lvalue (function call, etc), or the Ty returned by cmp_lvalue(base)
+		is a Ptr, then copypaste code from cmp_lvalue_to_rvalue to turn this into the
+		result of calling cmp_exp, then use second method
 		*/
-		let mut base_lvalue_result = cmp_lvalue(base as &ast::Expr, ctxt);
-		let struct_name: String;
-		match &base_lvalue_result.llvm_typ {
-			llvm::Ty::NamedStruct(s) => {
-				struct_name = s.clone();
-			},
-			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
-				llvm::Ty::NamedStruct(s) => {
-					struct_name = s.clone();
-					let loaded_id = gensym("struct_deref");
-					base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
-						typ: base_lvalue_result.llvm_typ.clone(),
-						src: base_lvalue_result.llvm_op
-					}));
-					base_lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
+		let mut base_lvalue_result;
+		if !matches!(base as &ast::Expr, ast::Expr::Id(_) | ast::Expr::Index(_,_) | ast::Expr::Proj(_,_) | ast::Expr::Deref(_)) {
+			//something like f()->field
+			//if doing something like null.field, the typechecker will catch this, so the None here is ok
+			base_lvalue_result = cmp_exp(base as &ast::Expr, ctxt, None);
+		} else {
+			base_lvalue_result = cmp_lvalue(base as &ast::Expr, ctxt);
+			match &base_lvalue_result.llvm_typ {
+				llvm::Ty::NamedStruct(_) => (), //if base points to a struct directly, don't do anything
+				llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
+					llvm::Ty::NamedStruct(_) => {
+						let loaded_id = gensym("struct_deref");
+						base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+							typ: base_lvalue_result.llvm_typ.clone(),
+							src: base_lvalue_result.llvm_op
+						}));
+						base_lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
+					}
+					t => panic!("Proj base has llvm type Ptr({:?})", t)
 				}
+				t => panic!("Proj base has llvm type Ptr({:?})", t)
+			};
+		}
+		let struct_name: String = match &base_lvalue_result.llvm_typ {
+			llvm::Ty::NamedStruct(s) => s.clone(),
+			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
+				llvm::Ty::NamedStruct(s) => s.clone(),
 				t => panic!("Proj base has llvm type Ptr({:?})", t)
 			}
 			t => panic!("Proj base has llvm type Ptr({:?})", t)
@@ -877,7 +905,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			base: base_lvalue_result.llvm_op,
 			offsets: vec![
 				(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0})),
-				(llvm::Ty::Int{bits: 64, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: field_index}))
+				(llvm::Ty::Int{bits: 32, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 32, val: field_index}))
 			]
 		}));
 		ExpResult{
@@ -888,14 +916,18 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 	},
 	ast::Expr::Deref(base) => {
 		let base = base as &ast::Expr;
-		cmp_exp(base, ctxt, None)
+		let mut result = cmp_exp(base, ctxt, None);
+		result.llvm_typ = result.llvm_typ.remove_ptr();
+		result
 	},
 	other => panic!("{:?} is not a valid lvalue", other)
 }}
 
 fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
 	let mut lvalue_result = cmp_lvalue(e, ctxt);
+	eprintln!("lvalue_result = {:?}", lvalue_result);
 	let loaded_id = gensym(gensym_seed);
+	//lvalue_result.llvm_typ = lvalue_result.llvm_typ.remove_ptr();
 	lvalue_result.stream.push(
 		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 			typ: lvalue_result.llvm_typ.clone(),
@@ -1031,6 +1063,11 @@ fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty
 	for stmt in block.iter() {
 		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty));
 	}
+	//if the function returns void, a return statement can be elided. In this case, the stream
+	//will not end with a terminator, and a 'ret void' terminator should be added
+	if stream.is_empty() || !matches!(stream.last().unwrap(), Component::Term(_)) {
+		stream.push(Component::Term(llvm::Terminator::Ret(None)));
+	}
 	stream
 }
 
@@ -1089,9 +1126,9 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
 			typ: ll_ty.clone(),
 			data: llvm::Operand::Local(ll_arg_id.clone()),
-			dest: llvm::Operand::Local(alloca_slot_id)
+			dest: llvm::Operand::Local(alloca_slot_id.clone())
 		}));
-		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(ll_arg_id.clone())));
+		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(alloca_slot_id)));
 		params.push( (ll_ty, ll_arg_id) );
 	}
 	let ll_ret_ty = ret_ty.as_ref().map(|t| cmp_ty(t, &prog_context.structs, llvm::Ty::Void))
