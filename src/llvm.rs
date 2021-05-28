@@ -99,8 +99,8 @@ impl std::fmt::Display for Constant{
 		match self {
 			SInt{val, ..} => write!(f, "{}", val),
 			UInt{val, ..} => write!(f, "{}", val),
-			Float32(val) => write!(f, "{}", val),
-			Float64(val) => write!(f, "{}", val),
+			Float32(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
+			Float64(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
 			Null(_) => write!(f, "null"),
 			Struct{values, ..} => {
 				write!(f, "{{")?;
@@ -232,6 +232,8 @@ impl std::fmt::Display for Instruction{
 				write!(f, "urem i{} {}, {}", bits, left, right),
 			Binop{op: Mod, typ: float_ty @ Float32, left, right} | Binop{op: Mod, typ: float_ty @ Float64, left, right} =>
 				write!(f, "frem {} {}, {}", float_ty, left, right),
+			Binop{op, typ: float_ty @ Float32, left, right} | Binop{op, typ: float_ty @ Float64, left, right} =>
+				write!(f, "f{} {} {}, {}", op, float_ty, left, right),
 			Binop{op, typ, left, right} => write!(f, "{} {} {}, {}", op, typ, left, right),
 			Alloca(t) => write!(f, "alloca {}", t),
 			Load{typ, src} => write!(f, "load {}, {}* {}", typ, typ, src),
@@ -245,7 +247,7 @@ impl std::fmt::Display for Instruction{
 			Call{func_name, ret_typ, args} => {
 				write!(f, "call {} ", ret_typ)?;
 				if typechecker::PRINTF_FAMILY.contains(&func_name.as_str()) {
-					write!(f, "(i8*, ...)* ")?;
+					write!(f, "(i8*, ...) ")?;
 				}
 				write!(f, "@{}(", func_name)?;
 				for (i, (arg_ty, arg_op)) in args.iter().enumerate() {
@@ -287,7 +289,7 @@ pub struct Block{
 impl std::fmt::Display for Block {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for (local, insn) in self.insns.iter() {
-			if matches!(insn, Instruction::Store{..}) {
+			if matches!(insn, Instruction::Store{..} | Instruction::Call{ret_typ: Ty::Void, ..}) {
 				write!(f, "\t{}\n", insn)?;
 			} else {
 				write!(f, "\t%{} = {}\n", local, insn)?;
@@ -380,6 +382,11 @@ impl std::fmt::Display for Program {
 		for (name, gdecl) in self.global_decls.iter() {
 			write!(f, "@{} = global {}\n", name, gdecl)?;
 		}
+		//printf functions have different declaration syntax because of the var args
+		write!(f, "declare i32 @printf(i8*, ...)\n\
+		declare i32 @sprintf(i8*, i8*, ...)\n\
+		declare i32 @snprintf(i8*, i64, i8*, ...)\n\
+		declare i32 @dprintf(i32, i8*, ...)\n")?;
 		//All external decls will be function
 		for (name, ret_ty, arg_tys) in self.external_decls.iter() {
 			write!(f, "declare {} @{}(", ret_ty, name)?;

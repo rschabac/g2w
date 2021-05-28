@@ -117,10 +117,91 @@ fn get_builtins() -> FuncContext {
 pub static PRINTF_FAMILY: &[&str] = &[
 	"printf",
 	"sprintf",
-	"fprintf",
+	//"fprintf", //this requires a FILE*, which will require c header files to define
 	"snprintf",
 	"dprintf"
 ];
+
+fn typecheck_printf(func_name: &str, args: &[ast::Expr], ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<(), String> {
+	/*
+	According to the C standard, there is something called "default argument promotion" that happens when the expected type
+	of the argument is unknown (such as when passing arguments to printf). This means that floats are converted to doubles,
+	and chars, shorts, and enums are converted to int (probably int, maybe even long). Ideally, I could do this myself in
+	the frontend, but for now, I will just give an error when the arguments to printf are one of these shorter types.
+	*/
+	use ast::Ty::*;
+	use ast::IntSize::*;
+	use ast::FloatSize::*;
+	if args.is_empty() {
+		return Err("printf requires at least one argument".to_owned());
+	}
+	let starting_index: usize; //index of first variadic param in args
+	match func_name {
+		"printf" => {
+			if typecheck_expr(ctxt, funcs, &args[0])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("first argument to printf must be a u8*".to_owned());
+			}
+			starting_index = 1;
+		},
+		"sprintf" => {
+			if args.len() < 2 {
+				return Err("sprintf requires at least 2 arguments".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[0])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("first argument to sprintf must be a u8*".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[1])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("second argument to sprintf must be a u8*".to_owned());
+			}
+			starting_index = 2;
+		},
+		"snprintf" => {
+			if args.len() < 3 {
+				return Err("snprintf requires at least 3 arguments".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[0])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("first argument to snprintf must be a u8*".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[1])? != (Int{size: Size64, signed: false}) {
+				return Err("second argument to snprintf must be a u64".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[2])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("third argument to snprintf must be a u8*".to_owned());
+			}
+			starting_index = 3;
+		},
+		"dprintf" => {
+			if args.len() < 2 {
+				return Err("dprintf requires at least 2 arguments".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[1])? != (Int{size: Size32, signed: true}){
+				return Err("first argument to dprintf must be a i32".to_owned());
+			}
+			if typecheck_expr(ctxt, funcs, &args[1])? != Ptr(Some(Box::new(Int{size: Size8, signed: false}))) {
+				return Err("second argument to dprintf must be a u8*".to_owned());
+			}
+			starting_index = 2;
+		},
+		_ => panic!("typecheck_printf called with non-printf function {} (maybe it's just not in PRINT_FAMILY)", func_name)
+	};
+	for (i, e) in args[starting_index..].iter().enumerate() {
+		let correction: Option<(&str, &str)> = match typecheck_expr(ctxt, funcs, e)? {
+			Float(FSize32) => Some(("f32", "f64")),
+			Int{size: Size8, signed: true} => Some(("i8", "i32")),
+			Int{size: Size8, signed: false} => Some(("u8", "u32")),
+			Int{size: Size16, signed: true} => Some(("i16", "i32")),
+			Int{size: Size16, signed: false} => Some(("u16", "u32")),
+			_ => None
+		};
+		match correction {
+			Some((bad, good)) => {
+				return Err(format!("{} argument {} must be manually promoted from {} to {}", func_name, i + starting_index + 1, bad, good));
+			},
+			None => ()
+		}
+	};
+	Ok(())
+}
 
 pub fn typecheck_expr(ctxt: &mut LocalTypeContext, funcs: &FuncContext, e: &ast::Expr) -> Result<ast::Ty, String>{
 use ast::Ty::*;
@@ -223,11 +304,7 @@ match e {
 	Call(func_name, args) => {
 		use FuncType::*;
 		if PRINTF_FAMILY.contains(&func_name.as_str()){
-			for arg in args.iter(){
-				//nulls should be allowed in printf arguments, but it really doesn't matter what their type is
-				ctxt.type_for_lit_nulls = Some(Ptr(None));
-				let _ = typecheck_expr(ctxt, funcs, arg)?;
-			}
+			typecheck_printf(func_name.as_str(), args as &[ast::Expr], ctxt, funcs)?;
 			return Ok(Int{signed: true, size: ast::IntSize::Size32});
 		}
 		let return_type;
@@ -522,11 +599,7 @@ match s {
 	SCall(func_name, args) => {
 		use FuncType::*;
 		if PRINTF_FAMILY.contains(&func_name.as_str()){
-			for arg in args.iter(){
-				//nulls should be allowed in printf arguments, but it really doesn't matter what their type is
-				ctxt.type_for_lit_nulls = Some(Ptr(None));
-				let _ = typecheck_expr(ctxt, funcs, arg)?;
-			}
+			typecheck_printf(func_name.as_str(), args as &[ast::Expr], ctxt, funcs)?;
 			return Ok(false);
 		}
 		let arg_type_list;

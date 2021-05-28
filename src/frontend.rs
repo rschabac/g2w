@@ -338,10 +338,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				}
 			},
 			(Float64, Float32) => {
-				let extended_uid = gensym("float_truncated");
+				let extended_uid = gensym("float_extended");
 				let mut stream = src_result.stream;
 				stream.push(Component::Instr(extended_uid.clone(), 
-					llvm::Instruction::FloatTrunc(src_result.llvm_op)
+					llvm::Instruction::FloatExt(src_result.llvm_op)
 				));
 				ExpResult{
 					llvm_typ: new_llvm_typ,
@@ -725,7 +725,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		let stream = vec![
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
-				typ: llvm_ptr_typ.clone(),
+				typ: llvm_typ.clone(),
 				base: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
 				offsets: vec![
 					(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1}))
@@ -925,7 +925,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 
 fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
 	let mut lvalue_result = cmp_lvalue(e, ctxt);
-	eprintln!("lvalue_result = {:?}", lvalue_result);
+	//eprintln!("lvalue_result = {:?}", lvalue_result);
 	let loaded_id = gensym(gensym_seed);
 	//lvalue_result.llvm_typ = lvalue_result.llvm_typ.remove_ptr();
 	lvalue_result.stream.push(

@@ -29,7 +29,12 @@ fn main() -> Result<(), String>{
 		let filename = &argv[1];
 		program_source = std::fs::read_to_string(filename).map_err(|e| format!("io error: {}", e))?;
 	}
-	let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).unwrap();
+	let ast: Vec<ast::Gdecl> = match program_parser.parse(program_source.as_str()) {
+		Ok(p) => p,
+		Err(e) => {
+			panic!("parse error: {}", e)
+		}
+	};
 	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
 		let mut result = "Type Error: ".to_owned();
 		result.push_str(err_msg.as_str());
