@@ -1,0 +1,50 @@
+/*0
+1, 2, 4, 8, 16, 
+1, 2, 4, 8, 16, 
+1, 2, 4, 8, 16, 
+*/
+
+void print_array_of_5_i32_by_value(i32[5] arr){
+	i64 i;
+	i = 0;
+	while i < 5 {
+		printf("%d, ", arr[i]);
+		i = i + 1;
+	}
+	printf("%c", 10);
+}
+
+void print_array_of_5_i32_by_pointer_to_array(i32[5]* arr){
+	i64 i;
+	i = 0;
+	while i < 5 {
+		printf("%d, ", (*arr)[i]);
+		i = i + 1;
+	}
+	printf("%c", 10);
+}
+
+void print_array_of_5_i32_by_pointer_to_i32(i32* arr){
+	i64 i;
+	i = 0;
+	while i < 5 {
+		printf("%d, ", arr[i]);
+		i = i + 1;
+	}
+	printf("%c", 10);
+}
+
+i32 main(){
+	i32[5] arr;
+	arr[0] = cast(i32, 1);
+	arr[1] = cast(i32, 2);
+	arr[2] = cast(i32, 4);
+	arr[3] = cast(i32, 8);
+	arr[4] = cast(i32, 16);
+
+	print_array_of_5_i32_by_value(arr);
+	print_array_of_5_i32_by_pointer_to_array(&arr);
+	print_array_of_5_i32_by_pointer_to_i32(&arr[0]);
+
+	return cast(i32, 0);
+}

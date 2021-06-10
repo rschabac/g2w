@@ -40,19 +40,12 @@ pub fn get_empty_localtypecontext() -> (LocalTypeContext, FuncContext) {
 	HashMap::new())
 }
 
-fn decay_type(t: ast::Ty) -> ast::Ty {
-	match t {
-		ast::Ty::Array{typ, ..} => ast::Ty::Ptr(Some(typ)),
-		t => t
-	}
-}
-
-pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: ast::Ty) -> ast::Ty {
+pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement: &ast::Ty) -> ast::Ty {
 	use ast::Ty::*;
 	match original {
 		TypeVar(s) => {
 			if s == type_var_str {
-				replacement
+				replacement.clone()
 			} else {
 				panic!("when replacing '{}, found other type var, '{}", type_var_str, s);
 			}
@@ -73,7 +66,10 @@ pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement:
 	}
 }
 
-fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext) -> Result<(), String> {
+//This function is called on all types that appear in the ast, and makes sure that any struct names
+//are used appropriately, and that no erased type vars are passed to a separated struct or a
+//separated function.
+fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext, current_type_var: &Option<(String, ast::PolymorphMode)>) -> Result<(), String> {
 	use ast::Ty::*;
 	use StructType::*;
 	match t {
@@ -82,12 +78,32 @@ fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext) -> Result
 		Some(Generic{..}) => Err(format!("struct {} is generic", s)),
 		Some(NonGeneric(_)) => Ok(())
 	},
-	GenericStruct{name, ..} => match struct_context.get(name) {
+	GenericStruct{name, type_var: type_param} => match struct_context.get(name) {
 		None => Err(format!("struct {} does not exist", name)),
 		Some(NonGeneric(_)) => Err(format!("struct {} is not generic", name)),
-		Some(Generic{..}) => Ok(())
+		Some(Generic{mode, ..}) => {
+			let type_var_in_param = recursively_find_type_var(type_param as &ast::Ty);
+			match (type_var_in_param, current_type_var) {
+				//cannot use the type struct A@<'T> in a non-generic function/struct definition
+				(Some(s), None) => {
+					return Err(format!("Cannot pass unknown type variable '{} to struct {}", s, name));
+				},
+				(Some(s), Some((current_var, current_mode))) => {
+					//cannot use the type struct A@<'T> if 'T is not the current type var
+					if current_var.as_str() != s {
+						return Err(format!("Cannot pass unknown type variable '{} to struct {}", current_var, name));
+					}
+					//cannot pass an erased type var to a separated struct
+					if *current_mode == ast::PolymorphMode::Erased && *mode == ast::PolymorphMode::Separated {
+						return Err(format!("Cannot pass erased type variable '{} to separated struct {}", s, name));
+					}
+				}
+				_ => ()
+			};
+			all_struct_names_valid(type_param, struct_context, current_type_var)
+		}
 	},
-	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid(t, struct_context),
+	Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid(t, struct_context, current_type_var),
 	_ => Ok(())
 	}
 }
@@ -193,11 +209,8 @@ fn typecheck_printf(func_name: &str, args: &[ast::Expr], ctxt: &mut LocalTypeCon
 			Int{size: Size16, signed: false} => Some(("u16", "u32")),
 			_ => None
 		};
-		match correction {
-			Some((bad, good)) => {
-				return Err(format!("{} argument {} must be manually promoted from {} to {}", func_name, i + starting_index + 1, bad, good));
-			},
-			None => ()
+		if let Some((bad, good)) = correction {
+			return Err(format!("{} argument {} must be manually promoted from {} to {}", func_name, i + starting_index + 1, bad, good));
 		}
 	};
 	Ok(())
@@ -246,7 +259,13 @@ match e {
 		ctxt.type_for_lit_nulls = None;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
 		let result_type = match base_typ {
-			Ptr(Some(typ)) | Array{typ, ..} => Ok(*typ),
+			Ptr(Some(typ)) => Ok(*typ),
+			Array{typ, ..} =>
+				if !matches!(base as &ast::Expr, ast::Expr::Id(_) | ast::Expr::Index(_,_) | ast::Expr::Proj(_,_) | ast::Expr::Deref(_)) {
+					Err("Cannot index off of something of array type that is not an lvalue".to_owned())
+				} else {
+					Ok(*typ)
+				},
 			Ptr(None) => Err("Can't index off of a void*".to_owned()),
 			_ => Err(format!("{:?} is not an array or pointer", base_typ))
 		};
@@ -265,7 +284,7 @@ match e {
 		match base_typ {
 			Ptr(Some(ref boxed)) => match boxed as &ast::Ty {
 				Struct(struct_name) => match ctxt.structs.get(struct_name) {
-					None => Err(format!("could not find struct named '{}'", struct_name)),
+					None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 					Some(NonGeneric(field_list)) => {
 						for (field_name, typ) in field_list.iter() {
 							if field.eq(field_name) {
@@ -274,19 +293,31 @@ match e {
 						}
 						Err(format!("struct {} does not have a {} field", struct_name, field))
 					},
-					Some(Generic{..}) => panic!("Proj: base had type {}, but when struct context contained a generic struct for {}", base_typ, struct_name)
+					Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
 				},
-				GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
+				GenericStruct{type_var: ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
+					None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
+					Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
+					Some(Generic{mode: _, type_var, fields}) => {
+						for (field_name, typ) in fields.iter() {
+							if field.eq(field_name) {
+								let replaced_ty = replace_type_var_with(typ.clone(), type_var.as_str(), type_param);
+								return Ok(replaced_ty);
+							}
+						}
+						Err(format!("struct {} does not have a {} field", struct_name, field))
+					}
+				},
 				_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
 			},
 			Struct(ref struct_name) => match ctxt.structs.get(struct_name) {
-				None => Err(format!("could not find struct named '{}'", struct_name)),
+				None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 				Some(NonGeneric(field_list)) => {
 					/*
 					if is_lhs is set and base is not a pointer and base itself is not an lvalue, error
 					*/
 					if ctxt.is_lhs && !matches!(base as &ast::Expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
-						return Err("Cannot assign to field that of struct that is not an lvalue".to_owned());
+						return Err("Cannot assign to field of struct that is not an lvalue".to_owned());
 					}
 					for (field_name, typ) in field_list.iter() {
 						if field.eq(field_name) {
@@ -295,9 +326,28 @@ match e {
 					}
 					Err(format!("struct {} does not have a {} field", struct_name, field))
 				},
-				Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
+				Some(Generic{..}) => panic!("Proj: base type was {}, but struct context contained a generic struct", base_typ)
 			},
-			GenericStruct{type_var: _type_var, name: _name} => panic!("todo: projecting off a generic struct is not implemented in typechecker"),
+			GenericStruct{type_var: ref type_param, name: ref struct_name} =>  match ctxt.structs.get(struct_name) {
+				None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
+				Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
+				Some(Generic{..}) =>  match ctxt.structs.get(struct_name) {
+					None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
+					Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
+					Some(Generic{mode: _, type_var, fields}) => {
+						if ctxt.is_lhs && !matches!(base as &ast::Expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
+							return Err("Cannot assign to field of struct that is not an lvalue".to_owned());
+						}
+						for (field_name, typ) in fields.iter() {
+							if field.eq(field_name) {
+								let replaced_ty = replace_type_var_with(typ.clone(), type_var.as_str(), type_param);
+								return Ok(replaced_ty);
+							}
+						}
+						Err(format!("struct {} does not have a {} field", struct_name, field))
+					}
+				}
+			},
 			_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
 		}
 	},
@@ -334,18 +384,17 @@ match e {
 					(typecheck_expr(ctxt, funcs, arg), expected_type)
 					})
 				.enumerate(){
+			//not doing array-to-pointer decay like c, do &arr[0] instead
 			let given_type = given_type?;
-			let given_type_str = format!("{:?}", given_type);
-			let given_type = decay_type(given_type);
 			if given_type.ne(&correct_type) {
-				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
 			}
 		}
 		Ok(return_type)
 	},
 	GenericCall{name: func_name, type_var, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_var, &ctxt.structs)?;
+		all_struct_names_valid(&type_var, &ctxt.structs, &ctxt.type_var)?;
 		let return_type;
 		let arg_type_list;
 		let callee_mode;
@@ -394,21 +443,19 @@ match e {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var.clone());
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var);
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
 			let given_type = given_type?;
-			let given_type_str = format!("{:?}", given_type);
-			let given_type = decay_type(given_type);
 			if given_type != correct_type {
-				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
 			}
 		};
 		Ok(return_type)
 	},
 	Cast(dest_type, source) => {
-		all_struct_names_valid(&dest_type, &ctxt.structs)?;
+		all_struct_names_valid(&dest_type, &ctxt.structs, &ctxt.type_var)?;
 		let type_var_str_in_dest_type = recursively_find_type_var(dest_type);
 		match (type_var_str_in_dest_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -419,8 +466,6 @@ match e {
 		};
 		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let original_type = typecheck_expr(ctxt, funcs, source)?;
-		let original_type_string = format!("{:?}", original_type);
-		let original_type = decay_type(original_type);
 		match (original_type, dest_type) {
 			(Int{..}, Int{..})
 		  | (Ptr(_), Ptr(_))
@@ -430,7 +475,7 @@ match e {
 			
 			//TODO: casting to/from type vars?
 			(TypeVar(_), _) | (_, TypeVar(_)) => panic!("trying to cast with a TypeVar, I don't know what to do here yet"),
-			(_, _) => Err(format!("Cannot cast from {} to {:?}", original_type_string, dest_type))
+			(original_type, dest_type) => Err(format!("Cannot cast from {:?} to {:?}", original_type, dest_type))
 			
 		}
 	},
@@ -519,10 +564,11 @@ match e {
 		}
 	},
 	Sizeof(t) => {
-		all_struct_names_valid(&t, &ctxt.structs)?;
+		all_struct_names_valid(&t, &ctxt.structs, &ctxt.type_var)?;
 		//Not sure how to handle sizeof a type var
 		//current idea: size of a separated type var gets resolved after instatiation,
-		//size of an erased type var is just the size of a void pointer
+		//size of an erased type var is computed at runtime
+		//in both cases, it is a u64
 		let type_var_str_in_type = recursively_find_type_var(t);
 		match (type_var_str_in_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -559,7 +605,7 @@ match s {
 		}
 	},
 	Decl(typ, name) => {
-		all_struct_names_valid(&typ, &ctxt.structs)?;
+		all_struct_names_valid(&typ, &ctxt.structs, &ctxt.type_var)?;
 		let type_var_str_in_decl_type = recursively_find_type_var(typ);
 		match (type_var_str_in_decl_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -625,17 +671,15 @@ match s {
 				})
 				.enumerate(){
 			let given_type = given_type?;
-			let given_type_str = format!("{:?}", given_type);
-			let given_type = decay_type(given_type);
 			if given_type.ne(&correct_type) {
-				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type, correct_type));
 			}
 		}
 		Ok(false)
 	},
 	GenericSCall{name: func_name, type_var, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_var, &ctxt.structs)?;
+		all_struct_names_valid(&type_var, &ctxt.structs, &ctxt.type_var)?;
 		let arg_type_list;
 		let callee_mode;
 		let type_var_string;
@@ -680,15 +724,13 @@ match s {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var.clone());
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var);
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
 			let given_type = given_type?;
-			let given_type_str = format!("{:?}", given_type);
-			let given_type = decay_type(given_type);
 			if given_type != correct_type {
-				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type_str, correct_type));
+				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
 			}
 		};
 		Ok(false)
@@ -770,7 +812,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 	//this eliminates cloning of tys
 	type Node<'a> = (&'a str, Option<ast::Ty>);
 	const MAX_STRUCT_DEPTH: i32 = 100;
-	let mut seen_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
+	let mut fully_explored_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
 	let mut queue: VecDeque<Node> = VecDeque::with_capacity(struct_context.len());
 	for (name, struct_type) in struct_context.iter(){
 		let node = match struct_type {
@@ -780,8 +822,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 				(name.as_str(), Some(new_ty))
 			}
 		};
-		if seen_nodes.contains(&node) { continue }
+		if fully_explored_nodes.contains(&node) { continue }
 		queue.push_back(node);
+		let mut seen_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
 		let mut iterations = 0;
 		while !queue.is_empty() {
 			iterations += 1;
@@ -789,6 +832,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 				return Err(format!("maximum struct depth ({}) reached when processing struct '{}'", MAX_STRUCT_DEPTH, name));
 			}
 			let current_node = queue.pop_front().unwrap();
+			if fully_explored_nodes.contains(&current_node) {
+				continue
+			}
 			if seen_nodes.contains(&current_node) {
 				return Err(format!("struct '{}' is recursive", current_node.0));
 			}
@@ -863,12 +909,12 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								&& !field_type_param_is_concrete {
 								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
 							}
-							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, type_param.clone());
+							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, &type_param);
 							let type_param_string_of_field_struct: &str = match struct_context.get(name).unwrap_or_else(|| panic!("why is struct {} not in the context?", name)) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
 								Generic{type_var, ..} => type_var.as_str()
 							};
-							let substituted2 = replace_type_var_with(substituted1, type_param_string_of_current_struct, TypeVar(type_param_string_of_field_struct.to_owned()));
+							let substituted2 = replace_type_var_with(substituted1, type_param_string_of_current_struct, &TypeVar(type_param_string_of_field_struct.to_owned()));
 							queue.push_back((name.as_str(), Some(substituted2)));
 
 							/*
@@ -923,6 +969,9 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 			}
 			}
 		}
+		//seen_nodes is now full of nodes that are completely explored and known not to have
+		//any cycles, so they can be transferred to fully_explored_nodes
+		fully_explored_nodes.extend(seen_nodes.into_iter());
 	};
 	Ok(())
 }
@@ -933,7 +982,7 @@ pub struct ProgramContext {
 	pub globals: GlobalContext
 }
 
-pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, String>{
+pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String>{
 	/*
 	create StructContext:
 		collect names of all structs, put all of them into struct_context
@@ -984,17 +1033,17 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 				if seen_fields.contains(field_name.as_str()){
 					return Err(format!("struct {} contains two fields named {}", name, field_name));
 				}
-				all_struct_names_valid(field_type, &struct_context)?;
+				all_struct_names_valid(field_type, &struct_context, &None)?;
 				seen_fields.insert(field_name.as_str());
 			}
 		},
-		Generic{type_var: _, fields, mode: _mode} => {
+		Generic{type_var, fields, mode} => {
 			let mut seen_fields: HashSet<&str> = HashSet::new();
 			for (field_name, field_type) in fields.iter(){
 				if seen_fields.contains(field_name.as_str()){
 					return Err(format!("struct {} contains two fields named {}", name, field_name));
 				}
-				all_struct_names_valid(field_type, &struct_context)?;
+				all_struct_names_valid(field_type, &struct_context, &Some((type_var.clone(), *mode)))?;
 				seen_fields.insert(field_name.as_str());
 			}
 		}
@@ -1013,7 +1062,7 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type{
-				all_struct_names_valid(&ret, &struct_context)?;
+				all_struct_names_valid(&ret, &struct_context, &None)?;
 				if let Some(s) = recursively_find_type_var(ret) {
 					return Err(format!("found type variable '{} in return type of non-generic function {}", s, func_name));
 				}
@@ -1024,7 +1073,7 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				all_struct_names_valid(&arg_type, &struct_context)?;
+				all_struct_names_valid(&arg_type, &struct_context, &None)?;
 				if let Some(s) = recursively_find_type_var(arg_type) {
 					return Err(format!("found type variable '{} in type signature of non-generic function {}", s, func_name));
 				}
@@ -1042,7 +1091,7 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type {
-				all_struct_names_valid(&ret, &struct_context)?;
+				all_struct_names_valid(&ret, &struct_context, &Some((param.clone(), *mode)))?;
 				match recursively_find_type_var(ret) {
 					Some(s) if s != param => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
 					_ => ()
@@ -1054,7 +1103,7 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				all_struct_names_valid(&arg_type, &struct_context)?;
+				all_struct_names_valid(&arg_type, &struct_context, &Some((param.clone(), *mode)))?;
 				match recursively_find_type_var(arg_type) {
 					Some(s) if s != param => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
 					_ => ()
@@ -1069,7 +1118,7 @@ pub fn typecheck_program(gdecls: &Vec<ast::Gdecl>) -> Result<ProgramContext, Str
 		}
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
-			all_struct_names_valid(&t, &struct_context)?;
+			all_struct_names_valid(&t, &struct_context, &None)?;
 			if let Some(s) = recursively_find_type_var(t) {
 				return Err(format!("found type variable '{} in type of global variable", s));
 			}

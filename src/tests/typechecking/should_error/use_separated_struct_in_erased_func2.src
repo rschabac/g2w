@@ -1,6 +1,6 @@
 void f@<erased 'f>(){
 	void *buf;
-	buf = malloc(256);
+	buf = malloc(cast(u64, 256));
 	free(cast(struct A@<'f*>*, buf));
 }
 

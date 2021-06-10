@@ -317,7 +317,8 @@ mod typechecking_tests {
 		assert_eq!(setup_expr("true").unwrap(), Bool);
 		assert_eq!(setup_expr("38").unwrap(), Int{signed:true, size: IntSize::Size64});
 		assert_eq!(setup_expr("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
-		assert_eq!(setup_expr("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
+		//Can't index off of array literals
+		//assert_eq!(setup_expr("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
 		let (mut ctxt, _) = get_empty_localtypecontext();
 		let _ = ctxt.locals.insert("x".to_owned(), Bool);
 		assert_eq!(setup_expr_with_localtypecontext("x", &mut ctxt).unwrap(), Bool);
@@ -338,7 +339,7 @@ mod typechecking_tests {
 		assert!(setup_expr("cast(u8*, 5)").is_err());
 		assert!(setup_expr("f()").is_err());
 		assert_eq!(setup_expr("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
-		assert_eq!(setup_expr("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
+		//assert_eq!(setup_expr("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
 		assert_eq!(setup_expr("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
 		assert_eq!(setup_expr("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
 		assert!(setup_expr("&true").is_err());
@@ -356,7 +357,7 @@ mod typechecking_tests {
 		});
 		assert_eq!(setup_expr_with_funcs("f@<bool>(5 == 5, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
 		assert!(setup_expr_with_funcs("f(true, 5)", &funcs).is_err());
-		assert_eq!(setup_expr("printf(true, 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
+		assert_eq!(setup_expr("printf(\"abc\", 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
 		assert!(setup_expr("fprintf(3, 5 + 5u)").is_err());
 	}
 	fn setup_stmt(stmt: &str, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
@@ -415,20 +416,109 @@ mod typechecking_tests {
 	fn typecheck_files_test(){
 		use std::fs;
 		let program_parser = parser::ProgramParser::new();
-		for path in fs::read_dir("test_programs/typechecking/should_error").unwrap()
+		for path in fs::read_dir("src/tests/typechecking/should_error").unwrap()
 				.filter_map(|entry| {
 					//gets only the filenames that end in .src
 					let path_buf = entry.unwrap().path();
-					let path = path_buf.as_path().to_str().unwrap();
-					if path.ends_with(".src") {
-						Some(path.to_owned())
+					if path_buf.extension() == Some(std::ffi::OsStr::new("src")) {
+						Some(path_buf)
 					} else {
 						None
 					}
 				}){
-			let program_source = fs::read_to_string(&path).map_err(|e| format!("io error on {}: {}", path, e.to_string())).unwrap();
-			let ast = program_parser.parse(program_source.as_str()).map_err(|e| format!("parse error on {}: {}", path, e.to_string())).unwrap();
-			assert!(typecheck_program(ast).is_err(), "{} did not create a type error", path);
+			let program_source = fs::read_to_string(&path).map_err(|e| format!("io error on {}: {}", path.display(), e.to_string())).unwrap();
+			let ast = program_parser.parse(program_source.as_str()).map_err(|e| format!("parse error on {}: {}", path.display(), e.to_string())).unwrap();
+			assert!(typecheck_program(&ast).is_err(), "{} did not create a type error", path.display());
 		}
+	}
+}
+
+#[test]
+fn run_file_tests() {
+	use crate::{typechecker, frontend};
+	use super::parser;
+	use std::fs;
+	let program_parser = parser::ProgramParser::new();
+	let test_file_names = fs::read_dir("src/tests").unwrap()
+		.filter_map(|entry| {
+			let path: std::path::PathBuf = entry.unwrap().path();
+			if path.extension() == Some(std::ffi::OsStr::new("src")) {
+				Some(path)
+			} else {
+				None
+			}
+		});
+	let test_results = test_file_names.map(|test_file_name| -> Result<(), String>{
+		let program_source = fs::read_to_string(&test_file_name).map_err(|e| format!("io error on {}: {}", test_file_name.display(), e.to_string()))?;
+		let mut lines = program_source.split('\n');
+		/*
+		file must look like:
+			/*exit_code
+			expected output,
+			can be multiple lines
+			*/
+			actual code
+		*/
+		let first_line = lines.next().ok_or_else(|| format!("file {} is probably empty", test_file_name.display()))?;
+		let should_exit_with: u8 = first_line.strip_prefix("/*")
+					.ok_or_else(|| format!("file {} not formatted correctly for testing", test_file_name.display()))?
+					.parse().map_err(|_| format!("first line of {} not formatted correctly for testing", test_file_name.display()))?;
+		let mut should_print = String::new();
+		for line in lines { //just the remaining lines
+			if line.starts_with("*/") { break }
+			should_print.push_str(line);
+			should_print.push('\n');
+		}
+		let should_print: Vec<u8> = should_print.into();
+		let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).map_err(|parse_err| format!("parse error in file {}: {}", test_file_name.display(), parse_err))?;
+		let program_context = typechecker::typecheck_program(&ast).map_err(|type_err_msg| format!("type error in file {}: {}", test_file_name.display(), type_err_msg))?;
+		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context);
+		let mut output_file_name: std::path::PathBuf = test_file_name;
+		output_file_name.set_extension("ll");
+		use std::ffi::{OsString, OsStr};
+		let output_ll_file_name: OsString = [OsStr::new("src"), OsStr::new("tests"), OsStr::new("temp"), output_file_name.file_name().unwrap()].iter().collect::<std::path::PathBuf>().into();
+		//write ll prog to output_ll_file_name
+		let mut output_ll_file = fs::File::create(&output_ll_file_name).map_err(|io_err| format!("could not create output ll file: {}", io_err))?;
+		use std::io::Write;
+		write!(output_ll_file, "{}", llvm_prog).unwrap();
+
+		output_file_name.set_extension("exe");
+		let output_exe_file_name: OsString = [OsStr::new("src"), OsStr::new("tests"), OsStr::new("temp"), output_file_name.file_name().unwrap()].iter().collect::<std::path::PathBuf>().into();
+		//invoke clang
+		use std::process::Command;
+		let clang_output = Command::new("clang")
+					.args([&output_ll_file_name as &OsStr, OsStr::new("-o"), &output_exe_file_name as &OsStr].iter())
+					.output().map_err(|io_err| format!("could not call clang: {}", io_err))?;
+		if !clang_output.status.success() {
+			return Err(format!("clang exited with non-zero status on {}", output_file_name.file_name().unwrap().to_string_lossy()));
+		}
+
+		//execute exe file
+		let prog_output = Command::new(output_exe_file_name).output().map_err(|io_err| format!("could not execute exe file: {}", io_err))?;
+		match prog_output.status.code() {
+			None => return Err(format!("{} got signaled", output_file_name.display())),
+			Some(code) => if code != should_exit_with as i32 {
+				return Err(format!("{} exited with code {}, expected exit code of {}", output_file_name.file_name().unwrap().to_string_lossy(), code, should_exit_with));
+			}
+		};
+		if prog_output.stdout != should_print {
+			return Err(format!("{} output does not match expected", output_file_name.file_name().unwrap().to_string_lossy()));
+		}
+		Ok(())
+	});
+	let mut total_tests = 0;
+	let mut passed_tests = 0;
+	let mut cumulative_err_msg = String::new();
+	for result in test_results {
+		total_tests += 1;
+		if let Err(msg) = result {
+			cumulative_err_msg.push_str(&msg);
+			cumulative_err_msg.push('\n');
+		} else {
+			passed_tests += 1;
+		}
+	}
+	if !cumulative_err_msg.is_empty() {
+		panic!("\n{}/{} file tests passed\n{}", passed_tests, total_tests, cumulative_err_msg);
 	}
 }

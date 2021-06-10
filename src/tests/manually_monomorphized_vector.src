@@ -1,0 +1,71 @@
+/*0
+10
+11
+12
+13
+14
+*/
+struct vec_i32 {
+	i32* data;
+	u64 size;
+	u64 capacity;
+}
+
+struct vec_i32 vec_i32_new(u64 capacity){
+	struct vec_i32 result;
+	if capacity != cast(u64, 0) {
+		result.data = cast(i32*, malloc(capacity * sizeof(i32)));
+	} else {
+		result.data = cast(i32*, null);
+	}
+	result.size = cast(u64, 0);
+	result.capacity = capacity;
+	return result;
+}
+
+void vec_i32_push(struct vec_i32* this, i32 e){
+	if this.capacity == cast(u64, 0) {
+		if this.data != cast(i32*, null) {
+			printf("error, data is not null when capacity is 0%c", 10);
+		}
+		this.data = cast(i32*, malloc(cast(u64, 4) * sizeof(i32)));
+		this.data[0] = e;
+		this.capacity = cast(u64, 4);
+		this.size = cast(u64, 1);
+		return;
+	}
+	if this.size == this.capacity {
+		//reallocate
+		i32* new_alloc;
+		new_alloc = cast(i32*, malloc(cast(u64, 2) * this.capacity));
+		u64 temp;
+		temp = cast(u64, 0);
+		while temp < this.size {
+			new_alloc[temp] = this.data[temp];
+		}
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+		this.size = this.size + cast(u64, 1);
+		this.capacity = cast(u64, 2) * this.capacity;
+		return;
+	}
+	this.data[this.size] = e;
+	this.size = this.size + cast(u64, 1);
+}
+
+i32 main(){
+	struct vec_i32 v;
+	v = vec_i32_new(cast(u64, 5));
+	vec_i32_push(&v, cast(i32, 10));
+	vec_i32_push(&v, cast(i32, 11));
+	vec_i32_push(&v, cast(i32, 12));
+	vec_i32_push(&v, cast(i32, 13));
+	vec_i32_push(&v, cast(i32, 14));
+	u64 index;
+	index = cast(u64, 0);
+	while index < v.size {
+		printf("%ld%c", v.data[index], 10);
+		index = index + cast(u64, 1);
+	}
+	return cast(i32, 0);
+}

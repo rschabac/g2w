@@ -1,0 +1,7 @@
+/*0
+Hello world
+*/
+i32 main(){
+	printf("Hello world%c", 10);
+	return cast(i32, 0);
+}

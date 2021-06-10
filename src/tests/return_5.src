@@ -1,0 +1,5 @@
+/*5
+*/
+i32 main(){
+	return cast(i32, 5);
+}

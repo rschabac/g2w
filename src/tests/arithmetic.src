@@ -1,0 +1,12 @@
+/*41
+*/
+i32 main(){
+	i8 x;
+	i32 y;
+	x = cast(i8, 6);
+	y = cast(i32, 9);
+	x = x + cast(i8, 10);
+	x = cast(i8, 2) * x;
+	y = cast(i32, x) + y;
+	return y;
+}

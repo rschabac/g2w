@@ -33,11 +33,12 @@ pub type Stream = Vec<Component>;
 //If I want to parallelize compilation, each thread will need its own gensym
 static mut GENSYM_COUNT: usize = 0;
 pub fn gensym(s: &str) -> String {
-	let n_string;
+	let n_copy;
 	unsafe {
 		GENSYM_COUNT += 1;
-		n_string = GENSYM_COUNT.to_string();
+		n_copy = GENSYM_COUNT;
 	}
+	let n_string = n_copy.to_string();
 	let mut result_string = String::with_capacity(s.len() + n_string.len() + 1);
 	result_string.push('_');
 	result_string.push_str(s);
@@ -165,8 +166,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		}
 	},
 	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt),
-	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt),
 	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt),
+	//llvm doesn't allow me to use extractvalue on an array (unless I know the idnex at compile time),
+	//so I have to use getelementptr, and can't have arrays that aren't lvalues
+	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt),
 	ast::Expr::Proj(base, field_name) => {
 		/*
 		Whenever this function is called, an "rvalue" is expected (i.e. the real struct,
@@ -224,7 +227,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		}
 		let extracted_uid = gensym("extract");
 		stream.push(Component::Instr(extracted_uid.clone(), llvm::Instruction::Extract{
-			typ: base_result.llvm_typ.clone(),
+			typ: base_result.llvm_typ,
 			base: base_loaded_op,
 			offset: field_index
 		}));
@@ -807,32 +810,56 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		}
 	},
 	ast::Expr::Index(base, index) => {
-		/*
-		%index = cmp_exp(index)
-		%base_ptr = cmp_exp(base)
-		%result = getelementptr *base_typ, base_typ %base_ptr, %index
-		*/
-		let base_result = cmp_exp(base as &ast::Expr, ctxt, None);
-		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None);
-		let result_op = gensym("subscript");
-		let result_typ;
-		if let llvm::Ty::Ptr(t) = base_result.llvm_typ.clone() {
-			result_typ = *t;
+		let mut base_lvalue_result;
+		if !matches!(base as &ast::Expr, ast::Expr::Id(_) | ast::Expr::Index(_,_) | ast::Expr::Proj(_,_) | ast::Expr::Deref(_)) {
+			//if base is a function call, then it must return a pointer
+			base_lvalue_result = cmp_exp(base as &ast::Expr, ctxt, None);
 		} else {
-			panic!("index base llvm type is not a Ptr");
+			//if base is a potential lvalue, then cmp it as an lvalue, see what it's type is,
+			//and potentially load from it if its type is a pointer
+			base_lvalue_result = cmp_lvalue(base as &ast::Expr, ctxt);
+			match &base_lvalue_result.llvm_typ {
+				//if base is an array, convert it to a pointer to the first element
+				//TODO: need to do this in cmp_call as well
+				llvm::Ty::Array{typ, ..} => {
+					let decay_id = gensym("arr_decay");
+					base_lvalue_result.stream.push(Component::Instr(decay_id.clone(), llvm::Instruction::Bitcast{
+						original_typ: llvm::Ty::Ptr(Box::new(base_lvalue_result.llvm_typ.clone())),
+						op: base_lvalue_result.llvm_op,
+						new_typ: llvm::Ty::Ptr(typ.clone())
+					}));
+					base_lvalue_result.llvm_typ = llvm::Ty::Ptr(typ.clone());
+					base_lvalue_result.llvm_op = llvm::Operand::Local(decay_id);
+				},
+				//if base is a Ptr, convert base_lvalue_result directly to the pointer itself, similar to what cmp_lvalue_to_rvalue does
+				llvm::Ty::Ptr(_) => {
+					let loaded_id = gensym("index_load");
+					base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+						typ: base_lvalue_result.llvm_typ.clone(),
+						src: base_lvalue_result.llvm_op
+					}));
+					base_lvalue_result.llvm_op = llvm::Operand::Local(loaded_id);
+				},
+				other => panic!("base_lvalue_result has llvm_typ {}, e = {:?}", other, e)
+			};
 		}
-		let mut stream = base_result.stream;
+		//base_lvalue_result is now the address of the first element of the array
+		let mut stream = base_lvalue_result.stream;
+		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None);
 		stream.append(&mut index_result.stream);
+		let result_op = gensym("index_offset");
+		let result_typ = base_lvalue_result.llvm_typ.remove_ptr();
 		stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
-			typ: result_typ,
-			base: base_result.llvm_op,
+			typ: result_typ.clone(),
+			base: base_lvalue_result.llvm_op,
 			offsets: vec![(index_result.llvm_typ, index_result.llvm_op)]
 		}));
 		ExpResult{
-			llvm_typ: base_result.llvm_typ.remove_ptr(),
+			llvm_typ: result_typ,
 			llvm_op: llvm::Operand::Local(result_op),
 			stream
 		}
+
 	},
 	ast::Expr::Proj(base, field_name) => {
 		/*
@@ -1099,6 +1126,7 @@ fn mangle(name: &str, ty: &ast::Ty) -> String {
 	result_string
 }
 
+#[allow(dead_code)]
 enum FuncInst<'a, 'b>{
 	NonGeneric(&'a ast::Func),
 	Erased(&'a ast::GenericFunc),
@@ -1214,6 +1242,7 @@ fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_struct
 }
 
 //when insting this, replace all occurences of its type var in fields with type_param
+#[allow(dead_code)]
 struct StructInst<'prog>{
 	name: &'prog str,
 	type_param: &'prog ast::Ty
@@ -1237,6 +1266,7 @@ impl<'s, 'prog> InstQueue<'prog>{
 			true
 		}
 	}
+	#[allow(dead_code)]
 	fn poll(&'s mut self) -> Option<StructInst<'prog>>{
 		self.queue.pop_front()
 	}

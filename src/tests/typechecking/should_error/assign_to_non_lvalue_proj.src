@@ -1,0 +1,19 @@
+struct a {
+	i64[3] arr;
+	f32 f;
+}
+
+struct b {
+	struct a a;
+	i64 y;
+}
+
+struct b f(){
+	struct b result;
+	return result;
+}
+
+i32 main(){
+	f().a.arr[2] = 5;
+	return cast(i32, 0);
+}

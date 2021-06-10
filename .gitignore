@@ -2,3 +2,5 @@
 *.swp
 *.swo
 test.c
+output.ll
+output
