@@ -1,0 +1,34 @@
+/*0
+24
+136
+256
+264
+*/
+struct A@<erased 'T>{
+	'T x;
+	i32 y;
+	bool z;
+}
+//when 'T = i8, x is 8 bytes, y is 8 bytes, z is 8 bytes, should be 24 bytes
+
+struct B@<erased 'T>{
+	i8[99] a;
+	i16 b;
+	'T[3] c;
+}
+//when 'T is void*, a is 104 bytes, b is 8 bytes, c is 24 bytes, should be 136 bytes
+//when 'T is u64[6], a is 104 bytes, b is 8 bytes, c is 144 bytes, should be 256 bytes
+
+struct normal{
+	struct B@<u64[6]> a;
+	bool b;
+}
+//a is 256 bytes, b is 8 bytes, should be 264 bytes
+
+i32 main(){
+	printf("%d%c", sizeof(struct A@<i8>), 10);
+	printf("%d%c", sizeof(struct B@<void*>), 10);
+	printf("%d%c", sizeof(struct B@<u64[6]>), 10);
+	printf("%d%c", sizeof(struct normal), 10);
+	return cast(i32, 0);
+}

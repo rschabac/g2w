@@ -4,7 +4,7 @@ use crate::llvm;
 use std::collections::{HashSet, HashMap, VecDeque};
 
 //TODO: too many contexts! make an AllContext, might need multiple lifetime parameters
-struct Context<'a>{
+pub struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
 	funcs: &'a typechecker::FuncContext,
@@ -723,16 +723,50 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		result
 	},
 	ast::Expr::Sizeof(t) => {
-		if let ast::Ty::GenericStruct{type_var: type_param, name} = t {
-			if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, fields, ..} = ctxt.structs.get(name).unwrap() {
-				let (op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t).cloned(), ctxt, type_param);
-				return ExpResult{
-					llvm_op: op,
-					llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
-					stream
-				};
+		if typechecker::contains_erased_struct(t, ctxt.structs) {
+			//t is dynamically sized, and it is either a GenericStruct, Struct, or Array
+			match t {
+				ast::Ty::Array{length, typ} => {
+					let mut base_typ_result = cmp_exp(&ast::Expr::Sizeof((typ as &ast::Ty).clone()), ctxt, None);
+					let mul_name = gensym("sizeof_arr_mul");
+					base_typ_result.stream.push(Component::Instr(mul_name.clone(), llvm::Instruction::Binop{
+						op: llvm::BinaryOp::Mul,
+						typ: llvm::Ty::Int{bits: 64, signed: false},
+						left: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: *length}),
+						right: base_typ_result.llvm_op
+					}));
+					base_typ_result.llvm_op = llvm::Operand::Local(mul_name);
+					return base_typ_result;
+				},
+				//if a struct contains an erased struct, it also has a dynamic size
+				ast::Ty::Struct(name) => {
+					if let typechecker::StructType::NonGeneric(fields) = ctxt.structs.get(name).unwrap() {
+						//I need to pass some type param to cmp_size_of_erased_struct here, using a TypeVar should ensure a crash rather than a miscompile
+						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, &ast::Ty::TypeVar("_should_not_happen".to_owned()));
+						return ExpResult{
+							llvm_op,
+							llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
+							stream
+						};
+					} else {
+						panic!("struct context contains generic struct for non-generic struct {}", name);
+					}
+				},
+				ast::Ty::GenericStruct{type_var: type_param, name} => {
+					if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, fields, ..} = ctxt.structs.get(name).unwrap() {
+						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, type_param);
+						return ExpResult {
+							llvm_op,
+							llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
+							stream
+						}
+					} else {
+						panic!("struct context does not contain an erased struct for '{}'", name);
+					}
+				},
+				_ => panic!("type {} cannot contain an erased struct")
 			}
-		}
+		};
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
 		let llvm_typ = cmp_ty(t, &ctxt.structs, llvm::Ty::Void);
@@ -765,12 +799,12 @@ const PARAM_SIZE_NAME: &'static str = "__param_size";
 
 //This function returns code that computes the size of an erased struct. This function can be used
 //to find the offset of a field in a struct by calling it with only the fields that come before the desired field
-fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: TypeIter, ctxt: &Context, type_param: &ast::Ty) -> (llvm::Operand, Stream) {
+pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: TypeIter, ctxt: &Context, type_param: &ast::Ty) -> (llvm::Operand, Stream) {
 	/*
 	%acc = 0 + 0
 	%acc = %acc + cmp sizeof fields[0]
 	%acc = %acc + 7
-	%acc = %acc & ~8u64
+	%acc = %acc & ~7u64
 	%acc = %acc + cmp sizeof fields[1]
 	%acc = %acc + 7
 	%acc = %acc & ~8u64
@@ -783,8 +817,9 @@ fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: Typ
 		left: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 0}),
 		right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 0}),
 	}));
-	for field_ty in fields {
+	for mut field_ty in fields {
 		let added_acc_name = gensym("sizeof_acc");
+		field_ty.replace_type_var_with(type_param);
 		let sizeof_result = cmp_exp(&ast::Expr::Sizeof(field_ty), ctxt, None);
 		stream.extend(sizeof_result.stream);
 		stream.push(Component::Instr(added_acc_name.clone(), llvm::Instruction::Binop{
@@ -805,7 +840,7 @@ fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: Typ
 			op: llvm::BinaryOp::Bitand,
 			typ: llvm::Ty::Int{bits: 64, signed: false},
 			left: llvm::Operand::Local(add7_acc_name),
-			right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: !8u64})
+			right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: !7u64})
 		}));
 		acc_name = anded_acc_name;
 	}
@@ -1079,6 +1114,10 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 		stream
 	},
 	ast::Stmt::Decl(typ, var_name) => {
+		if typechecker::contains_erased_struct(typ, ctxt.structs) {
+			//this declaration requires dynamic alloca
+			todo!();
+		}
 		let uid = gensym(format!("{}_loc", var_name).as_str());
 		let llvm_typ = cmp_ty(typ, &ctxt.structs, llvm::Ty::Void);
 		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));

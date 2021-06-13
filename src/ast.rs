@@ -67,6 +67,16 @@ impl Ty {
 			TypeVar(s) => Some(s.as_str()),
 		}
 	}
+	//very similar to the function `replace_type_var_with` in typechecker.rs, but does not check
+	//that the type var contained matches the type var expected, and mutates the type in place.
+	pub fn replace_type_var_with(&mut self, replacement: &Self) {
+		use Ty::*;
+		match self {
+			TypeVar(_) => {*self = replacement.clone();},
+			Ptr(Some(t)) | Array{typ: t, ..} | GenericStruct{type_var: t, ..} => t.as_mut().replace_type_var_with(replacement),
+			_ => ()
+		}
+	}
 }
 impl std::fmt::Display for Ty {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

@@ -785,6 +785,27 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	
 }
 
+//returns whether or not a type contains an erased struct, and therefore is dynamically sized
+//it might make sense to have this function return more information, like the total stack size?
+pub fn contains_erased_struct(t: &ast::Ty, struct_context: &StructContext) -> bool {
+	use ast::Ty::*;
+	use StructType::*;
+	match t {
+		GenericStruct{name, ..} => match struct_context.get(name).unwrap() {
+			Generic{mode: ast::PolymorphMode::Erased, ..} => true,
+			Generic{mode: ast::PolymorphMode::Separated, fields, ..} =>
+				fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
+			NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
+		},
+		Struct(name) => match struct_context.get(name).unwrap() {
+			NonGeneric(fields) => fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
+			_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
+		},
+		Array{typ, ..} => contains_erased_struct(typ as &ast::Ty, struct_context),
+		_ => false
+	}
+}
+
 fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String> {
 	/*
 	nodes are (struct_name, type_param)
@@ -1119,24 +1140,6 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			//a global var needs to have a known size at compile time, so it cannot be an erased struct,
 			//or any array of erased structs, or a struct that contains an erased struct
-			fn contains_erased_struct(t: &ast::Ty, struct_context: &StructContext) -> bool {
-				use ast::Ty::*;
-				use StructType::*;
-				match t {
-					GenericStruct{name, ..} => match struct_context.get(name).unwrap() {
-						Generic{mode: ast::PolymorphMode::Erased, ..} => true,
-						Generic{mode: ast::PolymorphMode::Separated, fields, ..} =>
-							fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
-						NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
-					},
-					Struct(name) => match struct_context.get(name).unwrap() {
-						NonGeneric(fields) => fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
-						_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
-					},
-					Array{typ, ..} => contains_erased_struct(typ as &ast::Ty, struct_context),
-					_ => false
-				}
-			}
 			if contains_erased_struct(t, &struct_context) {
 				return Err(format!("global variable {} does not have a statically known size because it contains an erased struct", name));
 			}
