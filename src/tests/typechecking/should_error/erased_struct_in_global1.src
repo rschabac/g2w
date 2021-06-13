@@ -1,0 +1,7 @@
+struct A@<erased 'T>{
+	'T x;
+	i32 y;
+	f64 f;
+}
+
+struct A@<i32> g1;

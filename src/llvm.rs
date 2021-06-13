@@ -16,6 +16,7 @@ pub enum Ty{
 	//Func{result: Box<Ty>, param_types: Vec<Ty>, is_var_arg: bool},
 	Array{length: usize, typ: Box<Ty>},
 	NamedStruct(String),
+	ErasedStruct{type_param: super::ast::Ty, name: String}
 }
 impl Ty {
 	pub fn remove_ptr(self) -> Self {
@@ -36,6 +37,7 @@ impl std::fmt::Display for Ty{
 			Ptr(boxed) => write!(f, "{}*", boxed),
 			Array{length, typ} => write!(f, "[{} x {}]", length, typ),
 			NamedStruct(s) => write!(f, "%{}", s),
+			ErasedStruct{type_param, name} => panic!("llvm prog contains ErasedStruct {}@<{}>", name, type_param),
 		}
 	}
 }
@@ -192,7 +194,7 @@ impl Cond{
 //Instructions do not include the local they are assigned to
 pub enum Instruction{
 	Binop{op: BinaryOp, typ: Ty, left: Operand, right: Operand},
-	Alloca(Ty),
+	Alloca(Ty, Operand, Option<u64>),
 	Load{typ: Ty, src: Operand},
 	Store{typ: Ty, data: Operand, dest: Operand},
 	Cmp{cond: Cond, typ: Ty, left: Operand, right: Operand},
@@ -235,7 +237,8 @@ impl std::fmt::Display for Instruction{
 			Binop{op, typ: float_ty @ Float32, left, right} | Binop{op, typ: float_ty @ Float64, left, right} =>
 				write!(f, "f{} {} {}, {}", op, float_ty, left, right),
 			Binop{op, typ, left, right} => write!(f, "{} {} {}, {}", op, typ, left, right),
-			Alloca(t) => write!(f, "alloca {}", t),
+			Alloca(t, amount, None) => write!(f, "alloca {}, i64 {}", t, amount),
+			Alloca(t, amount, Some(alignment)) => write!(f, "alloca {}, i64 {}, align {}", t, amount, alignment),
 			Load{typ, src} => write!(f, "load {}, {}* {}", typ, typ, src),
 			Store{typ, data, dest} => write!(f, "store {} {}, {}* {}", typ, data, typ, dest),
 			Cmp{cond, typ: Int{bits, signed: true}, left, right} => write!(f, "icmp {} i{} {}, {}", cond.format_signed(), bits, left, right),

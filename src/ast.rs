@@ -57,6 +57,17 @@ pub enum Ty{
 	TypeVar(String),
 	GenericStruct{type_var: Box<Ty>, name: String},
 }
+impl Ty {
+	pub fn recursively_find_type_var(&self) -> Option<&str> {
+		use Ty::*;
+		match self {
+			Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => None,
+			Ptr(Some(boxed)) | Array{typ: boxed, ..} | GenericStruct{type_var: boxed, ..} 
+				=> boxed.recursively_find_type_var(),
+			TypeVar(s) => Some(s.as_str()),
+		}
+	}
+}
 impl std::fmt::Display for Ty {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		use Ty::*;

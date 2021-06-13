@@ -82,7 +82,7 @@ fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext, current_t
 		None => Err(format!("struct {} does not exist", name)),
 		Some(NonGeneric(_)) => Err(format!("struct {} is not generic", name)),
 		Some(Generic{mode, ..}) => {
-			let type_var_in_param = recursively_find_type_var(type_param as &ast::Ty);
+			let type_var_in_param = type_param.recursively_find_type_var();
 			match (type_var_in_param, current_type_var) {
 				//cannot use the type struct A@<'T> in a non-generic function/struct definition
 				(Some(s), None) => {
@@ -416,7 +416,7 @@ match e {
 				type_var_string = var_string;
 			}
 		};
-		let type_var_str_in_type_var = recursively_find_type_var(type_var);
+		let type_var_str_in_type_var = type_var.recursively_find_type_var();
 		match (type_var_str_in_type_var, &ctxt.type_var) {
 			(None, _) => (),
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -456,7 +456,7 @@ match e {
 	},
 	Cast(dest_type, source) => {
 		all_struct_names_valid(&dest_type, &ctxt.structs, &ctxt.type_var)?;
-		let type_var_str_in_dest_type = recursively_find_type_var(dest_type);
+		let type_var_str_in_dest_type = dest_type.recursively_find_type_var();
 		match (type_var_str_in_dest_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
 			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
@@ -559,7 +559,7 @@ match e {
 		ctxt.type_for_lit_nulls = Some(Ptr(None));
 		let e_type = typecheck_expr(ctxt, funcs, e)?;
 		match e_type {
-			Ptr(Some(t)) | Array{typ: t, ..} => Ok(*t),
+			Ptr(Some(t)) => Ok(*t),
 			_ => Err(format!("Cannot dereference type {:?}", e_type))
 		}
 	},
@@ -569,7 +569,7 @@ match e {
 		//current idea: size of a separated type var gets resolved after instatiation,
 		//size of an erased type var is computed at runtime
 		//in both cases, it is a u64
-		let type_var_str_in_type = recursively_find_type_var(t);
+		let type_var_str_in_type = t.recursively_find_type_var();
 		match (type_var_str_in_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
 			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
@@ -606,7 +606,7 @@ match s {
 	},
 	Decl(typ, name) => {
 		all_struct_names_valid(&typ, &ctxt.structs, &ctxt.type_var)?;
-		let type_var_str_in_decl_type = recursively_find_type_var(typ);
+		let type_var_str_in_decl_type = typ.recursively_find_type_var();
 		match (type_var_str_in_decl_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
 			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
@@ -697,7 +697,7 @@ match s {
 
 			}
 		};
-		let type_var_str_in_type_var = recursively_find_type_var(type_var);
+		let type_var_str_in_type_var = type_var.recursively_find_type_var();
 		match (type_var_str_in_type_var, &ctxt.type_var) {
 			(None, _) => (),
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -785,17 +785,6 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	
 }
 
-pub fn recursively_find_type_var(t: &ast::Ty) -> Option<&str> {
-	use ast::Ty::*;
-	match t {
-		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => None,
-		Ptr(Some(boxed)) | Array{typ: boxed, ..} | GenericStruct{type_var: boxed, ..} 
-			=> recursively_find_type_var(&boxed as &ast::Ty),
-		TypeVar(s) => Some(s.as_str()),
-		
-	}
-}
-
 fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String> {
 	/*
 	nodes are (struct_name, type_param)
@@ -850,7 +839,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 			//current node is a non-generic struct
 			None => {
 				for field_type in fields.iter().map(|(_, t)| t){
-					if recursively_find_type_var(&field_type).is_some() {
+					if field_type.recursively_find_type_var().is_some() {
 						return Err(format!("non-generic struct {} has a field of type {}", current_node.0, field_type));
 					}
 					use ast::Ty::*;
@@ -876,7 +865,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 				let type_param_is_concrete: bool = type_param != ast::Ty::TypeVar(type_param_string_of_current_struct.to_owned());
 				for field_type in fields.iter().map(|(_, t)| t){
 					use ast::Ty::*;
-					match (type_param_is_concrete, recursively_find_type_var(&field_type)) {
+					match (type_param_is_concrete, field_type.recursively_find_type_var()) {
 						//make sure a struct with a TypeVar type param does not have any fields with other TypeVars
 						(false, Some(field_param_str)) => {
 							if type_param_string_of_current_struct != field_param_str {
@@ -902,7 +891,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								Generic{mode, ..} => mode
 							};
 							use ast::PolymorphMode::*;
-							let type_param_found_in_type_var = recursively_find_type_var(type_var);
+							let type_param_found_in_type_var = type_var.recursively_find_type_var();
 							let field_type_param_is_concrete = type_param_found_in_type_var.is_none();
 							if current_mode == Erased
 								&& *field_mode == Separated
@@ -1063,7 +1052,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			if let Some(ret) = ret_type{
 				all_struct_names_valid(&ret, &struct_context, &None)?;
-				if let Some(s) = recursively_find_type_var(ret) {
+				if let Some(s) = ret.recursively_find_type_var() {
 					return Err(format!("found type variable '{} in return type of non-generic function {}", s, func_name));
 				}
 			}
@@ -1074,7 +1063,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				}
 				names.insert(arg_name.clone());
 				all_struct_names_valid(&arg_type, &struct_context, &None)?;
-				if let Some(s) = recursively_find_type_var(arg_type) {
+				if let Some(s) = arg_type.recursively_find_type_var() {
 					return Err(format!("found type variable '{} in type signature of non-generic function {}", s, func_name));
 				}
 			}
@@ -1092,7 +1081,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			if let Some(ret) = ret_type {
 				all_struct_names_valid(&ret, &struct_context, &Some((param.clone(), *mode)))?;
-				match recursively_find_type_var(ret) {
+				match ret.recursively_find_type_var() {
 					Some(s) if s != param => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
 					_ => ()
 				};
@@ -1104,7 +1093,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				}
 				names.insert(arg_name.clone());
 				all_struct_names_valid(&arg_type, &struct_context, &Some((param.clone(), *mode)))?;
-				match recursively_find_type_var(arg_type) {
+				match arg_type.recursively_find_type_var() {
 					Some(s) if s != param => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
 					_ => ()
 				}
@@ -1119,7 +1108,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
 			all_struct_names_valid(&t, &struct_context, &None)?;
-			if let Some(s) = recursively_find_type_var(t) {
+			if let Some(s) = t.recursively_find_type_var() {
 				return Err(format!("found type variable '{} in type of global variable", s));
 			}
 			if global_context.contains_key(name) {
@@ -1128,6 +1117,29 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			if func_context.contains_key(name) {
 				return Err(format!("cannot declare global variable '{}', a function is already declared with that name", name));
 			}
+			//a global var needs to have a known size at compile time, so it cannot be an erased struct,
+			//or any array of erased structs, or a struct that contains an erased struct
+			fn contains_erased_struct(t: &ast::Ty, struct_context: &StructContext) -> bool {
+				use ast::Ty::*;
+				use StructType::*;
+				match t {
+					GenericStruct{name, ..} => match struct_context.get(name).unwrap() {
+						Generic{mode: ast::PolymorphMode::Erased, ..} => true,
+						Generic{mode: ast::PolymorphMode::Separated, fields, ..} =>
+							fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
+						NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
+					},
+					Struct(name) => match struct_context.get(name).unwrap() {
+						NonGeneric(fields) => fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
+						_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
+					},
+					Array{typ, ..} => contains_erased_struct(typ as &ast::Ty, struct_context),
+					_ => false
+				}
+			}
+			if contains_erased_struct(t, &struct_context) {
+				return Err(format!("global variable {} does not have a statically known size because it contains an erased struct", name));
+			}
 			global_context.insert(name.clone(), t.clone());
 		},
 		GStructDecl{..} | GGenericStructDecl{..} => ()
@@ -1135,7 +1147,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name, args, body} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
-			//kind of weird, but in order to avoid keep the LocalTypeContext the same and avoid
+			//kind of weird, but in order to keep the LocalTypeContext the same and avoid
 			//cloning the struct_context all the time, I need to move it into this temporary
 			//ctxt variable, then move it back out
 			ctxt.structs = struct_context;

@@ -520,5 +520,11 @@ fn run_file_tests() {
 	}
 	if !cumulative_err_msg.is_empty() {
 		panic!("\n{}/{} file tests passed\n{}", passed_tests, total_tests, cumulative_err_msg);
+	} else {
+		//delete all ll and exe files in temp, but only if all tests passed
+		let temp_dir = fs::read_dir("src/tests/temp").unwrap();
+		for dir_entry in temp_dir {
+			fs::remove_file(dir_entry.unwrap().path()).unwrap();
+		}
 	}
 }

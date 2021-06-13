@@ -8,7 +8,8 @@ struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
 	funcs: &'a typechecker::FuncContext,
-	structs: &'a typechecker::StructContext
+	structs: &'a typechecker::StructContext,
+	mode: Option<ast::PolymorphMode>,
 }
 impl<'a> Context<'a> {
 	fn get_var(&self, name: &str) -> &(llvm::Ty, llvm::Operand) {
@@ -66,7 +67,7 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs, type_var_replacement))},
 		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone()),
 		ast::Ty::GenericStruct{type_var: type_param, name} => {
-			debug_assert!(typechecker::recursively_find_type_var(type_param as &ast::Ty).is_none(), "cmp_ty called on generic struct that is not completely concrete, {:?}", t);
+			debug_assert!(type_param.recursively_find_type_var().is_none(), "cmp_ty called on generic struct that is not completely concrete, {:?}", t);
 			match structs.get(name) {
 				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, ..}) => {
 					llvm::Ty::NamedStruct(name.clone())
@@ -270,7 +271,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let llvm_ptr_type = llvm::Ty::Ptr(Box::new(llvm_type_of_first_expr.clone()));
 		let arr_base = gensym("arr_base");
 		let arr_as_ptr = gensym("arr_as_ptr");
-		stream.push(Component::Instr(arr_base.clone(), llvm::Instruction::Alloca(llvm_array_type.clone())));
+		stream.push(Component::Instr(arr_base.clone(), llvm::Instruction::Alloca(llvm_array_type.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
 		stream.push(Component::Instr(arr_as_ptr.clone(), llvm::Instruction::Bitcast{
 			original_typ: llvm::Ty::Ptr(Box::new(llvm_array_type.clone())),
 			new_typ: llvm_ptr_type.clone(),
@@ -722,6 +723,16 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		result
 	},
 	ast::Expr::Sizeof(t) => {
+		if let ast::Ty::GenericStruct{type_var: type_param, name} = t {
+			if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, fields, ..} = ctxt.structs.get(name).unwrap() {
+				let (op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t).cloned(), ctxt, type_param);
+				return ExpResult{
+					llvm_op: op,
+					llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
+					stream
+				};
+			}
+		}
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
 		let llvm_typ = cmp_ty(t, &ctxt.structs, llvm::Ty::Void);
@@ -748,6 +759,58 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt),
 	ast::Expr::GenericCall{..} => panic!("generic_call not implemented yet")
 }}
+
+//in an erased function, this is an implicit variable (of type u64) that stores the size of the current type variable
+const PARAM_SIZE_NAME: &'static str = "__param_size";
+
+//This function returns code that computes the size of an erased struct. This function can be used
+//to find the offset of a field in a struct by calling it with only the fields that come before the desired field
+fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: TypeIter, ctxt: &Context, type_param: &ast::Ty) -> (llvm::Operand, Stream) {
+	/*
+	%acc = 0 + 0
+	%acc = %acc + cmp sizeof fields[0]
+	%acc = %acc + 7
+	%acc = %acc & ~8u64
+	%acc = %acc + cmp sizeof fields[1]
+	%acc = %acc + 7
+	%acc = %acc & ~8u64
+	*/
+	let mut stream = Vec::new();
+	let mut acc_name = gensym("sizeof_acc");
+	stream.push(Component::Instr(acc_name.clone(), llvm::Instruction::Binop{
+		op: llvm::BinaryOp::Add,
+		typ: llvm::Ty::Int{bits: 64, signed: false},
+		left: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 0}),
+		right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 0}),
+	}));
+	for field_ty in fields {
+		let added_acc_name = gensym("sizeof_acc");
+		let sizeof_result = cmp_exp(&ast::Expr::Sizeof(field_ty), ctxt, None);
+		stream.extend(sizeof_result.stream);
+		stream.push(Component::Instr(added_acc_name.clone(), llvm::Instruction::Binop{
+			op: llvm::BinaryOp::Add,
+			typ: llvm::Ty::Int{bits: 64, signed: false},
+			left: llvm::Operand::Local(acc_name),
+			right: sizeof_result.llvm_op
+		}));
+		let add7_acc_name = gensym("sizeof_acc");
+		stream.push(Component::Instr(add7_acc_name.clone(), llvm::Instruction::Binop{
+			op: llvm::BinaryOp::Add,
+			typ: llvm::Ty::Int{bits: 64, signed: false},
+			left: llvm::Operand::Local(added_acc_name),
+			right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 7u64})
+		}));
+		let anded_acc_name = gensym("sizeof_acc");
+		stream.push(Component::Instr(anded_acc_name.clone(), llvm::Instruction::Binop{
+			op: llvm::BinaryOp::Bitand,
+			typ: llvm::Ty::Int{bits: 64, signed: false},
+			left: llvm::Operand::Local(add7_acc_name),
+			right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: !8u64})
+		}));
+		acc_name = anded_acc_name;
+	}
+	(llvm::Operand::Local(acc_name), stream)
+}
 
 fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context) -> ExpResult {
 	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
@@ -942,8 +1005,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		}
 	},
 	ast::Expr::Deref(base) => {
-		let base = base as &ast::Expr;
-		let mut result = cmp_exp(base, ctxt, None);
+		let mut result = cmp_exp(base as &ast::Expr, ctxt, None);
 		result.llvm_typ = result.llvm_typ.remove_ptr();
 		result
 	},
@@ -1020,7 +1082,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 		let uid = gensym(format!("{}_loc", var_name).as_str());
 		let llvm_typ = cmp_ty(typ, &ctxt.structs, llvm::Ty::Void);
 		ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
-		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ))]
+		vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None))]
 	},
 	ast::Stmt::Return(Some(expr)) => {
 		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
@@ -1138,11 +1200,13 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 		locals: HashMap::new(),
 		globals: global_locs,
 		funcs: &prog_context.funcs,
-		structs: &prog_context.structs
+		structs: &prog_context.structs,
+		mode: None
 	};
 	let (args, ret_ty, func_name, body) = match f {
 		FuncInst::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
-		FuncInst::Erased(_) | FuncInst::Separated(_,_) => todo!()
+		FuncInst::Erased(_) => {context.mode = Some(ast::PolymorphMode::Erased); todo!()},
+		FuncInst::Separated(_,_) => {context.mode = Some(ast::PolymorphMode::Separated); todo!()}
 	};
 	let mut stream = Vec::with_capacity(args.len() * 2);
 	let mut params = Vec::with_capacity(args.len());
@@ -1150,7 +1214,7 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 		let alloca_slot_id = gensym("arg_slot");
 		let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void);
 		let ll_arg_id = gensym("arg");
-		stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone())));
+		stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
 		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
 			typ: ll_ty.clone(),
 			data: llvm::Operand::Local(ll_arg_id.clone()),
@@ -1231,7 +1295,8 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 				.map(|t| get_default_constant(t, structs))
 				.collect()
 		},
-		Void => panic!("global cannot have void type")
+		Void => panic!("global cannot have void type"),
+		ErasedStruct{..} => panic!("global vars cannot be erased structs"),
 	}
 }
 
