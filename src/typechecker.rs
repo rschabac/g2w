@@ -223,7 +223,7 @@ use ast::IntSize::*;
 match e {
 	LitNull => match &mut ctxt.type_for_lit_nulls {
 		Some(t @ Ptr(_)) => Ok(t.clone()),
-		Some(t) => Err(format!("Cannot make null literal have type {:?}", t)),
+		Some(t) => Err(format!("Cannot make null literal have type {}", t)),
 		None => Err("Cannot infer type of null literal".to_owned())
 	},
 	LitBool(_) => Ok(Bool),
@@ -250,7 +250,7 @@ match e {
 		for (index, init_expr) in init[1..].iter().enumerate() {
 			let typ = typecheck_expr(ctxt, funcs, init_expr)?;
 			if first_type.ne(&typ) {
-				return Err(format!("Array literal has mismatching types, element 0 has type {:?}, element {} has type {:?}", first_type, index, typ));
+				return Err(format!("Array literal has mismatching types, element 0 has type {}, element {} has type {}", first_type, index, typ));
 			}
 		}
 		Ok(Array{length: init.len() as u64, typ: Box::new(first_type)})
@@ -267,13 +267,13 @@ match e {
 					Ok(*typ)
 				},
 			Ptr(None) => Err("Can't index off of a void*".to_owned()),
-			_ => Err(format!("{:?} is not an array or pointer", base_typ))
+			_ => Err(format!("{} is not an array or pointer", base_typ))
 		};
 		let result_type = result_type?;
 		let index_typ = typecheck_expr(ctxt, funcs, index)?;
 		match index_typ {
 			Int{..} => Ok(result_type),
-			_ => Err(format!("Array indices must be integers, not {:?}", index_typ))
+			_ => Err(format!("Array indices must be integers, not {}", index_typ))
 		}
 	},
 	Proj(base, field) => {
@@ -308,7 +308,7 @@ match e {
 						Err(format!("struct {} does not have a {} field", struct_name, field))
 					}
 				},
-				_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
+				_ => Err(format!("{} is not a struct or pointer to a struct, cannot project off of it", base_typ))
 			},
 			Struct(ref struct_name) => match ctxt.structs.get(struct_name) {
 				None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
@@ -348,7 +348,7 @@ match e {
 					}
 				}
 			},
-			_ => Err(format!("{:?} is not a struct or pointer to a struct, cannot project off of it", base_typ))
+			_ => Err(format!("{} is not a struct or pointer to a struct, cannot project off of it", base_typ))
 		}
 	},
 	Call(func_name, args) => {
@@ -387,7 +387,7 @@ match e {
 			//not doing array-to-pointer decay like c, do &arr[0] instead
 			let given_type = given_type?;
 			if given_type.ne(&correct_type) {
-				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
+				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		}
 		Ok(return_type)
@@ -449,7 +449,7 @@ match e {
 				}){
 			let given_type = given_type?;
 			if given_type != correct_type {
-				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
+				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		};
 		Ok(return_type)
@@ -475,7 +475,7 @@ match e {
 			
 			//TODO: casting to/from type vars?
 			(TypeVar(_), _) | (_, TypeVar(_)) => panic!("trying to cast with a TypeVar, I don't know what to do here yet"),
-			(original_type, dest_type) => Err(format!("Cannot cast from {:?} to {:?}", original_type, dest_type))
+			(original_type, dest_type) => Err(format!("Cannot cast from {} to {}", original_type, dest_type))
 			
 		}
 	},
@@ -494,13 +494,13 @@ match e {
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
 				(Int{..}, Int{..}) => Err("Cannot add/sub integers with different signedness".to_owned()),
 				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
-				(left_type, right_type) => Err(format!("Cannot add/sub types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot add/sub types {} and {}", left_type, right_type))
 			},
 			Mul | Div | Mod => match (left_type, right_type) {
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
 				(Int{..}, Int{..}) => Err("Cannot mul/div/mod integers with different signedness".to_owned()),
 				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
-				(left_type, right_type) => Err(format!("Cannot mul/div/mod types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot mul/div/mod types {} and {}", left_type, right_type))
 			},
 			Lt | Lte | Gt | Gte | Equ | Neq => match (left_type, right_type) {
 				(Int{signed: sign1,..}, Int{signed: sign2,..}) if sign1 != sign2 => Err("Cannot compare signed and unsigned int".to_owned()),
@@ -512,19 +512,19 @@ match e {
 					Array{..} => Err("Cannot compare arrays".to_owned()),
 					_ => Ok(Bool)
 				},
-				(left_type, right_type) => Err(format!("Cannot compare types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot compare types {} and {}", left_type, right_type))
 			},
 			And | Or => match (left_type, right_type) {
 				(Bool, Bool) => Ok(Bool),
-				(left_type, right_type) => Err(format!("Cannot logical and/or types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot logical and/or types {} and {}", left_type, right_type))
 			},
 			Bitand | Bitor | Bitxor => match (left_type, right_type) {
 				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
-				(left_type, right_type) => Err(format!("Cannot bitand/bitor/bitxor types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot bitand/bitor/bitxor types {} and {}", left_type, right_type))
 			},
 			Shl | Shr | Sar => match (left_type, right_type) {
 				(left_type @ Int{..}, Int{..}) => Ok(left_type),
-				(left_type, right_type) => Err(format!("Cannot shl/shr/sar types {:?} and {:?}", left_type, right_type))
+				(left_type, right_type) => Err(format!("Cannot shl/shr/sar types {} and {}", left_type, right_type))
 			}
 		}
 	},
@@ -536,15 +536,15 @@ match e {
 			original @ Int{signed: true, ..} 
 		  | original @ Float(_) => Ok(original),
 			Int{signed: false, ..} => Err("Cannot negate an unsigned int".to_owned()),
-			other => Err(format!("Cannot negate type {:?}", other))
+			other => Err(format!("Cannot negate type {}", other))
 		},
 		Lognot => match typecheck_expr(ctxt, funcs, e)? {
 			Bool => Ok(Bool),
-			other => Err(format!("Cannot do logical not of type {:?}", other))
+			other => Err(format!("Cannot do logical not of type {}", other))
 		},
 		Bitnot => match typecheck_expr(ctxt, funcs, e)? {
 			original @ Int{..} => Ok(original),
-			other => Err(format!("Cannot bitwise negate type {:?}", other))
+			other => Err(format!("Cannot bitwise negate type {}", other))
 		}
 	}},
 	GetRef(e) => {
@@ -560,7 +560,7 @@ match e {
 		let e_type = typecheck_expr(ctxt, funcs, e)?;
 		match e_type {
 			Ptr(Some(t)) => Ok(*t),
-			_ => Err(format!("Cannot dereference type {:?}", e_type))
+			_ => Err(format!("Cannot dereference type {}", e_type))
 		}
 	},
 	Sizeof(t) => {
@@ -596,7 +596,7 @@ match s {
 				ctxt.type_for_lit_nulls = Some(lhs_type.clone());
 				let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
 				if lhs_type != rhs_type {
-					Err(format!("Cannot assign value of type {:?} to something of type {:?}", rhs_type, lhs_type))
+					Err(format!("Cannot assign value of type {} to something of type {}", rhs_type, lhs_type))
 				} else {
 					Ok(false)
 				}
@@ -635,7 +635,7 @@ match s {
 				ctxt.type_for_lit_nulls = Some(t.clone());
 				let return_expr_type = typecheck_expr(ctxt, funcs, &e)?;
 				if return_expr_type.ne(t) {
-					Err(format!("Cannot return a value of type {:?} in a function that returns {:?}", return_expr_type, t))
+					Err(format!("Cannot return a value of type {} in a function that returns {}", return_expr_type, t))
 				} else {
 					Ok(true)
 				}
@@ -672,7 +672,7 @@ match s {
 				.enumerate(){
 			let given_type = given_type?;
 			if given_type.ne(&correct_type) {
-				return Err(format!("argument {} to {} has type {}, expected {:?}", index, func_name, given_type, correct_type));
+				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		}
 		Ok(false)
@@ -730,7 +730,7 @@ match s {
 				}){
 			let given_type = given_type?;
 			if given_type != correct_type {
-				return Err(format!("argument {} to {} has type {:?}, expected {:?}", index, func_name, given_type, correct_type));
+				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		};
 		Ok(false)
@@ -739,7 +739,7 @@ match s {
 		ctxt.type_for_lit_nulls = Some(Bool);
 		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
 		if cond_type != Bool {
-			return Err(format!("condition of if statement must have type bool, not {:?}", cond_type));
+			return Err(format!("condition of if statement must have type bool, not {}", cond_type));
 		}
 		let then_returns = typecheck_block(ctxt, funcs, then_block, expected_return_type)?;
 		let else_returns = typecheck_block(ctxt, funcs, else_block, expected_return_type)?;
@@ -749,7 +749,7 @@ match s {
 		ctxt.type_for_lit_nulls = Some(Bool);
 		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
 		if cond_type != Bool {
-			return Err(format!("condition of while statement must have type bool, not {:?}", cond_type));
+			return Err(format!("condition of while statement must have type bool, not {}", cond_type));
 		}
 		let _ = typecheck_block(ctxt, funcs, body, expected_return_type)?;
 		Ok(false)
@@ -783,27 +783,6 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	}
 	Ok(())
 	
-}
-
-//returns whether or not a type contains an erased struct, and therefore is dynamically sized
-//it might make sense to have this function return more information, like the total stack size?
-pub fn contains_erased_struct(t: &ast::Ty, struct_context: &StructContext) -> bool {
-	use ast::Ty::*;
-	use StructType::*;
-	match t {
-		GenericStruct{name, ..} => match struct_context.get(name).unwrap() {
-			Generic{mode: ast::PolymorphMode::Erased, ..} => true,
-			Generic{mode: ast::PolymorphMode::Separated, fields, ..} =>
-				fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
-			NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
-		},
-		Struct(name) => match struct_context.get(name).unwrap() {
-			NonGeneric(fields) => fields.iter().any(|(_, ty)| contains_erased_struct(ty, struct_context)),
-			_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
-		},
-		Array{typ, ..} => contains_erased_struct(typ as &ast::Ty, struct_context),
-		_ => false
-	}
 }
 
 fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String> {
@@ -1140,7 +1119,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			//a global var needs to have a known size at compile time, so it cannot be an erased struct,
 			//or any array of erased structs, or a struct that contains an erased struct
-			if contains_erased_struct(t, &struct_context) {
+			if t.is_DST(&struct_context) {
 				return Err(format!("global variable {} does not have a statically known size because it contains an erased struct", name));
 			}
 			global_context.insert(name.clone(), t.clone());

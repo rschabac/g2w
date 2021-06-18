@@ -77,6 +77,28 @@ impl Ty {
 			_ => ()
 		}
 	}
+
+	//returns whether or not a type contains an erased struct, and therefore is dynamically sized
+	//it might make sense to have this function return more information, like the total stack size?
+	#[allow(non_snake_case)]
+	pub fn is_DST(&self, structs: &super::typechecker::StructContext) -> bool {
+		use Ty::*;
+		use super::typechecker::StructType::*;
+		match self {
+			GenericStruct{name, ..} => match structs.get(name.as_str()).unwrap() {
+				Generic{mode: PolymorphMode::Erased, ..} => true,
+				Generic{mode: PolymorphMode::Separated, fields, ..} =>
+					fields.iter().any(|(_, ty)| ty.is_DST(structs)),
+				NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
+			},
+			Struct(name) => match structs.get(name).unwrap() {
+				NonGeneric(fields) => fields.iter().any(|(_, ty)| ty.is_DST(structs)),
+				_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
+			},
+			Array{typ, ..} => typ.as_ref().is_DST(structs),
+			_ => false
+		}
+	}
 }
 impl std::fmt::Display for Ty {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

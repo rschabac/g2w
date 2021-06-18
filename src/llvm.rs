@@ -16,7 +16,10 @@ pub enum Ty{
 	//Func{result: Box<Ty>, param_types: Vec<Ty>, is_var_arg: bool},
 	Array{length: usize, typ: Box<Ty>},
 	NamedStruct(String),
-	ErasedStruct{type_param: super::ast::Ty, name: String}
+	
+	//a type that is dynamically sized is either an erased struct, a struct (of any kind) that
+	//contains a DST, or an array of DSTs
+	Dynamic(super::ast::Ty)
 }
 impl Ty {
 	pub fn remove_ptr(self) -> Self {
@@ -37,7 +40,11 @@ impl std::fmt::Display for Ty{
 			Ptr(boxed) => write!(f, "{}*", boxed),
 			Array{length, typ} => write!(f, "[{} x {}]", length, typ),
 			NamedStruct(s) => write!(f, "%{}", s),
-			ErasedStruct{type_param, name} => panic!("llvm prog contains ErasedStruct {}@<{}>", name, type_param),
+			Dynamic(_t) => {
+				//eprintln!("llvm prog contains Dynamic {}", t);
+				//write!(f, "(ERROR: Dynamic {})", t)
+				write!(f, "i8")
+			},
 		}
 	}
 }
