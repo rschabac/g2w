@@ -392,6 +392,8 @@ impl std::fmt::Display for Program {
 		for (name, gdecl) in self.global_decls.iter() {
 			write!(f, "@{} = global {}\n", name, gdecl)?;
 		}
+		//llvm's builtin memcpy is not declared automatically
+		write!(f, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)\n")?;
 		//printf functions have different declaration syntax because of the var args
 		write!(f, "declare i32 @printf(i8*, ...)\n\
 		declare i32 @sprintf(i8*, i8*, ...)\n\

@@ -1,0 +1,60 @@
+/*0
+.x = 5, .y = 6, .z = 1
+.x = 5, .y = 6, .z = 1
+.x = 5, .y = 6, .z = 1
+*/
+struct A@<erased 'T>{
+	'T x;
+	i32 y;
+	bool z;
+}
+//when 'T = i8, x is 8 bytes, y is 8 bytes, z is 8 bytes, should be 24 bytes
+
+struct B@<erased 'T>{
+	i8[99] a;
+	i16 b;
+	'T[3] c;
+}
+//when 'T is void*, a is 104 bytes, b is 8 bytes, c is 24 bytes, should be 136 bytes
+//when 'T is u64[6], a is 104 bytes, b is 8 bytes, c is 144 bytes, should be 256 bytes
+
+struct normal{
+	struct B@<u64[6]> a;
+	bool b;
+}
+//a is 256 bytes, b is 8 bytes, should be 264 bytes
+
+struct C@<erased 'T>{
+	'T* data;
+	i64 x;
+}
+
+struct A@<i32> f(){
+	struct A@<i32> result;
+	result.x = cast(i32, 5);
+	result.y = cast(i32, 6);
+	result.z = true;
+	return result;
+}
+
+struct A@<i8>[5] g(){
+	struct A@<i8>[5] result;
+	result[1].x = cast(i8, 5);
+	result[1].y = cast(i32, 6);
+	result[1].z = true;
+	return result;
+}
+
+i32 main(){
+	struct A@<i32> x;
+	x = f();
+	printf(".x = %d, .y = %d, .z = %d%c", x.x, x.y, x.z, 10);
+	printf(".x = %d, .y = %d, .z = %d%c", f().x, f().y, f().z, 10);
+
+	struct A@<i8>[5] y;
+	y = g();
+	struct A@<i8> z;
+	z = y[1];
+	printf(".x = %d, .y = %d, .z = %d%c", cast(i64, z.x), z.y, z.z, 10);
+	return cast(i32, 0);
+}

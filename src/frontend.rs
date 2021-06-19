@@ -83,7 +83,8 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 				Some(typechecker::StructType::NonGeneric(_)) => panic!("struct {} is not generic", name),
 			}
 		},
-		ast::Ty::TypeVar(_) => {
+		ast::Ty::TypeVar(s) => {
+			debug_assert!(s != "_should_not_happen", "TypeVar is _should_not_happen");
 			debug_assert!(type_var_replacement != llvm::Ty::Void, "cannot replace type var with llvm::void");
 			type_var_replacement
 		}
@@ -170,7 +171,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	ast::Expr::Deref(_) => cmp_lvalue_to_rvalue(e, "deref_loaded", ctxt),
 	//llvm doesn't allow me to use extractvalue on an array (unless I know the idnex at compile time),
 	//so I have to use getelementptr, and can't have arrays that aren't lvalues
+
 	ast::Expr::Index(_,_) => cmp_lvalue_to_rvalue(e, "index_loaded", ctxt),
+	//I added code here (rvalue Proj) to to handle dynamic structs. I may have to do a simiilar thing for rvalue Index,
+	//but for now it seems to be working
 	ast::Expr::Proj(base, field_name) => {
 		/*
 		Whenever this function is called, an "rvalue" is expected (i.e. the real struct,
@@ -187,34 +191,89 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		*/
 		let mut base_result = cmp_exp(base as &ast::Expr, ctxt, None);
 		let mut stream = base_result.stream;
-		let (base_is_ptr, struct_name) = match &base_result.llvm_typ {
-			llvm::Ty::NamedStruct(s) => (false, s.clone()),
+		//The cases for Dynamic(Struct(s)) and Ptr(Dynamic(Struct(s))) are the same thing
+		let mut base_type_param: Option<ast::Ty> = None;
+		let (is_dynamic, base_is_ptr, struct_name) = match &base_result.llvm_typ {
+			llvm::Ty::Dynamic(ast::Ty::Struct(s)) => (true, true, s.clone()),
+			llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_var: type_param}) => {
+				base_type_param = Some(type_param.as_ref().clone());
+				(true, true, s.clone())
+			},
+			llvm::Ty::NamedStruct(s) => (false, false, s.clone()),
 			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
-				llvm::Ty::NamedStruct(s) => (true, s.clone()),
+				llvm::Ty::Dynamic(ast::Ty::Struct(s)) => (true, true, s.clone()),
+				llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_var: type_param}) => {
+					base_type_param = Some(type_param.as_ref().clone());
+					(true, true, s.clone())
+				},
+				llvm::Ty::NamedStruct(s) => (false, true, s.clone()),
 				t => panic!("Proj base has llvm type Ptr({:?})", t)
 			},
-			t => panic!("Proj base has llvm type Ptr({:?})", t)
+			t => panic!("Proj base has llvm type {:?}", t)
 		};
 		let fields: &[(String, ast::Ty)] = match ctxt.structs.get(&struct_name) {
 			None => panic!("struct {} not in struct_context", &struct_name),
 			Some(typechecker::StructType::NonGeneric(fields)) => fields as &[_],
-			Some(typechecker::StructType::Generic{fields, ..}) => {
-				eprintln!("Warning: Projecting off of generic struct, generics not yet implemented");
-				fields
-			}
+			Some(typechecker::StructType::Generic{fields, ..}) => fields
 		};
-		let mut field_index: Option<u64> = None;
-		let mut result_ty: Option<llvm::Ty> = None;
-		for (i, (name, src_ty)) in fields.iter().enumerate() {
+		let mut field_index: Option<usize> = None;
+		for (i, (name, _src_ty)) in fields.iter().enumerate() {
 			if name == field_name {
-				use std::convert::TryFrom;
-				field_index = Some(u64::try_from(i).expect("could not convert from usize to u64"));
-				result_ty = Some(cmp_ty(src_ty, &ctxt.structs, llvm::Ty::Void));
+				field_index = Some(i);
 				break;
 			}
 		}
-		let field_index = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name));
-		let result_ty = result_ty.unwrap();
+		let field_index: usize = field_index.unwrap_or_else(|| panic!("field name {} not found in struct {}", field_name, struct_name));
+		if is_dynamic {
+			let preceding_fields_iter = fields.iter().take(field_index).map(|(_, t)| t.clone());
+			let base_type_param = base_type_param.unwrap_or_else(|| ast::Ty::TypeVar("_should_not_happen".to_owned()));
+			let (offset_op, offset_stream) = cmp_size_of_erased_struct(preceding_fields_iter, ctxt, &base_type_param);
+			stream.extend(offset_stream);
+			let ptr_offset_op = gensym("DST_offset");
+			stream.push(Component::Instr(ptr_offset_op.clone(), llvm::Instruction::Gep{
+				typ: llvm::Ty::Int{bits: 8, signed: false},
+				base: base_result.llvm_op,
+				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
+			}));
+			let field_typ: &ast::Ty = &fields[field_index].1;
+			if !field_typ.is_DST(&ctxt.structs) {
+				//only load from it if it is not a dynamic type
+				//first, bitcast the i8* to the right type
+				let llvm_field_typ = cmp_ty(field_typ, &ctxt.structs, 
+					//if the base type is a regular struct that is dynamic, then don't need to pass
+					//a replacement type here, otherwise the type parameter must be cmped
+					match base_type_param {
+						ast::Ty::TypeVar(s) if s == "_should_not_happen" => llvm::Ty::Void,
+						_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void)
+					}
+				);
+				let bitcasted_uid = gensym("proj_bitcast");
+				stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
+					original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
+					op: llvm::Operand::Local(ptr_offset_op),
+					new_typ: llvm::Ty::Ptr(Box::new(llvm_field_typ.clone()))
+				}));
+				let loaded_uid = gensym("proj_load");
+				stream.push(Component::Instr(loaded_uid.clone(), llvm::Instruction::Load{
+					typ: llvm_field_typ.clone(),
+					src: llvm::Operand::Local(bitcasted_uid)
+				}));
+				return ExpResult{
+					llvm_typ: llvm_field_typ,
+					llvm_op: llvm::Operand::Local(loaded_uid),
+					stream
+				}
+			}
+			//if the result is dynamic, it is already an i8*, so nothing needs to be done
+			return ExpResult{
+				llvm_typ: llvm::Ty::Dynamic(field_typ.clone()),
+				llvm_op: llvm::Operand::Local(ptr_offset_op),
+				stream
+			}
+		}
+		use std::convert::TryFrom;
+		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, llvm::Ty::Void);
+		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
 		let base_loaded_op: llvm::Operand;
 		if base_is_ptr {
 			base_result.llvm_typ = base_result.llvm_typ.remove_ptr();
@@ -796,7 +855,14 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 }}
 
 //in an erased function, this is an implicit variable (of type u64) that stores the size of the current type variable
-const PARAM_SIZE_NAME: &'static str = "__param_size";
+const PARAM_SIZE_NAME: &str = "__param_size";
+
+//in a function that returns a DST, this is an implicit variable that stores the address where the return
+//value should be written to. It's actual llvm type is i8*.
+const RET_LOC_NAME: &str = "__ret_loc";
+
+//the name of the builting llvm memcpy function
+const LLVM_MEMCPY_FUNC_NAME: &str = "llvm.memcpy.p0i8.p0i8.i64";
 
 //This function returns code that computes the size of an erased struct. This function can be used
 //to find the offset of a field in a struct by calling it with only the fields that come before the desired field
@@ -881,19 +947,40 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context) -> ExpResult 
 		stream.append(&mut arg_result.stream);
 	}
 	let uid = gensym("call");
-	let llvm_ret_ty = match return_type {
-		None => llvm::Ty::Void,
-		Some(t) => cmp_ty(t, &ctxt.structs, llvm::Ty::Void)
+	let mut dst_result_uid: Option<String> = None;
+	let (result_is_dst, llvm_ret_ty) = match return_type {
+		None => (false, llvm::Ty::Void),
+		Some(t) if t.is_DST(&ctxt.structs) => {
+			//compute the size of this type, alloca this much space, pass the pointer as an extra arg
+			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(t.clone()), ctxt, None);
+			stream.append(&mut sizeof_stream);
+			let result_addr_uid = gensym("DST_retval_result");
+			dst_result_uid = Some(result_addr_uid.clone());
+			stream.push(Component::Instr(result_addr_uid.clone(), llvm::Instruction::Alloca(
+				llvm::Ty::Int{bits: 8, signed: false}, sizeof_op, Some(8)
+			)));
+			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})), llvm::Operand::Local(result_addr_uid)) );
+			(true, llvm::Ty::Void)
+		},
+		Some(t) => (false, cmp_ty(t, &ctxt.structs, llvm::Ty::Void))
 	};
 	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
 		func_name: func_name.clone(),
 		ret_typ: llvm_ret_ty.clone(),
 		args: arg_ty_ops
 	}));
-	ExpResult{
-		llvm_typ: llvm_ret_ty,
-		llvm_op: llvm::Operand::Local(uid),
-		stream
+	if result_is_dst {
+		ExpResult{
+			llvm_typ: llvm::Ty::Dynamic(return_type.as_ref().unwrap().clone()),
+			llvm_op: llvm::Operand::Local(dst_result_uid.unwrap()),
+			stream
+		}
+	} else {
+		ExpResult{
+			llvm_typ: llvm_ret_ty,
+			llvm_op: llvm::Operand::Local(uid),
+			stream
+		}
 	}
 }
 
@@ -956,8 +1043,6 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		if let llvm::Ty::Dynamic(dst) = &result_typ {
 			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst.clone()), ctxt, None);
 			stream.append(&mut sizeof_stream);
-			//TODO: make sure index_result.llvm_typ is a i64, then mul it by the sizeof_op, then add
-			//to base_lvalue_result.llvm_op using Gep
 			let (index_result_bits, signed) = match index_result.llvm_typ {
 				llvm::Ty::Int{bits, signed} => (bits, signed),
 				_ => panic!("array index's llvm_typ is not an integer")
@@ -1103,14 +1188,14 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
 			}));
 			let field_type: &ast::Ty = &fields[field_index].1;
-			/*
-			base_lvalue_result.llvm_typ = if field_type.is_DST(ctxt.structs) {
-				llvm::Ty::Dynamic(field_type.clone())
-			} else {
-				cmp_ty(field_type, ctxt.structs, llvm::Ty::Void)
-			};
-			*/
-			base_lvalue_result.llvm_typ = cmp_ty(field_type, ctxt.structs, cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void));
+			base_lvalue_result.llvm_typ = cmp_ty(field_type, ctxt.structs,
+				//if the base type is a regular struct that is dynamic, then don't need to pass a
+				//replacement type here, otherwise the type parameter must be cmped
+				match base_type_param {
+					ast::Ty::TypeVar(s) if s == "_should_not_happen" => llvm::Ty::Void,
+					_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void)
+				}
+			);
 			let bitcasted_uid = gensym("DST_proj_bitcast");
 			base_lvalue_result.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
@@ -1153,7 +1238,11 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 
 fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
 	let mut lvalue_result = cmp_lvalue(e, ctxt);
-	//eprintln!("lvalue_result = {:?}", lvalue_result);
+	if matches!(lvalue_result.llvm_typ, llvm::Ty::Dynamic(_)) {
+		//when dealing with rvalues, if it's llvm type is Dynamic(_), then the operand is a pointer
+		//to the data, not the data itself
+		return lvalue_result;
+	}
 	let loaded_id = gensym(gensym_seed);
 	//lvalue_result.llvm_typ = lvalue_result.llvm_typ.remove_ptr();
 	lvalue_result.stream.push(
@@ -1213,11 +1302,29 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 		}
 		let mut stream = dest_result.stream;
 		stream.append(&mut data_result.stream);
-		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
-			typ: data_result.llvm_typ,
-			data: data_result.llvm_op,
-			dest: dest_result.llvm_op
-		}));
+		if let llvm::Ty::Dynamic(dst) = data_result.llvm_typ {
+			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
+			stream.append(&mut sizeof_stream);
+			//memcpy(dest_result.llvm_op, data_result.llvm_op, sizeof_result.llvm_op);
+			let i8_ptr: llvm::Ty = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
+			stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
+				ret_typ: llvm::Ty::Void,
+				args: vec![
+					(i8_ptr.clone(), dest_result.llvm_op),
+					(i8_ptr, data_result.llvm_op),
+					(llvm::Ty::Int{bits: 64, signed: false}, sizeof_op),
+					(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0}))
+				]
+			}));
+			
+		} else {
+			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+				typ: data_result.llvm_typ,
+				data: data_result.llvm_op,
+				dest: dest_result.llvm_op
+			}));
+		}
 		stream
 	},
 	ast::Stmt::Decl(typ, var_name) => {
@@ -1254,10 +1361,29 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 	},
 	ast::Stmt::Return(Some(expr)) => {
 		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
-		expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
-			Some((expr_result.llvm_typ, expr_result.llvm_op))
-		)));
-		expr_result.stream
+		if let llvm::Ty::Dynamic(dst) = expr_result.llvm_typ {
+			//there will be an llvm local that indicates where to write the result to
+			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
+			expr_result.stream.append(&mut sizeof_stream);
+			let i8_ptr = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
+			expr_result.stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
+				ret_typ: llvm::Ty::Void,
+				args: vec![
+					(i8_ptr.clone(), llvm::Operand::Local(RET_LOC_NAME.to_owned())),
+					(i8_ptr, expr_result.llvm_op),
+					(llvm::Ty::Int{bits: 64, signed: false}, sizeof_op),
+					(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0}))
+				]
+			}));
+			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(None)));
+			expr_result.stream
+		} else { //not returning a DST
+			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
+				Some((expr_result.llvm_typ, expr_result.llvm_op))
+			)));
+			expr_result.stream
+		}
 	},
 	ast::Stmt::Return(None) => {
 		vec![Component::Term(llvm::Terminator::Ret(None))]
@@ -1378,6 +1504,11 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 	};
 	let mut stream = Vec::with_capacity(args.len() * 2);
 	let mut params = Vec::with_capacity(args.len());
+	let (ret_is_dst, ll_ret_ty) = match ret_ty {
+		None => (false, llvm::Ty::Void),
+		Some(t) if t.is_DST(&prog_context.structs) => (true, llvm::Ty::Void),
+		Some(t) => (false, cmp_ty(t, &prog_context.structs, llvm::Ty::Void))
+	};
 	for (arg_ty, arg_name) in args.iter() {
 		let alloca_slot_id = gensym("arg_slot");
 		let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void);
@@ -1391,8 +1522,11 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(alloca_slot_id)));
 		params.push( (ll_ty, ll_arg_id) );
 	}
-	let ll_ret_ty = ret_ty.as_ref().map(|t| cmp_ty(t, &prog_context.structs, llvm::Ty::Void))
-		.unwrap_or(llvm::Ty::Void);
+	if ret_is_dst {
+		//the DST return location does not get moved from a local to a stack slot because it will never
+		//be modified like normal function parameters. It also is not added to the context.
+		params.push( (llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})), RET_LOC_NAME.to_owned()) );
+	}
 	let body_stream = cmp_block(body, &mut context, &ll_ret_ty);
 	//convert stream + body_stream to CFG
 	let mut cfg = llvm::CFG{
