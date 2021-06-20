@@ -3,7 +3,6 @@ use crate::typechecker;
 use crate::llvm;
 use std::collections::{HashSet, HashMap, VecDeque};
 
-//TODO: too many contexts! make an AllContext, might need multiple lifetime parameters
 pub struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
 	globals: &'a HashMap<String, (llvm::Ty, llvm::Operand)>,
@@ -917,6 +916,7 @@ pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields:
 fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context) -> ExpResult {
 	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
 	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
+	//these 2 variables need to be half-declared out here so that they live long enough
 	let printf_expected_args_vec;
 	let printf_ret_ty;
 	let (return_type, expected_arg_types) = match ctxt.funcs.get(func_name.as_str()) {
@@ -942,7 +942,12 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context) -> ExpResult 
 			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, llvm::Ty::Void)),
 			_ => None
 		};
+		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
+		//however, the type used for this operand should be i8*, not i8 (really Dynamic(_), but gets printed as i8)
 		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
+		if matches!(arg_result.llvm_typ, llvm::Ty::Dynamic(_)) {
+			arg_result.llvm_typ = llvm::Ty::Ptr(Box::new(arg_result.llvm_typ));
+		}
 		arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
 		stream.append(&mut arg_result.stream);
 	}
@@ -1510,17 +1515,44 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 		Some(t) => (false, cmp_ty(t, &prog_context.structs, llvm::Ty::Void))
 	};
 	for (arg_ty, arg_name) in args.iter() {
-		let alloca_slot_id = gensym("arg_slot");
-		let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void);
-		let ll_arg_id = gensym("arg");
-		stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
-		stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
-			typ: ll_ty.clone(),
-			data: llvm::Operand::Local(ll_arg_id.clone()),
-			dest: llvm::Operand::Local(alloca_slot_id.clone())
-		}));
-		context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(alloca_slot_id)));
-		params.push( (ll_ty, ll_arg_id) );
+		if arg_ty.is_DST(&prog_context.structs) {
+			//the type signature of cmp_exp says that it needs a Context, but for the Sizeof case, it onyl ever uses the .structs field, which
+			//is already set up by now, so it is not an issue that `context` is not quite complete yet.
+			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(arg_ty.clone()), &context, None);
+			stream.append(&mut sizeof_stream);
+			//alloca enough space for this type
+			let dst_copy_uid = gensym("dst_param_copy");
+			stream.push(Component::Instr(dst_copy_uid.clone(), llvm::Instruction::Alloca(
+				llvm::Ty::Int{bits: 8, signed: false}, sizeof_op.clone(), Some(8)
+			)));
+			let ll_arg_id = gensym("arg");
+			//memcpy from %ll_arg_id to %dst_copy_uid
+			let i8_ptr: llvm::Ty = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
+			stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
+				ret_typ: llvm::Ty::Void,
+				args: vec![
+					(i8_ptr.clone(), llvm::Operand::Local(dst_copy_uid.clone())),
+					(i8_ptr.clone(), llvm::Operand::Local(ll_arg_id.clone())),
+					(llvm::Ty::Int{bits: 64, signed: false}, sizeof_op),
+					(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0}))
+				]
+			}));
+			context.locals.insert(arg_name.clone(), (llvm::Ty::Dynamic(arg_ty.clone()), llvm::Operand::Local(dst_copy_uid)) );
+			params.push( (i8_ptr, ll_arg_id) )
+		} else {
+			let alloca_slot_id = gensym("arg_slot");
+			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void);
+			let ll_arg_id = gensym("arg");
+			stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
+			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+				typ: ll_ty.clone(),
+				data: llvm::Operand::Local(ll_arg_id.clone()),
+				dest: llvm::Operand::Local(alloca_slot_id.clone())
+			}));
+			context.locals.insert(arg_name.clone(), (ll_ty.clone(), llvm::Operand::Local(alloca_slot_id)));
+			params.push( (ll_ty, ll_arg_id) );
+		}
 	}
 	if ret_is_dst {
 		//the DST return location does not get moved from a local to a stack slot because it will never
