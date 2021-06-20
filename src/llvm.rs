@@ -1,6 +1,4 @@
 //These types should reflect https://docs.rs/llvm-ir/0.7.4/llvm_ir/
-#![allow(dead_code)]
-#![allow(clippy::write_with_newline)]
 
 use crate::typechecker;
 use std::collections::HashMap;
@@ -95,7 +93,8 @@ impl std::fmt::Display for Operand{
 pub enum Constant{
 	SInt{bits: u32, val: i64},
 	UInt{bits: u32, val: u64},
-	Float32(f32),
+	//currently, all constants are 64-bit, so there is no need for 32-bit float constants
+	//Float32(f32),
 	Float64(f64),
 	Null(Ty),
 	Struct{name: String, values: Vec<Constant>},
@@ -108,7 +107,7 @@ impl std::fmt::Display for Constant{
 		match self {
 			SInt{val, ..} => write!(f, "{}", val),
 			UInt{val, ..} => write!(f, "{}", val),
-			Float32(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
+			//Float32(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
 			Float64(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
 			Null(_) => write!(f, "null"),
 			Struct{values, ..} => {
@@ -300,12 +299,12 @@ impl std::fmt::Display for Block {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for (local, insn) in self.insns.iter() {
 			if matches!(insn, Instruction::Store{..} | Instruction::Call{ret_typ: Ty::Void, ..}) {
-				write!(f, "\t{}\n", insn)?;
+				writeln!(f, "\t{}", insn)?;
 			} else {
-				write!(f, "\t%{} = {}\n", local, insn)?;
+				writeln!(f, "\t%{} = {}", local, insn)?;
 			}
 		}
-		write!(f, "\t{}\n", self.term)
+		writeln!(f, "\t{}", self.term)
 	}
 }
 impl Default for Block {
@@ -346,25 +345,24 @@ impl std::fmt::Display for Func{
 				write!(f, ", ")?;
 			}
 		}
-		write!(f, ") {{\n{}}}\n", self.cfg)
+		writeln!(f, ") {{\n{}}}", self.cfg)
 	}
 }
 
 pub enum GlobalDecl{
 	GString(String),
-	GBitcast{original_typ: Ty, expr: Box<GlobalDecl>, new_typ: Ty},
+	//GBitcast{original_typ: Ty, expr: Box<GlobalDecl>, new_typ: Ty},
 	GConst(Ty, Constant),
-	GGid(Ty, String),
+	//GGid(Ty, String),
 }
 impl std::fmt::Display for GlobalDecl{
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		use GlobalDecl::*;
 		match self {
 			GString(s) => write!(f, "[{} x i8] c\"{}\\00\"", 1 + s.len(), s),
-			GBitcast{original_typ, expr, new_typ} =>
-				write!(f, "bitcast {} {} to {}", original_typ, expr, new_typ),
+			//GBitcast{original_typ, expr, new_typ} => write!(f, "bitcast {} {} to {}", original_typ, expr, new_typ),
 			GConst(typ, constant) => write!(f, "{} {}", typ, constant),
-			GGid(typ, name) => write!(f, "{} @{}", typ, name),
+			//GGid(typ, name) => write!(f, "{} @{}", typ, name),
 		}
 	}
 }
@@ -378,7 +376,7 @@ pub struct Program{
 }
 impl std::fmt::Display for Program {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "target triple = \"x86_64-unknown-linux\"\n")?;
+		writeln!(f, "target triple = \"x86_64-unknown-linux\"")?;
 		for (name, types) in self.type_decls.iter() {
 			write!(f, "%{} = type {{", name)?;
 			for (i, ty) in types.iter().enumerate() {
@@ -387,18 +385,18 @@ impl std::fmt::Display for Program {
 					write!(f, ", ")?;
 				}
 			}
-			write!(f, "}}\n")?;
+			writeln!(f, "}}")?;
 		}
 		for (name, gdecl) in self.global_decls.iter() {
-			write!(f, "@{} = global {}\n", name, gdecl)?;
+			writeln!(f, "@{} = global {}", name, gdecl)?;
 		}
 		//llvm's builtin memcpy is not declared automatically
-		write!(f, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)\n")?;
+		writeln!(f, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)")?;
 		//printf functions have different declaration syntax because of the var args
-		write!(f, "declare i32 @printf(i8*, ...)\n\
+		writeln!(f, "declare i32 @printf(i8*, ...)\n\
 		declare i32 @sprintf(i8*, i8*, ...)\n\
 		declare i32 @snprintf(i8*, i64, i8*, ...)\n\
-		declare i32 @dprintf(i32, i8*, ...)\n")?;
+		declare i32 @dprintf(i32, i8*, ...)")?;
 		//All external decls will be function
 		for (name, ret_ty, arg_tys) in self.external_decls.iter() {
 			write!(f, "declare {} @{}(", ret_ty, name)?;
@@ -408,7 +406,7 @@ impl std::fmt::Display for Program {
 					write!(f, ", ")?;
 				}
 			}
-			write!(f, ")\n")?;
+			writeln!(f, ")")?;
 		}
 		for func in self.func_decls.iter() {
 			write!(f, "{}", func)?;

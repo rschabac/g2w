@@ -392,9 +392,9 @@ match e {
 		}
 		Ok(return_type)
 	},
-	GenericCall{name: func_name, type_var, args} => {
+	GenericCall{name: func_name, type_var: type_param, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_var, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(&type_param, &ctxt.structs, &ctxt.type_var)?;
 		let return_type;
 		let arg_type_list;
 		let callee_mode;
@@ -416,7 +416,7 @@ match e {
 				type_var_string = var_string;
 			}
 		};
-		let type_var_str_in_type_var = type_var.recursively_find_type_var();
+		let type_var_str_in_type_var = type_param.recursively_find_type_var();
 		match (type_var_str_in_type_var, &ctxt.type_var) {
 			(None, _) => (),
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -434,8 +434,8 @@ match e {
 			return Err(format!("wrong number of args to {}: given {} args, should be {}", func_name, args.len(), arg_type_list.len()));
 		}
 		/*
-		expr is:		name<type_var>(..args..)
-		name has type:	return_type name<var_string>(..arg_type_list..)
+		expr is:		name@<type_param>(..args..)
+		name has type:	return_type name@<var_string>(..arg_type_list..)
 		the monomorphed version of name would look like:
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
@@ -443,7 +443,7 @@ match e {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var);
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_param);
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
@@ -452,7 +452,14 @@ match e {
 				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		};
-		Ok(return_type)
+		/*
+		current context type var is 'A
+		expr is func_name@<type_param which contains 'A>(..args..)
+		func_name is declared with type return_type func_name@<(erased|separated) 'C>(..arg_type_list..)
+		this expr has type (return_type with 'C replaced with type_param)
+		*/
+		let replaced_type_var = replace_type_var_with(return_type, type_var_string, type_param);
+		Ok(replaced_type_var)
 	},
 	Cast(dest_type, source) => {
 		all_struct_names_valid(&dest_type, &ctxt.structs, &ctxt.type_var)?;
@@ -1119,7 +1126,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			//a global var needs to have a known size at compile time, so it cannot be an erased struct,
 			//or any array of erased structs, or a struct that contains an erased struct
-			if t.is_DST(&struct_context) {
+			if t.is_DST(&struct_context, None) {
 				return Err(format!("global variable {} does not have a statically known size because it contains an erased struct", name));
 			}
 			global_context.insert(name.clone(), t.clone());
