@@ -13,7 +13,8 @@ pub enum Ty{
 	//shouldn't need function types because there are no function pointers
 	//Func{result: Box<Ty>, param_types: Vec<Ty>, is_var_arg: bool},
 	Array{length: usize, typ: Box<Ty>},
-	NamedStruct(String),
+	//contains the llvm struct name (which may be mangled), and the source struct name and type param
+	NamedStruct(String, String, Option<super::ast::Ty>),
 	
 	//a type that is dynamically sized is either an erased struct, a struct (of any kind) that
 	//contains a DST, or an array of DSTs
@@ -37,7 +38,7 @@ impl std::fmt::Display for Ty{
 			Float64 => write!(f, "double"),
 			Ptr(boxed) => write!(f, "{}*", boxed),
 			Array{length, typ} => write!(f, "[{} x {}]", length, typ),
-			NamedStruct(s) => write!(f, "%{}", s),
+			NamedStruct(s, _, _) => write!(f, "%{}", s),
 			Dynamic(_t) => {
 				//eprintln!("llvm prog contains Dynamic {}", t);
 				//write!(f, "(ERROR: Dynamic {})", t)

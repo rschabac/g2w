@@ -1,0 +1,81 @@
+/*0
+10
+11
+12
+13
+14
+*/
+struct vec@<separated 'T>{
+	'T* data;
+	u64 size;
+	u64 capacity;
+}
+
+struct vec@<i32> with_capacity(u64 capacity) {
+	struct vec@<i32> result;
+	if capacity != 0u {
+		result.data = cast(i32*, malloc(capacity * sizeof(i32)));
+	} else {
+		result.data = cast(i32*, null);
+	}
+	result.size = 0u;
+	result.capacity = capacity;
+	return result;
+}
+
+struct vec@<i32> consume_append_return(struct vec@<i32> this, i32 e){
+	if this.capacity == 0u {
+		if this.data != cast(i32*, null) {
+			printf("error, data is nto null when capacity is 0%c", 10);
+		}
+		this.data = cast(i32*, malloc(4u * sizeof(i32)));
+		this.data[0] = e;
+		this.capacity = 4u;
+		this.size = 1u;
+		return this;
+	}
+	if this.size == this.capacity {
+		//reallocate
+		i32* new_alloc;
+		new_alloc = cast(i32*, malloc(2u * this.capacity));
+		u64 temp;
+		temp = 0u;
+		while temp < this.size {
+			new_alloc[temp] = this.data[temp];
+		}
+
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+		this.size = this.size + 1u;
+		this.capacity = 2u * this.capacity;
+		return this;
+	}
+	this.data[this.size] = e;
+	this.size = this.size + 1u;
+	return this;
+}
+
+void destroy(struct vec@<i32> this) {
+	free(cast(void*, this.data));
+}
+
+i32 main(){
+	struct vec@<i32> v;
+	v = with_capacity(5u);
+	v = consume_append_return(v, cast(i32, 10));
+	v = consume_append_return(v, cast(i32, 11));
+	v = consume_append_return(v, cast(i32, 12));
+	v = consume_append_return(v, cast(i32, 13));
+	v = consume_append_return(v, cast(i32, 14));
+	
+	u64 index;
+	index = 0u;
+	while index < v.size {
+		printf("%ld%c", v.data[index], 10);
+		index = index + 1u;
+	}
+
+	destroy(v);
+
+	return cast(i32, 0);
+}

@@ -2,6 +2,7 @@ use crate::ast;
 use crate::typechecker;
 use crate::llvm;
 use std::collections::{HashSet, HashMap, VecDeque};
+use std::cell::RefCell; //will need to replace this with a Mutex to parallelize
 
 pub struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
@@ -9,6 +10,8 @@ pub struct Context<'a>{
 	funcs: &'a typechecker::FuncContext,
 	structs: &'a typechecker::StructContext,
 	mode: Option<ast::PolymorphMode>,
+	struct_inst_queue: RefCell<&'a mut SeparatedStructInstQueue>,
+	func_inst_queue: RefCell<&'a mut SeparatedFuncInstQueue>,
 }
 impl<'a> Context<'a> {
 	fn get_var(&self, name: &str) -> &(llvm::Ty, llvm::Operand) {
@@ -53,7 +56,7 @@ if cmp_ty(struct A@<'f>) is called from a generic function,
 	cmp_{exp,stmt,...} is responsible for knowing the right type for 'f
 	(either void* if it is an erased function, or its type param if it is separated)
 */
-fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacement: llvm::Ty, mode: Option<ast::PolymorphMode>) -> llvm::Ty {
+fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacement: llvm::Ty, mode: Option<ast::PolymorphMode>, struct_inst_queue: &RefCell<&mut SeparatedStructInstQueue>) -> llvm::Ty {
 	if t.is_DST(structs, mode) {
 		return llvm::Ty::Dynamic(t.clone());
 	}
@@ -66,9 +69,9 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 		ast::Ty::Float(ast::FloatSize::FSize32) => llvm::Ty::Float32,
 		ast::Ty::Float(ast::FloatSize::FSize64) => llvm::Ty::Float64,
 		ast::Ty::Ptr(None) => llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs, type_var_replacement, mode))),
-		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs, type_var_replacement, mode))},
-		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone()),
+		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs, type_var_replacement, mode, struct_inst_queue))),
+		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs, type_var_replacement, mode, struct_inst_queue))},
+		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone(), s.clone(), None),
 		ast::Ty::GenericStruct{type_var: type_param, name} => {
 			debug_assert!(type_param.recursively_find_type_var().is_none(), "cmp_ty called on generic struct with a type param that is not completely concrete, {:?}", t);
 			match structs.get(name) {
@@ -76,7 +79,10 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 					//already checked for is_DST above
 					unreachable!(),
 				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, ..}) => {
-					llvm::Ty::NamedStruct(mangle(name, type_param))
+					struct_inst_queue.borrow_mut().push(name.clone(), type_param.as_ref().clone());
+					//call cmp_ty on the type param, but do nothign with it, just to add it to the struct inst queue in case it is a separated struct
+					cmp_ty(type_param, structs, type_var_replacement, mode, struct_inst_queue);
+					llvm::Ty::NamedStruct(mangle(name, type_param), name.clone(), Some(type_param.as_ref().clone()))
 				}
 				None => panic!("could not find {} in struct context", name),
 				Some(typechecker::StructType::NonGeneric(_)) => panic!("struct {} is not generic", name),
@@ -198,14 +204,20 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				base_type_param = Some(type_param.as_ref().clone());
 				(true, true, s.clone())
 			},
-			llvm::Ty::NamedStruct(s) => (false, false, s.clone()),
+			llvm::Ty::NamedStruct(_llvm_name, src_name, type_param) => {
+				base_type_param = type_param.clone();
+				(false, false, src_name.clone())
+			},
 			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
 				llvm::Ty::Dynamic(ast::Ty::Struct(s)) => (true, true, s.clone()),
 				llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_var: type_param}) => {
 					base_type_param = Some(type_param.as_ref().clone());
 					(true, true, s.clone())
 				},
-				llvm::Ty::NamedStruct(s) => (false, true, s.clone()),
+				llvm::Ty::NamedStruct(_llvm_name, src_name, type_param) => {
+					base_type_param = type_param.clone();
+					(false, true, src_name.clone())
+				},
 				t => panic!("Proj base has llvm type Ptr({:?})", t)
 			},
 			t => panic!("Proj base has llvm type {:?}", t)
@@ -234,18 +246,20 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				base: base_result.llvm_op,
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
 			}));
-			let field_typ: &ast::Ty = &fields[field_index].1;
+			let mut field_typ: ast::Ty = fields[field_index].1.clone();
+			field_typ.replace_type_var_with(&base_type_param);
 			if !field_typ.is_DST(&ctxt.structs, ctxt.mode) {
 				//only load from it if it is not a dynamic type
 				//first, bitcast the i8* to the right type
-				let llvm_field_typ = cmp_ty(field_typ, &ctxt.structs, 
+				let llvm_field_typ = cmp_ty(&field_typ, &ctxt.structs, 
 					//if the base type is a regular struct that is dynamic, then don't need to pass
 					//a replacement type here, otherwise the type parameter must be cmped
 					match base_type_param {
 						ast::Ty::TypeVar(s) if s == "_should_not_happen" => llvm::Ty::Void,
-						_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void, ctxt.mode)
+						_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue)
 					},
-					ctxt.mode
+					ctxt.mode,
+					&ctxt.struct_inst_queue
 				);
 				let bitcasted_uid = gensym("proj_bitcast");
 				stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
@@ -266,13 +280,17 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			}
 			//if the result is dynamic, it is already an i8*, so nothing needs to be done
 			return ExpResult{
-				llvm_typ: llvm::Ty::Dynamic(field_typ.clone()),
+				llvm_typ: llvm::Ty::Dynamic(field_typ),
 				llvm_op: llvm::Operand::Local(ptr_offset_op),
 				stream
 			}
 		}
 		use std::convert::TryFrom;
-		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, llvm::Ty::Void, ctxt.mode);
+		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs,
+			match &base_type_param {
+				None => llvm::Ty::Void,
+				Some(t) => cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue)
+			}, ctxt.mode, &ctxt.struct_inst_queue);
 		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
 		let base_loaded_op: llvm::Operand;
 		if base_is_ptr {
@@ -350,7 +368,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Cast(new_type, src) => {
 		let mut src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs, llvm::Ty::Void, ctxt.mode);
+		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
@@ -813,7 +831,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					}
 				},
 				ast::Ty::GenericStruct{type_var: type_param, name} => {
-					if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, fields, ..} = ctxt.structs.get(name).unwrap() {
+					//even separated structs can be DSTs
+					if let typechecker::StructType::Generic{fields, ..} = ctxt.structs.get(name).unwrap() {
 						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, type_param);
 						return ExpResult {
 							llvm_op,
@@ -821,7 +840,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 							stream
 						}
 					} else {
-						panic!("struct context does not contain an erased struct for '{}'", name);
+						panic!("struct context does not contain a generic struct for '{}'", name);
 					}
 				},
 				ast::Ty::TypeVar(_) => {
@@ -836,7 +855,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		};
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
-		let llvm_typ = cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode);
+		let llvm_typ = cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		let stream = vec![
 			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
@@ -957,7 +976,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, generic_info:
 			//if cmp_ty returns a Dynamic(_) here, then llvm could try to make a null literal have type i8.
 			//however, this will not happen because if the arg is LitNull, then the type must be a pointer,
 			//which will never be a DST.
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, llvm::Ty::Void, ctxt.mode)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue)),
 			_ => None
 		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
@@ -1010,7 +1029,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, generic_info:
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})), llvm::Operand::Local(result_addr_uid)) );
 			(true, llvm::Ty::Void)
 		},
-		Some(t) => (false, cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode))
+		Some(t) => (false, cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue))
 	};
 	if let Some((ast::PolymorphMode::Erased, call_type_param)) = generic_info {
 		//compute the size of the type param
@@ -1024,7 +1043,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, generic_info:
 		args: arg_ty_ops
 	}));
 	if result_is_dst {
-		//TODO: the callee returns a Dynamic(TypeVar("T")) by memcpy, but I know that 'T is i16,
+		//the callee returns a Dynamic(TypeVar("T")) by memcpy, but I know that 'T is i16,
 		//so I need to load from the dst return location as an i16
 		//if 'T was still dynamic in the caller context, then don't load from the dst return location,
 		//just change the llvm_typ from Dynamic(TypeVar("T")) to Dynamic(generic_info.1)
@@ -1033,7 +1052,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, generic_info:
 			replaced_result_ty.replace_type_var_with(call_type_param);
 			if !replaced_result_ty.is_DST(&ctxt.structs, Some(ast::PolymorphMode::Erased)) {
 				//replacing the type var in the return type makes it no longer a DST
-				let static_llvm_ty = cmp_ty(&replaced_result_ty, &ctxt.structs, llvm::Ty::Void, Some(ast::PolymorphMode::Erased));
+				let static_llvm_ty = cmp_ty(&replaced_result_ty, &ctxt.structs, llvm::Ty::Void, Some(ast::PolymorphMode::Erased), &ctxt.struct_inst_queue);
 				let cast_op = gensym("bitcast");
 				stream.push(Component::Instr(cast_op.clone(), llvm::Instruction::Bitcast{
 					original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
@@ -1195,9 +1214,9 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			base_lvalue_result = cmp_lvalue(base as &ast::Expr, ctxt);
 			match &base_lvalue_result.llvm_typ {
 				llvm::Ty::Dynamic(_) => (), //if loading from the base operand would yield a DST, don't do anything
-				llvm::Ty::NamedStruct(_) => (), //if base points to a struct directly, don't do anything
+				llvm::Ty::NamedStruct(_, _, _) => (), //if base points to a struct directly, don't do anything
 				llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
-					llvm::Ty::NamedStruct(_) | llvm::Ty::Dynamic(_) => {
+					llvm::Ty::NamedStruct(_, _, _) | llvm::Ty::Dynamic(_) => {
 						let loaded_id = gensym("struct_deref");
 						base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 							typ: base_lvalue_result.llvm_typ.clone(),
@@ -1225,7 +1244,10 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 					t => panic!("Cannot do a dynamic proj off of type {:?}", t)
 				}
 			},
-			llvm::Ty::NamedStruct(s) => s.clone(),
+			llvm::Ty::NamedStruct(_llvm_name, src_name, type_param) => {
+				base_type_param = type_param.clone();
+				src_name.clone()
+			},
 			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
 				llvm::Ty::Dynamic(t) => {
 					is_dynamic = true;
@@ -1238,7 +1260,10 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 						t => panic!("Cannot do a dynamic proj off of type {:?}", t)
 					}
 				}
-				llvm::Ty::NamedStruct(s) => s.clone(),
+				llvm::Ty::NamedStruct(_llvm_name, src_name, type_param) => {
+					base_type_param = type_param.clone();
+					src_name.clone()
+				},
 				t => panic!("Proj base has llvm type Ptr({:?})", t)
 			}
 			t => panic!("Proj base has llvm type {:?}", t)
@@ -1276,9 +1301,10 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				//replacement type here, otherwise the type parameter must be cmped
 				match base_type_param {
 					ast::Ty::TypeVar(s) if s == "_should_not_happen" => llvm::Ty::Void,
-					_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void, ctxt.mode)
+					_ => cmp_ty(&base_type_param, ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue)
 				},
-				ctxt.mode
+				ctxt.mode,
+				&ctxt.struct_inst_queue
 			);
 			let bitcasted_uid = gensym("DST_proj_bitcast");
 			base_lvalue_result.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
@@ -1294,12 +1320,23 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			return base_lvalue_result;
 		}
 		use std::convert::TryFrom;
-		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, llvm::Ty::Void, ctxt.mode);
+		let type_var_replacement = match &base_type_param {
+			None => llvm::Ty::Void,
+			//TODO: need access to the current type param, need to store it in the context
+			Some(t) => cmp_ty(t, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue)
+		};
+		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, type_var_replacement, ctxt.mode, &ctxt.struct_inst_queue);
 		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
 		let mut stream = base_lvalue_result.stream;
 		let field_addr_uid = gensym("field");
+		let possibly_mangled_name = match &base_type_param {
+			None => struct_name,
+			Some(t) => mangle(&struct_name, t)
+		};
 		stream.push(Component::Instr(field_addr_uid.clone(), llvm::Instruction::Gep{
-			typ: llvm::Ty::NamedStruct(struct_name),
+			//String::new() and None here will not be inspected for type info, so they can be set to dummy values
+			//the llvm code printer will ignore them
+			typ: llvm::Ty::NamedStruct(possibly_mangled_name, String::new(), None),
 			base: base_lvalue_result.llvm_op,
 			offsets: vec![
 				(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0})),
@@ -1437,8 +1474,9 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 					_ => ()
 				}
 			}
-			let mut llvm_typ = cmp_ty(typ, &ctxt.structs, llvm::Ty::Void, ctxt.mode);
+			let mut llvm_typ = cmp_ty(typ, &ctxt.structs, llvm::Ty::Void, ctxt.mode, &ctxt.struct_inst_queue);
 			ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
+			//TODO: do I really need this? when the llvm code is emitted, Dynamic is printed as i8
 			replace_dynamic_with_i8(&mut llvm_typ);
 			vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None))]
 		}
@@ -1546,48 +1584,65 @@ fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty
 	stream
 }
 
-fn mangle_type(t: &ast::Ty, output: &mut String) {
-	use ast::Ty::*;
-	use std::fmt::Write;
-	//if it ends in ., it's a pointer
-	//if it ends in .123, it's an array
-	//if it ends in .struct, it's a struct
-	match t {
-		Bool | Int{..} | Float(_) => write!(output, "{}", t).unwrap(),
-		Ptr(None) => output.push_str("void."),
-		Ptr(Some(boxed)) => {
-			write!(output, "{}", boxed as &ast::Ty).unwrap();
-			output.push('.');
-		},
-		Array{length, typ: boxed} => write!(output, "{}.{}", boxed as &ast::Ty, length).unwrap(),
-		Struct(s) => write!(output, "{}.struct", s).unwrap(),
-		TypeVar(s) => panic!("Cannot mangle a TypeVar {}", s),
-		GenericStruct{type_var, name} => panic!("Cannot mangle a generic struct with type param {} and name {}", type_var, name)
-	}
-}
 
 //functions and type defs can have the same name, so only one mangling function is needed
 fn mangle(name: &str, ty: &ast::Ty) -> String {
+	fn mangle_type(t: &ast::Ty, output: &mut String) {
+		use ast::Ty::*;
+		use std::fmt::Write;
+		//if it ends in ., it's a pointer
+		//if it ends in .123, it's an array
+		//if it ends in .struct, it's a struct
+		match t {
+			Bool | Int{..} | Float(_) => write!(output, "{}", t).unwrap(),
+			Ptr(None) => output.push_str("void."),
+			Ptr(Some(boxed)) => {
+				mangle_type(boxed.as_ref(), output);
+				output.push('.');
+			},
+			Array{length, typ: boxed} => {
+				mangle_type(boxed.as_ref(), output);
+				output.push('.');
+				write!(output, "{}", length).unwrap()
+			},
+			Struct(s) => {
+				output.push_str(s);
+				output.push_str(".struct");
+			},
+			GenericStruct{type_var: type_param, name} => {
+				output.push_str(name);
+				output.push('$');
+				mangle_type(type_param, output);
+			},
+			TypeVar(s) => panic!("Cannot mangle a TypeVar {}", s),
+		}
+	}
 	let mut result_string = name.to_owned();
 	result_string.push('$');
 	mangle_type(ty, &mut result_string);
 	result_string
 }
 
-#[allow(dead_code)]
 enum FuncInst<'a, 'b>{
 	NonGeneric(&'a ast::Func),
 	Erased(&'a ast::GenericFunc),
 	Separated(&'a ast::GenericFunc, &'b ast::Ty)
 }
-fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>) -> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
+fn cmp_func(f: &FuncInst, 
+			prog_context: &typechecker::ProgramContext,
+			global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>,
+			struct_inst_queue: &mut SeparatedStructInstQueue,
+			func_inst_queue: &mut SeparatedFuncInstQueue)
+			-> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
 	//compiling a non-generic function and an erased function are nearly the same thing, but PARAM_SIZE_NAME needs to be added to the params
 	let mut context = Context{
 		locals: HashMap::new(),
 		globals: global_locs,
 		funcs: &prog_context.funcs,
 		structs: &prog_context.structs,
-		mode: None
+		mode: None,
+		struct_inst_queue: RefCell::new(struct_inst_queue),
+		func_inst_queue: RefCell::new(func_inst_queue),
 	};
 	let (args, ret_ty, func_name, body) = match f {
 		FuncInst::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
@@ -1599,7 +1654,7 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 	let (ret_is_dst, ll_ret_ty) = match ret_ty {
 		None => (false, llvm::Ty::Void),
 		Some(t) if t.is_DST(&prog_context.structs, context.mode) => (true, llvm::Ty::Void),
-		Some(t) => (false, cmp_ty(t, &prog_context.structs, llvm::Ty::Void, context.mode))
+		Some(t) => (false, cmp_ty(t, &prog_context.structs, llvm::Ty::Void, context.mode, &context.struct_inst_queue))
 	};
 	for (arg_ty, arg_name) in args.iter() {
 		if arg_ty.is_DST(&prog_context.structs, context.mode) {
@@ -1629,7 +1684,7 @@ fn cmp_func(f: &FuncInst, prog_context: &typechecker::ProgramContext, global_loc
 			params.push( (i8_ptr, ll_arg_id) )
 		} else {
 			let alloca_slot_id = gensym("arg_slot");
-			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void, context.mode);
+			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, llvm::Ty::Void, context.mode, &context.struct_inst_queue);
 			let ll_arg_id = gensym("arg");
 			stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
 			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
@@ -1714,9 +1769,9 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 			typ: (typ as &llvm::Ty).clone(),
 			elements: std::iter::once(get_default_constant(typ, structs)).cycle().take(*length).collect()
 		},
-		NamedStruct(s) => llvm::Constant::Struct{
-			name: s.clone(),
-			values: structs.get(s).expect("types of global vars should be insted by now")
+		NamedStruct(llvm_name, src_name, type_param_opt) => llvm::Constant::Struct{
+			name: llvm_name.clone(),
+			values: structs.get(src_name).expect("types of global vars should be insted by now")
 				.iter()
 				.map(|t| get_default_constant(t, structs))
 				.collect()
@@ -1726,51 +1781,108 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 	}
 }
 
-fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_structs: &LLStructContext) -> (llvm::Ty, llvm::GlobalDecl) {
-	let ll_ty = cmp_ty(typ, structs, llvm::Ty::Void, None);
+fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, ll_structs: &LLStructContext, struct_inst_queue: &RefCell<&mut SeparatedStructInstQueue>) -> (llvm::Ty, llvm::GlobalDecl) {
+	let ll_ty = cmp_ty(typ, structs, llvm::Ty::Void, None, struct_inst_queue);
 	let initializer: llvm::Constant = get_default_constant(&ll_ty, ll_structs);
 	(ll_ty.clone(), llvm::GlobalDecl::GConst(ll_ty, initializer))
 }
 
 //when insting this, replace all occurences of its type var in fields with type_param
 #[allow(dead_code)]
-struct StructInst<'prog>{
-	name: &'prog str,
-	type_param: &'prog ast::Ty
+#[derive(Debug)]
+struct SeparatedStructInst{
+	name: String,
+	type_param: ast::Ty
 }
 
-#[derive(Default)]
-struct InstQueue<'prog>{
-	queue: VecDeque<StructInst<'prog>>,
-	already_insted: HashSet<(&'prog str, &'prog ast::Ty)>
+#[derive(Debug)]
+struct SeparatedStructInstQueue{
+	queue: VecDeque<SeparatedStructInst>,
+	already_insted: HashSet<(String, ast::Ty)>
 }
-impl<'s, 'prog> InstQueue<'prog>{
-	fn push(&'s mut self, struct_name: &'prog str, type_param: &'prog ast::Ty) -> bool {
-		if self.already_insted.contains(&(struct_name, type_param)){
+impl SeparatedStructInstQueue{
+	fn new() -> Self {
+		Self{
+			queue: VecDeque::new(),
+			already_insted: HashSet::new(),
+		}
+	}
+
+	fn push(&mut self, struct_name: String, type_param: ast::Ty) -> bool {
+		let tuple = (struct_name, type_param);
+		if self.already_insted.contains(&tuple){
 			false
 		} else {
-			self.queue.push_back(StructInst{
-				name: struct_name,
-				type_param
+			let (struct_name, type_param) = tuple;
+			self.queue.push_back(SeparatedStructInst{
+				name: struct_name.clone(),
+				type_param: type_param.clone()
 			});
 			self.already_insted.insert((struct_name, type_param));
 			true
 		}
 	}
 	#[allow(dead_code)]
-	fn poll(&'s mut self) -> Option<StructInst<'prog>>{
+	fn poll(&mut self) -> Option<SeparatedStructInst>{
 		self.queue.pop_front()
 	}
 }
 
-pub fn cmp_prog<'prog>(prog: &'prog ast::Program, prog_context: &'prog typechecker::ProgramContext) -> llvm::Program {
+//structs are already checked for unlimited instantiations, but functions are not
+//SeparatedFuncInst needs to have a depth field, which increases with every recursive instantiation
+#[derive(Debug)]
+struct SeparatedFuncInst{
+	name: String,
+	type_param: ast::Ty,
+	depth: u8
+}
+
+#[derive(Debug)]
+struct SeparatedFuncInstQueue{
+	queue: VecDeque<SeparatedFuncInst>,
+	already_insted: HashSet<(String, ast::Ty)>
+}
+impl SeparatedFuncInstQueue{
+	fn new() -> Self {
+		Self {
+			queue: VecDeque::new(),
+			already_insted: HashSet::new()
+		}
+	}
+
+	//caller of this function must add 1 to depth
+	fn push(&mut self, func_name: String, type_param: ast::Ty, depth: u8) -> bool {
+		let tuple = (func_name, type_param);
+		if self.already_insted.contains(&tuple){
+			false
+		} else {
+			let (func_name, type_param) = tuple;
+			self.queue.push_back(SeparatedFuncInst{
+				name: func_name.clone(),
+				type_param: type_param.clone(),
+				depth
+			});
+			self.already_insted.insert((func_name, type_param));
+			true
+		}
+	}
+	#[allow(dead_code)]
+	fn poll(&mut self) -> Option<SeparatedFuncInst>{
+		self.queue.pop_front()
+	}
+
+}
+
+pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
 	let mut type_decls: LLStructContext = HashMap::new();
-	let mut struct_inst_queue: InstQueue<'prog> = Default::default();
-	//initially, put all non-generic and erased structs in the type_decls
+	let mut struct_inst_queue: SeparatedStructInstQueue = SeparatedStructInstQueue::new();
+	let mut func_inst_queue: SeparatedFuncInstQueue = SeparatedFuncInstQueue::new();
+	//initially, put all non-generic structs in the type_decls
 	for s in prog.structs.iter() {
 		//any structs that are dynamically sized do not get declared, llvm does not know about them
 		if s.fields.iter().any(|(t, _)| t.is_DST(&prog_context.structs, None)) {continue}
-		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, llvm::Ty::Void, None)).collect();
+		let refcell = RefCell::new(&mut struct_inst_queue);
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, llvm::Ty::Void, None, &refcell)).collect();
 		type_decls.insert(s.name.clone(), cmped_tys);
 	}
 	//erased structs do not get declared, llvm does not know about them
@@ -1779,27 +1891,38 @@ pub fn cmp_prog<'prog>(prog: &'prog ast::Program, prog_context: &'prog typecheck
 	let mut global_decls: Vec<(String, llvm::GlobalDecl)> = Vec::with_capacity(prog.global_vars.len());
 	let mut global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = HashMap::new();
 	for (typ, name) in prog.global_vars.iter() {
-		//if typ is a struct name@<type_param>
-		if let ast::Ty::GenericStruct{type_var: type_param, name} = typ {
-			//..and struct name is declared as a struct using struct name@<separated 'type_var>{...}
-			if let typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, ..} = prog_context.structs.get(name).unwrap() {
-				struct_inst_queue.push(name, type_param);
-			}
-		}
-		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &type_decls);
+		let refcell = RefCell::new(&mut struct_inst_queue);
+		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &type_decls, &refcell);
 		global_decls.push( (name.clone(), ll_gdecl) );
 		global_locs.insert(name.clone(), (ll_typ, llvm::Operand::Global(name.clone())));
 	}
 	let mut cmped_funcs: Vec<llvm::Func> = Vec::new();
 	for func in prog.funcs.iter() {
-		let (ll_func, extra_globals) = cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs);
+		let (ll_func, extra_globals) = cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs, &mut struct_inst_queue, &mut func_inst_queue);
 		cmped_funcs.push(ll_func);
 		global_decls.extend(extra_globals.into_iter());
 	}
 	for func in prog.erased_funcs.iter() {
-		let (ll_func, extra_globals) = cmp_func(&FuncInst::Erased(func), prog_context, &global_locs);
+		let (ll_func, extra_globals) = cmp_func(&FuncInst::Erased(func), prog_context, &global_locs, &mut struct_inst_queue, &mut func_inst_queue);
 		cmped_funcs.push(ll_func);
 		global_decls.extend(extra_globals.into_iter());
+	}
+	//compiling the non-generic funcs and erased funcs will put things in both inst queues, now iterate over those until they are empty
+	//insting a struct will never cause a func inst, so iterate over the func inst queue first, then the struct inst queue
+	while let Some(func_inst) = func_inst_queue.poll() {
+		todo!()
+	}
+	while let Some(SeparatedStructInst{name, type_param}) = struct_inst_queue.poll() {
+		//separated structs containing DSTs should never be added to the struct queue
+		debug_assert!(!(ast::Ty::GenericStruct{name: name.clone(), type_var: Box::new(type_param.clone())}).is_DST(&prog_context.structs, Some(ast::PolymorphMode::Separated)), "struct queue contains {{ name: '{}', type_param: {:?} }}, which is a DST", &name, &type_param);
+		let refcell = RefCell::new(&mut struct_inst_queue);
+		let fields = match prog_context.structs.get(name.as_str()).unwrap() {
+			typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
+			_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
+		};
+		let type_var_replacement = cmp_ty(&type_param, &prog_context.structs, llvm::Ty::Void, Some(ast::PolymorphMode::Separated), &refcell);
+		let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, type_var_replacement.clone(), Some(ast::PolymorphMode::Separated), &refcell)).collect();
+		type_decls.insert(mangle(name.as_str(), &type_param), cmped_tys);
 	}
 	llvm::Program {
 		type_decls,

@@ -84,10 +84,17 @@ impl Ty {
 		use Ty::*;
 		use super::typechecker::StructType::*;
 		match self {
-			GenericStruct{name, ..} => match structs.get(name.as_str()).unwrap() {
-				Generic{mode: PolymorphMode::Erased, ..} => true,
-				Generic{mode: PolymorphMode::Separated, fields, ..} =>
-					fields.iter().any(|(_, ty)| ty.is_DST(structs, mode)),
+			GenericStruct{name, type_var: type_param} => match structs.get(name.as_str()).unwrap() {
+				Generic{mode: PolymorphMode::Erased, fields: _, type_var: _} => true,
+				Generic{mode: PolymorphMode::Separated, fields, type_var: _} => {
+					for mut field_ty in fields.iter().map(|(_, t)| t.clone()) {
+						field_ty.replace_type_var_with(type_param);
+						if field_ty.is_DST(structs, mode) {
+							return true;
+						}
+					}
+					false
+				},
 				NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
 			},
 			Struct(name) => match structs.get(name).unwrap() {

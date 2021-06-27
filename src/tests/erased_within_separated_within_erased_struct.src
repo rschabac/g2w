@@ -1,0 +1,27 @@
+/*0
+*/
+struct inline_vec@<separated 'V>{
+	'V[10] data;
+	u64 size;
+	u64 capacity;
+}
+
+struct and_i8@<erased 'E>{
+	'E a;
+	i8 b;
+}
+
+struct and_i16@<erased 'S>{
+	'S a;
+	i16 b;
+}
+
+i32 main(){
+	struct and_i16@<struct inline_vec@<struct and_i8@<u64> > > x;
+	x.b = cast(i16, 0);
+	x.a.size = 0u;
+	x.a.capacity = 0u;
+	x.a.data[0].a = 10u;
+	x.a.data[0].b = cast(i8, 10);
+	return cast(i32, 0);
+}
