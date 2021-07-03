@@ -2,6 +2,6 @@ i64 x;
 
 void f(){
 	i32[1] arr;
-	arr = {cast(i32, 8)};
+	arr[0] = cast(i32, 8);
 	x = arr[0];
 }

@@ -1,6 +1,5 @@
 i32 f(){
 	bool[2] bool_arr;
-	bool_arr = {true, false};
 	i32 x;
 	x = bool_arr[0];
 	return x;

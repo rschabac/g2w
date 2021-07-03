@@ -67,15 +67,24 @@ impl Ty {
 			TypeVar(s) => Some(s.as_str()),
 		}
 	}
-	//very similar to the function `replace_type_var_with` in typechecker.rs, but does not check
-	//that the type var contained matches the type var expected, and mutates the type in place.
-	pub fn replace_type_var_with(&mut self, replacement: &Self) {
+	
+	//actually does the work, by mutating the type in place, which seems to be less convenient than returning a new Ty
+	fn replace_type_var_in_place(&mut self, replacement: &Self) {
 		use Ty::*;
 		match self {
-			TypeVar(_) => {*self = replacement.clone();},
-			Ptr(Some(t)) | Array{typ: t, ..} | GenericStruct{type_var: t, ..} => t.as_mut().replace_type_var_with(replacement),
+			TypeVar(s) => {
+				debug_assert!(s != "_should_not_happen", "TypeVar is _should_not_happen");
+				*self = replacement.clone()
+			},
+			Ptr(Some(t)) | Array{typ: t, ..} | GenericStruct{type_var: t, ..} => {t.as_mut().replace_type_var_in_place(replacement)},
 			_ => ()
 		}
+	}
+	//very similar to the function `replace_type_var_with` in typechecker.rs, but does not check
+	//that the type var contained matches the type var expected
+	pub fn replace_type_var_with(mut self, replacement: &Self) -> Self {
+		self.replace_type_var_in_place(replacement);
+		self
 	}
 
 	//returns whether or not a type contains an erased struct, and therefore is dynamically sized
@@ -87,9 +96,8 @@ impl Ty {
 			GenericStruct{name, type_var: type_param} => match structs.get(name.as_str()).unwrap() {
 				Generic{mode: PolymorphMode::Erased, fields: _, type_var: _} => true,
 				Generic{mode: PolymorphMode::Separated, fields, type_var: _} => {
-					for mut field_ty in fields.iter().map(|(_, t)| t.clone()) {
-						field_ty.replace_type_var_with(type_param);
-						if field_ty.is_DST(structs, mode) {
+					for field_ty in fields.iter().map(|(_, t)| t.clone()) {
+						if field_ty.replace_type_var_with(type_param).is_DST(structs, mode) {
 							return true;
 						}
 					}
@@ -104,6 +112,17 @@ impl Ty {
 			Array{typ, ..} => typ.as_ref().is_DST(structs, mode),
 			TypeVar(_) => mode == Some(PolymorphMode::Erased),
 			_ => false
+		}
+	}
+
+	//helper function to call `replace_type_var_with` when the replacement is an Option that should only be unwrapped if self
+	//contains a TypeVar
+	pub fn concretized(self, replacement: Option<&Self>) -> Self {
+		if self.recursively_find_type_var().is_some() {
+			let replacement = replacement.unwrap_or_else(|| panic!("Tried to concretize {:?}, which contains type var '{}, but replacement was None", &self, self.recursively_find_type_var().unwrap()));
+			self.replace_type_var_with(replacement)
+		} else {
+			self
 		}
 	}
 }
@@ -151,7 +170,6 @@ pub enum Expr{
 	LitString(String),
 	Id(String),
 	//Type of an array literal will be inferred based on the first element
-	LitArr(Vec<Expr>),
 	Index(Box<Expr>, Box<Expr>),
 	//maybe add this back in later
 	//LitStruct{struct_name: String, values: Vec<(String, Expr)>},

@@ -70,7 +70,6 @@ pub enum Operand{
 	Const(Constant),
 	Local(String),
 	Global(String),
-	Array{typ: Ty, elements: Vec<Operand>}
 }
 impl std::fmt::Display for Operand{
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -79,13 +78,6 @@ impl std::fmt::Display for Operand{
 			Const(c) => write!(f, "{}", c),
 			Local(s) => write!(f, "%{}", s),
 			Global(s) => write!(f, "@{}", s),
-			Array{elements, ..} => {
-				write!(f, "[")?;
-				for element in elements.iter(){
-					write!(f, " {},", element)?;
-				}
-				write!(f, " ]")
-			}
 		}
 	}
 }
@@ -95,12 +87,25 @@ pub enum Constant{
 	SInt{bits: u32, val: i64},
 	UInt{bits: u32, val: u64},
 	//currently, all constants are 64-bit, so there is no need for 32-bit float constants
-	//Float32(f32),
+	Float32(f32),
 	Float64(f64),
 	Null(Ty),
 	Struct{name: String, values: Vec<Constant>},
 	Array{typ: Ty, elements: Vec<Constant>},
 	//The llvm_ir crate includes variants here to support constant expressions, I am omitting these
+}
+impl Constant {
+	fn print_type(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		use Constant::*;
+		match self {
+			SInt{bits, ..} | UInt{bits, ..} => write!(f, "i{}", bits),
+			Float32(_) => write!(f, "float"),
+			Float64(_) => write!(f, "double"),
+			Null(t) => write!(f, "{}*", t),
+			Struct{name, ..} => write!(f, "%{}", name),
+			Array{typ, elements} => write!(f, "[{} x {}]", elements.len(), typ)
+		}
+	}
 }
 impl std::fmt::Display for Constant{
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -108,20 +113,32 @@ impl std::fmt::Display for Constant{
 		match self {
 			SInt{val, ..} => write!(f, "{}", val),
 			UInt{val, ..} => write!(f, "{}", val),
-			//Float32(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
+			Float32(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
 			Float64(val) => write!(f, "{}{}", val, if val.fract() == 0.0 {".0"} else {""}),
 			Null(_) => write!(f, "null"),
 			Struct{values, ..} => {
 				write!(f, "{{")?;
-				for constant in values.iter() {
-					write!(f, " {},", constant)?;
+				if !values.is_empty() {
+					values[0].print_type(f)?;
+					write!(f, " {}", values[0])?;
+					for constant in values[1..].iter() {
+						write!(f, ", ")?;
+						constant.print_type(f)?;
+						write!(f, " {}", constant)?;
+					}
 				}
 				write!(f, " }}")
 			},
 			Array{elements, ..} => {
 				write!(f, "[")?;
-				for element in elements.iter(){
-					write!(f, " {},", element)?;
+				if !elements.is_empty() {
+					elements[0].print_type(f)?;
+					write!(f, " {}", elements[0])?;
+					for constant in elements[1..].iter() {
+						write!(f, ", ")?;
+						constant.print_type(f)?;
+						write!(f, " {}", constant)?;
+					}
 				}
 				write!(f, " ]")
 			}
@@ -377,7 +394,7 @@ pub struct Program{
 }
 impl std::fmt::Display for Program {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		writeln!(f, "target triple = \"x86_64-unknown-linux\"")?;
+		writeln!(f, "target triple = \"x86_64-pc-linux-gnu\"")?;
 		for (name, types) in self.type_decls.iter() {
 			write!(f, "%{} = type {{", name)?;
 			for (i, ty) in types.iter().enumerate() {

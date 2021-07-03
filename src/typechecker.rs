@@ -238,23 +238,6 @@ match e {
 				None => Err(format!("undeclared variable {}", var))
 		}
 	},
-	LitArr(init) => {
-		if init.is_empty() {
-			eprintln!("Warning: Array literal has length 0, defaulting its type to i64[0]");
-			return Ok(Array{length: 0, typ: Box::new(Int{signed:true, size:Size64})})
-		}
-		let first_type = typecheck_expr(ctxt, funcs, &init[0])?;
-		if let Ptr(_) = first_type {
-			ctxt.type_for_lit_nulls = Some(first_type.clone());
-		}
-		for (index, init_expr) in init[1..].iter().enumerate() {
-			let typ = typecheck_expr(ctxt, funcs, init_expr)?;
-			if first_type.ne(&typ) {
-				return Err(format!("Array literal has mismatching types, element 0 has type {}, element {} has type {}", first_type, index, typ));
-			}
-		}
-		Ok(Array{length: init.len() as u64, typ: Box::new(first_type)})
-	},
 	Index(base, index) => {
 		ctxt.type_for_lit_nulls = None;
 		let base_typ = typecheck_expr(ctxt, funcs, base)?;
@@ -480,8 +463,8 @@ match e {
 		  | (Float(_), Int{..}) | (Int{..}, Float(_))
 		  | (Bool, Int{..}) => Ok(dest_type.clone()),
 			
-			//TODO: casting to/from type vars?
-			(TypeVar(_), _) | (_, TypeVar(_)) => panic!("trying to cast with a TypeVar, I don't know what to do here yet"),
+			(TypeVar(v), _) => Err(format!("Cannot cast from '{}", v)),
+			(_, TypeVar(v)) => Err(format!("Cannot cast to '{}", v)),
 			(original_type, dest_type) => Err(format!("Cannot cast from {} to {}", original_type, dest_type))
 			
 		}
@@ -1138,17 +1121,21 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			let (mut ctxt, _) = get_empty_localtypecontext();
 			//kind of weird, but in order to keep the LocalTypeContext the same and avoid
 			//cloning the struct_context all the time, I need to move it into this temporary
-			//ctxt variable, then move it back out
+			//ctxt variable, then move it back out (same for global_context)
+			ctxt.globals = global_context;
 			ctxt.structs = struct_context;
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
 			struct_context = ctxt.structs;
+			global_context = ctxt.globals;
 		},
 		GGenericFuncDecl{ret_type, name, args, body, param, mode} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
 			ctxt.type_var = Some((param.clone(), *mode));		
+			ctxt.globals = global_context;
 			ctxt.structs = struct_context;
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;
 			struct_context = ctxt.structs;
+			global_context = ctxt.globals;
 		}
 		_ => ()
 	}};

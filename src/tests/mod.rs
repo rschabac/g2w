@@ -50,9 +50,6 @@ fn parse_expr_test(){
 		("0XFEu", Expr::LitUnsignedInt(254)),
 		("\"abc\"", Expr::LitString("abc".to_owned())),
 		("my_var", Expr::Id("my_var".to_owned())),
-		("{4, null, true}", Expr::LitArr(
-			vec![Expr::LitSignedInt(4), Expr::LitNull, Expr::LitBool(true)]
-		)),
 		("array[5u]", Expr::Index(
 			Box::new(Expr::Id("array".to_owned())),
 			Box::new(Expr::LitUnsignedInt(5))
@@ -87,7 +84,7 @@ fn parse_expr_test(){
 			BinaryOp::Add,
 			Box::new(Expr::LitNull)
 		)),
-		("!f(cast(u8*, x), {a.x, ~{null}}) + 1",
+		("!f(cast(u8*, x), ~-x) + 1",
 			Expr::Binop(
 				Box::new(Expr::Unop(
 					UnaryOp::Lognot,
@@ -100,18 +97,17 @@ fn parse_expr_test(){
 								))),
 								Box::new(Expr::Id("x".to_owned()))
 							),
-							Expr::LitArr(vec![
-								Expr::Proj(
-									Box::new(Expr::Id("a".to_owned())),
-									"x".to_owned()
-								),
-								Expr::Unop(
-									UnaryOp::Bitnot,
-									Box::new(Expr::LitArr(vec![
-										Expr::LitNull
-									]))
+							Expr::Unop(
+								UnaryOp::Bitnot,
+								Box::new(
+									Expr::Unop(
+										UnaryOp::Neg,
+										Box::new(
+											Expr::Id("x".to_owned())
+										)
+									)
 								)
-							])
+							)
 						]
 					))
 				)),
@@ -316,7 +312,6 @@ mod typechecking_tests {
 		use std::collections::HashMap;
 		assert_eq!(setup_expr("true").unwrap(), Bool);
 		assert_eq!(setup_expr("38").unwrap(), Int{signed:true, size: IntSize::Size64});
-		assert_eq!(setup_expr("{1, 2, 3}").unwrap(), Array{length: 3, typ: Box::new(Int{signed: true, size: IntSize::Size64})});
 		//Can't index off of array literals
 		//assert_eq!(setup_expr("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
 		let (mut ctxt, _) = get_empty_localtypecontext();

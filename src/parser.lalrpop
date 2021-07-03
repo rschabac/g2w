@@ -160,8 +160,6 @@ PrimaryExpr: ast::Expr = {
 
 	<id:Identifier> => ast::Expr::Id(id),
 
-	"{" <exprs:Comma<Expr>> "}" => ast::Expr::LitArr(exprs),
-
 	"(" <e:Expr> ")" => e
 }
 

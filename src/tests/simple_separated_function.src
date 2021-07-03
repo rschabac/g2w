@@ -1,0 +1,23 @@
+/*0
+size = 0, capacity = 0
+*/
+struct vec@<separated 'T>{
+	'T* data;
+	u64 size;
+	u64 capacity;
+}
+
+struct vec@<'T> vec_new@<separated 'T>(u64 capacity) {
+	struct vec@<'T> result;
+	result.size = 0u;
+	result.capacity = capacity;
+	result.data = null;
+	return result;
+}
+
+i32 main(){
+	struct vec@<i64> v;
+	v = vec_new@<i64>(0u);
+	printf("size = %lu, capacity = %lu%c", v.size, v.capacity, 10);
+	return cast(i32, 0);
+}

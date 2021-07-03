@@ -1,0 +1,112 @@
+/*0
+1, 2, 3, 4, 5
+v.size = 5, v.capacity = 8
+popped 5, v.size = 4, v.capacity = 4
+popped 4, v.size = 3, v.capacity = 4
+popped 3, v.size = 2, v.capacity = 2
+popped 2, v.size = 1, v.capacity = 1
+popped 1, v.size = 0, v.capacity = 1
+partial_sums.data[99] = 4851, sum of first 99 integers = 4851
+partial_sums.size = 100, partial_sums.capacity = 128
+*/
+struct vec@<separated 'T> {
+	'T* data;
+	u64 size;
+	u64 capacity;
+}
+
+struct vec@<'T> vec_new@<separated 'T>(u64 capacity) {
+	struct vec@<'T> result;
+	if capacity != 0u {
+		result.data = cast('T*, malloc(capacity * sizeof('T)));
+	} else {
+		//can type_for_lit_nulls figure this out?
+		result.data = null;
+		//result.data = cast('T*, null);
+	}
+	result.size = 0u;
+	result.capacity = capacity;
+	return result;
+}
+
+void vec_delete@<separated 'T>(struct vec@<'T> this){
+	free(cast(void*, this.data));
+}
+
+void vec_push@<separated 'T>(struct vec@<'T>* this, 'T x){
+	if this.size == this.capacity {
+		//reallocate
+		this.capacity = this.capacity * 2u;
+		'T* new_alloc;
+		new_alloc = cast('T*, malloc(this.capacity * sizeof('T)));
+		u64 index;
+		index = 0u;
+		while index < this.size {
+			new_alloc[index] = this.data[index];
+			index = index + 1u;
+		}
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+	}
+	this.data[this.size] = x;
+	this.size = this.size + 1u;
+}
+
+'T vec_pop@<separated 'T>(struct vec@<'T>* this) {
+	'T result;
+	result = this.data[this.size - 1u];
+	this.size = this.size - 1u;
+	if this.capacity == 2u * this.size {
+		//copy data to smaller allocation
+		'T* new_alloc;
+		new_alloc = cast('T*, malloc(this.size * sizeof('T)));
+		u64 index;
+		index = 0u;
+		while index < this.size {
+			new_alloc[index] = this.data[index];
+			index = index + 1u;
+		}
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+		this.capacity = this.size;
+	}
+	return result;
+}
+
+i32 main(){
+	struct vec@<u64> v;
+	v = vec_new@<u64>(4u);
+	vec_push@<u64>(&v, 1u);
+	vec_push@<u64>(&v, 2u);
+	vec_push@<u64>(&v, 3u);
+	vec_push@<u64>(&v, 4u);
+	vec_push@<u64>(&v, 5u);
+	printf("%ld, %ld, %ld, %ld, %ld%c", v.data[0], v.data[1], v.data[2], v.data[3], v.data[4], 10);
+	printf("v.size = %lu, v.capacity = %lu%c", v.size, v.capacity, 10);
+	printf("popped %ld, v.size = %lu, v.capacity = %lu%c", vec_pop@<u64>(&v), v.size, v.capacity, 10);
+	printf("popped %ld, v.size = %lu, v.capacity = %lu%c", vec_pop@<u64>(&v), v.size, v.capacity, 10);
+	printf("popped %ld, v.size = %lu, v.capacity = %lu%c", vec_pop@<u64>(&v), v.size, v.capacity, 10);
+	printf("popped %ld, v.size = %lu, v.capacity = %lu%c", vec_pop@<u64>(&v), v.size, v.capacity, 10);
+	printf("popped %ld, v.size = %lu, v.capacity = %lu%c", vec_pop@<u64>(&v), v.size, v.capacity, 10);
+
+	vec_delete@<u64>(v);
+
+	struct vec@<i64> partial_sums;
+	partial_sums = vec_new@<i64>(2u);
+	i64 acc;
+	acc = 0;
+	i64 i;
+	i = 0;
+	while i < 100 {
+		//printf("pushing %ld, i = %ld%c", acc, i, 10);
+		vec_push@<i64>(&partial_sums, acc);
+		acc = acc + i;
+		i = i + 1;
+	}
+	i = 0;
+	printf("partial_sums.data[99] = %ld, sum of first 99 integers = %ld%c", partial_sums.data[99], (99 * 98) / 2, 10);
+
+	printf("partial_sums.size = %lu, partial_sums.capacity = %lu%c", partial_sums.size, partial_sums.capacity, 10);
+
+	return cast(i32, 0);
+}

@@ -1,0 +1,38 @@
+/*0
+123
+*/
+i32 main(){
+	struct A@<i64**> x;
+	x.af1 = cast(i16, 123);
+	f@<i64>(&x);
+	return cast(i32, 0);
+}
+
+struct A@<separated 'A>{
+	i16 af1;
+	'A[5] af2;
+}
+
+void f@<separated 'F>(struct A@<'F**>* p){
+	struct A@<'F**> copy;
+	//manually memcpy
+	u64 i;
+	i = 0u;
+	while i < sizeof(struct A@<'F**>) {
+		*(cast(u8*, &copy) + i) = *(cast(u8*, p) + i);
+		i = i + 1u;
+	}
+	struct B@<'F**> b;
+	b.bf1 = copy;
+	b.bf2 = copy.af2[3];
+	g@<'F**>(b);
+}
+
+struct B@<separated 'B>{
+	'B bf2;
+	struct A@<'B> bf1;
+}
+
+void g@<separated 'G>(struct B@<'G> s){
+	printf("%d%c", cast(i32, s.bf1.af1), 10);
+}
