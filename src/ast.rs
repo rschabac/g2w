@@ -205,6 +205,7 @@ pub enum PolymorphMode{
 
 #[derive(Debug, PartialEq)]
 pub enum Gdecl{
+	Extern{ret_type: Option<Ty>, name: String, arg_types: Vec<Ty>},
 	GVarDecl(Ty, String),
 	GFuncDecl{ret_type: Option<Ty>, name: String, args: Vec<(Ty, String)>, body: Block},
 	GStructDecl{name: String, fields: Vec<(Ty, String)>},
@@ -238,7 +239,14 @@ pub struct GenericFunc{
 	pub param: String,
 }
 
+pub struct ExternalFunc{
+	pub name: String,
+	pub ret_type: Option<Ty>,
+	pub arg_types: Vec<Ty>
+}
+
 pub struct Program{
+	pub external_funcs: Vec<ExternalFunc>,
 	pub global_vars: Vec<(Ty, String)>,
 	pub funcs: Vec<Func>,
 	pub structs: Vec<Struct>,
@@ -251,6 +259,7 @@ pub struct Program{
 impl From<Vec<Gdecl>> for Program {
 	fn from(gdecls: Vec<Gdecl>) -> Self {
 		let mut result = Program{
+			external_funcs: Vec::new(),
 			global_vars: Vec::new(),
 			funcs: Vec::new(),
 			structs: Vec::new(),
@@ -262,6 +271,9 @@ impl From<Vec<Gdecl>> for Program {
 		use Gdecl::*;
 		for gdecl in gdecls.into_iter() {
 			match gdecl {
+				Extern{ret_type, name, arg_types} => result.external_funcs.push(ExternalFunc{
+					name, ret_type, arg_types
+				}),
 				GVarDecl(t, s) => result.global_vars.push((t, s)),
 				GFuncDecl{ret_type, name, args, body} => result.funcs.push(Func{
 					ret_type, name, args, body

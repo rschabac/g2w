@@ -9,6 +9,10 @@ popped 1, v.size = 0, v.capacity = 1
 partial_sums.data[99] = 4851, sum of first 99 integers = 4851
 partial_sums.size = 100, partial_sums.capacity = 128
 */
+
+extern void* malloc(u64);
+extern void free(void*);
+
 struct vec@<separated 'T> {
 	'T* data;
 	u64 size;

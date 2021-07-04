@@ -5,6 +5,10 @@
 13
 14
 */
+
+extern void* malloc(u64);
+extern void free(void*);
+
 struct vec_i32 {
 	i32* data;
 	u64 size;

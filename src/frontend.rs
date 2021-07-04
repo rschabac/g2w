@@ -858,7 +858,7 @@ const PARAM_SIZE_NAME: &str = "__param_size";
 //value should be written to. It's actual llvm type is i8*.
 const RET_LOC_NAME: &str = "__ret_loc";
 
-//the name of the builting llvm memcpy function
+//the name of the builtin llvm memcpy function
 const LLVM_MEMCPY_FUNC_NAME: &str = "llvm.memcpy.p0i8.p0i8.i64";
 
 //maximum depth for instatiating separated functions
@@ -1791,6 +1791,16 @@ fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, type_decl
 	(ll_ty.clone(), llvm::GlobalDecl::GConst(ll_ty, initializer))
 }
 
+fn cmp_external_decl(e: &ast::ExternalFunc, structs: &typechecker::StructContext) -> (String, llvm::Ty, Vec<llvm::Ty>) {
+	let mut dummy_struct_queue = SeparatedStructInstQueue::new();
+	let refcell = RefCell::new(&mut dummy_struct_queue);
+	(
+		e.name.clone(),
+		e.ret_type.as_ref().map(|t| cmp_ty(t, structs, None, None, &refcell)).unwrap_or(llvm::Ty::Void),
+		e.arg_types.iter().map(|t| cmp_ty(t, structs, None, None, &refcell)).collect()
+	)
+}
+
 //when insting this, replace all occurences of its type var in fields with type_param
 #[derive(Debug)]
 struct SeparatedStructInst{
@@ -1934,15 +1944,6 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 		type_decls,
 		global_decls,
 		func_decls: cmped_funcs,
-		external_decls: vec![
-				("malloc".to_owned(),
-				llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-				vec![llvm::Ty::Int{bits: 64, signed: false}]),
-
-				("free".to_owned(),
-				llvm::Ty::Void,
-				vec![llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))]
-				)
-			]
+		external_decls: prog.external_funcs.iter().map(|e| cmp_external_decl(e, &prog_context.structs)).collect()
 	}
 }

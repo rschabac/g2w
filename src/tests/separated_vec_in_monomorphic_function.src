@@ -7,6 +7,10 @@
 5
 6
 */
+
+extern void* malloc(u64);
+extern void free(void*);
+
 struct vec@<separated 'T>{
 	'T* data;
 	u64 size;

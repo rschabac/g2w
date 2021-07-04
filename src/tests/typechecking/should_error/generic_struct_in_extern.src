@@ -1,0 +1,6 @@
+struct A@<separated 'A>{
+	'A* x;
+	u32 y;
+	'A z;
+}
+extern struct A@<i32> f();

@@ -108,25 +108,6 @@ fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext, current_t
 	}
 }
 
-fn get_builtins() -> FuncContext {
-	//printf functions do not go here, they are handled specially
-	use ast::Ty::*;
-	let mut result = HashMap::new();
-	result.insert("malloc".to_owned(), FuncType::NonGeneric{
-		return_type: Some(Ptr(None)),
-		args: vec![
-			Int{signed: false, size: ast::IntSize::Size64}
-		]
-	});
-	result.insert("free".to_owned(), FuncType::NonGeneric{
-		return_type: None,
-		args: vec![
-			Ptr(None)
-		]
-	});
-	result
-}
-
 //when typechecking a function call, it the function is one of these, the
 //number and type of arguments are not checked (each individual argument must
 //still be well-typed though).
@@ -955,6 +936,19 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 	Ok(())
 }
 
+//makes sure that a type declared in an extern function is compatible with the C type system
+//No TypeVars or GenericStructs, either directly contained within struct fields
+fn type_is_c_compatible(t: &ast::Ty, structs: &StructContext) -> bool { use ast::Ty::*; match t {
+	Ptr(Some(boxed)) => type_is_c_compatible(boxed as &ast::Ty, structs),
+	Array{typ, ..} => type_is_c_compatible(typ as &ast::Ty, structs),
+	Struct(s) => { match structs.get(s).unwrap() {
+		StructType::Generic{..} => panic!("struct {} is a generic struct in the context, should have been caught by now by calling all_struct_names_valid", s),
+		StructType::NonGeneric(fields) => fields.iter().all(|(_, field_ty)| type_is_c_compatible(field_ty, structs))
+	}},
+	TypeVar(_) | GenericStruct{..} => false,
+	_ => true
+}}
+
 pub struct ProgramContext {
 	pub structs: StructContext,
 	pub funcs: FuncContext,
@@ -971,7 +965,6 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			make sure each field has a valid type
 	create FuncContext:
 	create GlobalContext:
-		add builtins to a FuncContext
 		for each GFuncDecl (or GGenericFuncDecl, later):
 			make sure a function or global var with this name does not already exist
 			make sure the type signature of the function contains valid types
@@ -1029,10 +1022,36 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 	}}
 	traverse_struct_context(&struct_context)?;
 
-	let mut func_context: FuncContext = get_builtins();
+	let mut func_context: FuncContext = HashMap::new();
 	let mut global_context: GlobalContext = HashMap::new();
 	use ast::Gdecl::*;
-	for g in gdecls.iter().by_ref(){ match g {
+
+	//first, check all external decls for c compatibility, and add them to the func_context
+	for g in gdecls.iter() { match g {
+		Extern{ret_type, name, arg_types} => {
+			if global_context.contains_key(name) {
+				return Err(format!("Cannot declare an extern function named \"{}\", there is already a global variable with that name", name));
+			}
+			for (i, arg_type) in arg_types.iter().enumerate() {
+				all_struct_names_valid(arg_type, &struct_context, &None)?;
+				if !type_is_c_compatible(arg_type, &struct_context) {
+					return Err(format!("argument {} to extern function {} has type {:?}, which is not C-compatible", i+1, name, arg_type));
+				}
+			}
+			if let Some(ret) = ret_type {
+				all_struct_names_valid(ret, &struct_context, &None)?;
+				if !type_is_c_compatible(ret, &struct_context) {
+					return Err(format!("extern function {} has return type {:?}, which is not C-compatible", name, ret));
+				}
+			}
+			func_context.insert(name.clone(), FuncType::NonGeneric{
+				return_type: ret_type.clone(),
+				args: arg_types.clone()
+			});
+		},
+		_ => ()
+	}}
+	for g in gdecls.iter() { match g {
 		GFuncDecl{ret_type, name: func_name, args, ..} => {
 			if func_context.contains_key(func_name) {
 				return Err(format!("function '{}' is declared more than once", func_name));
@@ -1094,7 +1113,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				mode: *mode,
 				type_var: param.clone(),
 			});
-		}
+		},
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
 			all_struct_names_valid(&t, &struct_context, &None)?;
@@ -1114,7 +1133,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			global_context.insert(name.clone(), t.clone());
 		},
-		GStructDecl{..} | GGenericStructDecl{..} => ()
+		GStructDecl{..} | GGenericStructDecl{..} | Extern{..} => ()
 	}};
 	for g in gdecls.iter().by_ref(){ match g {
 		GFuncDecl{ret_type, name, args, body} => {
@@ -1153,15 +1172,15 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				&& args[0] == ast::Ty::Int{
 					signed: true, size: ast::IntSize::Size32
 				}
-				&& args[1] == ast::Ty::Ptr(Some(Box::new(
+				&& args[1] == ast::Ty::Ptr(Some(Box::new(ast::Ty::Ptr(Some(Box::new(
 					ast::Ty::Int{
 						signed: false, size: ast::IntSize::Size8
 					}
-				)))
+				))))))
 			;
 			let args_are_correct = args_are_correct_simple || args_are_correct_extended;
 			if !return_type_is_correct || !args_are_correct {
-				return Err("main() must have type i32 main() or i32 main(i32, u8*)".to_owned());
+				return Err("main() must have type i32 main() or i32 main(i32, u8**)".to_owned());
 			}
 		},
 		None => ()
