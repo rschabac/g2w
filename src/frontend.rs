@@ -2,7 +2,9 @@ use crate::ast;
 use crate::typechecker;
 use crate::llvm;
 use std::collections::{HashSet, HashMap, VecDeque};
-use std::cell::RefCell; //will need to replace this with a Mutex to parallelize
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use rayon::prelude::*;
 
 pub struct Context<'a>{
 	locals: HashMap<String, (llvm::Ty, llvm::Operand)>,
@@ -10,8 +12,8 @@ pub struct Context<'a>{
 	funcs: &'a typechecker::FuncContext,
 	structs: &'a typechecker::StructContext,
 	mode: Option<ast::PolymorphMode>,
-	struct_inst_queue: RefCell<&'a mut SeparatedStructInstQueue>,
-	func_inst_queue: RefCell<&'a mut SeparatedFuncInstQueue>,
+	struct_inst_queue: &'a Mutex<SeparatedStructInstQueue>,
+	func_inst_queue: &'a Mutex<SeparatedFuncInstQueue>,
 	current_separated_type_param: Option<(&'a ast::Ty, llvm::Ty)>,
 	current_separated_func_depth: u8,
 }
@@ -60,14 +62,10 @@ impl std::fmt::Debug for Component{
 
 pub type Stream = Vec<Component>;
 
-//If I want to parallelize compilation, each thread will need its own gensym
-static mut GENSYM_COUNT: usize = 0;
+//static mut GENSYM_COUNT: usize = 0;
+static GENSYM_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub fn gensym(s: &str) -> String {
-	let n_copy;
-	unsafe {
-		GENSYM_COUNT += 1;
-		n_copy = GENSYM_COUNT;
-	}
+	let n_copy: usize = GENSYM_COUNT.fetch_add(1, Ordering::Relaxed);
 	let n_string = n_copy.to_string();
 	let mut result_string = String::with_capacity(s.len() + n_string.len() + 1);
 	result_string.push('_');
@@ -82,7 +80,7 @@ if cmp_ty(struct A@<'f>) is called from a generic function,
 	cmp_{exp,stmt,...} is responsible for knowing the right type for 'f
 	(either void* if it is an erased function, or its type param if it is separated)
 */
-fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacement: Option<&ast::Ty>, mode: Option<ast::PolymorphMode>, struct_inst_queue: &RefCell<&mut SeparatedStructInstQueue>) -> llvm::Ty {
+fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacement: Option<&ast::Ty>, mode: Option<ast::PolymorphMode>, struct_inst_queue: &Mutex<SeparatedStructInstQueue>) -> llvm::Ty {
 	if t.is_DST(structs, mode) {
 		return llvm::Ty::Dynamic(t.clone());
 	}
@@ -111,7 +109,7 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 							possibly_replaced_type_param = possibly_replaced_type_param.replace_type_var_with(replacement)
 						}
 					};
-					struct_inst_queue.borrow_mut().push(name.clone(), possibly_replaced_type_param.clone());
+					struct_inst_queue.lock().unwrap().push(name.clone(), possibly_replaced_type_param.clone());
 					//call cmp_ty on the type param, but do nothing with it, just to add it to the struct inst queue in case it is a separated struct
 					cmp_ty(type_param, structs, type_var_replacement, mode, struct_inst_queue);
 					llvm::Ty::NamedStruct(mangle(name, &possibly_replaced_type_param), name.clone(), Some(possibly_replaced_type_param))
@@ -1032,7 +1030,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 	}
 	if callee_mode == Some(ast::PolymorphMode::Separated) {
 		//add this function instatiation to the func queue
-		ctxt.func_inst_queue.borrow_mut().push(func_name.clone(), concretized_type_param.as_ref().unwrap().clone(), ctxt.current_separated_func_depth + 1);
+		ctxt.func_inst_queue.lock().unwrap().push(func_name.clone(), concretized_type_param.as_ref().unwrap().clone(), ctxt.current_separated_func_depth + 1);
 	}
 	let possibly_mangled_name: String = match callee_mode {
 		None | Some(ast::PolymorphMode::Erased) => func_name.clone(),
@@ -1635,8 +1633,8 @@ enum FuncInst<'a, 'b>{
 fn cmp_func(f: &FuncInst, 
 			prog_context: &typechecker::ProgramContext,
 			global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>,
-			struct_inst_queue: &mut SeparatedStructInstQueue,
-			func_inst_queue: &mut SeparatedFuncInstQueue)
+			struct_inst_queue: &Mutex<SeparatedStructInstQueue>,
+			func_inst_queue: &Mutex<SeparatedFuncInstQueue>)
 			-> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
 	//compiling a non-generic function and an erased function are nearly the same thing, but PARAM_SIZE_NAME needs to be added to the params
 	let mut context = Context{
@@ -1645,8 +1643,8 @@ fn cmp_func(f: &FuncInst,
 		funcs: &prog_context.funcs,
 		structs: &prog_context.structs,
 		mode: None,
-		struct_inst_queue: RefCell::new(struct_inst_queue),
-		func_inst_queue: RefCell::new(func_inst_queue),
+		struct_inst_queue,
+		func_inst_queue,
 		current_separated_type_param: None,
 		current_separated_func_depth: 0,
 	};
@@ -1806,16 +1804,15 @@ fn get_default_constant(ll_ty: &llvm::Ty, structs: &LLStructContext) -> llvm::Co
 	}
 }
 
-fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, type_decls: &mut LLStructContext, struct_inst_queue: &mut SeparatedStructInstQueue) -> (llvm::Ty, llvm::GlobalDecl) {
-	let refcell = RefCell::new(struct_inst_queue);
-	let ll_ty = cmp_ty(typ, structs, None, None, &refcell);
+fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, type_decls: &mut LLStructContext, struct_inst_queue: &Mutex<SeparatedStructInstQueue>) -> (llvm::Ty, llvm::GlobalDecl) {
+	let ll_ty = cmp_ty(typ, structs, None, None, struct_inst_queue);
 	//if any structs were added to the struct queue, they need to be compiled and added to ll_structs so that get_default_constant can see them
-	while let Some(SeparatedStructInst{name, type_param}) = {let mut borrow = refcell.borrow_mut(); let result = (*borrow).poll(); drop(borrow); result} {
+	while let Some(SeparatedStructInst{name, type_param}) = {let mut guard = struct_inst_queue.lock().unwrap(); let result = (*guard).poll(); drop(guard); result} {
 		let fields = match structs.get(name.as_str()).unwrap() {
 			typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
 			_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
 		};
-		let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, structs, Some(&type_param), Some(ast::PolymorphMode::Separated), &refcell)).collect();
+		let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, structs, Some(&type_param), Some(ast::PolymorphMode::Separated), struct_inst_queue)).collect();
 		let mangled_name = mangle(name.as_str(), &type_param);
 		type_decls.insert(mangled_name, cmped_tys);
 	}
@@ -1824,12 +1821,12 @@ fn cmp_global_var(typ: &ast::Ty, structs: &typechecker::StructContext, type_decl
 }
 
 fn cmp_external_decl(e: &ast::ExternalFunc, structs: &typechecker::StructContext) -> (String, llvm::Ty, Vec<llvm::Ty>) {
-	let mut dummy_struct_queue = SeparatedStructInstQueue::new();
-	let refcell = RefCell::new(&mut dummy_struct_queue);
+	let dummy_struct_queue = SeparatedStructInstQueue::new();
+	let mutex = Mutex::new(dummy_struct_queue);
 	(
 		e.name.clone(),
-		e.ret_type.as_ref().map(|t| cmp_ty(t, structs, None, None, &refcell)).unwrap_or(llvm::Ty::Void),
-		e.arg_types.iter().map(|t| cmp_ty(t, structs, None, None, &refcell)).collect()
+		e.ret_type.as_ref().map(|t| cmp_ty(t, structs, None, None, &mutex)).unwrap_or(llvm::Ty::Void),
+		e.arg_types.iter().map(|t| cmp_ty(t, structs, None, None, &mutex)).collect()
 	)
 }
 
@@ -1918,14 +1915,13 @@ impl SeparatedFuncInstQueue{
 
 pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
 	let mut type_decls: LLStructContext = HashMap::new();
-	let mut struct_inst_queue: SeparatedStructInstQueue = SeparatedStructInstQueue::new();
-	let mut func_inst_queue: SeparatedFuncInstQueue = SeparatedFuncInstQueue::new();
+	let mut struct_inst_queue: Mutex<SeparatedStructInstQueue> = Mutex::new(SeparatedStructInstQueue::new());
+	let mut func_inst_queue: Mutex<SeparatedFuncInstQueue> = Mutex::new(SeparatedFuncInstQueue::new());
 	//initially, put all non-generic structs in the type_decls
 	for s in prog.structs.iter() {
 		//any structs that are dynamically sized do not get declared, llvm does not know about them
 		if s.fields.iter().any(|(t, _)| t.is_DST(&prog_context.structs, None)) {continue}
-		let refcell = RefCell::new(&mut struct_inst_queue);
-		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, None, None, &refcell)).collect();
+		let cmped_tys = s.fields.iter().map(|(t, _)| cmp_ty(t, &prog_context.structs, None, None, &struct_inst_queue)).collect();
 		type_decls.insert(s.name.clone(), cmped_tys);
 	}
 	//erased structs do not get declared, llvm does not know about them
@@ -1934,43 +1930,61 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 	let mut global_decls: Vec<(String, llvm::GlobalDecl)> = Vec::with_capacity(prog.global_vars.len());
 	let mut global_locs: HashMap<String, (llvm::Ty, llvm::Operand)> = HashMap::new();
 	for (typ, name) in prog.global_vars.iter() {
-		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &mut type_decls, &mut struct_inst_queue);
+		let (ll_typ, ll_gdecl) = cmp_global_var(typ, &prog_context.structs, &mut type_decls, &struct_inst_queue);
 		global_decls.push( (name.clone(), ll_gdecl) );
 		global_locs.insert(name.clone(), (ll_typ, llvm::Operand::Global(name.clone())));
 	}
 	let mut cmped_funcs: Vec<llvm::Func> = Vec::new();
-	for func in prog.funcs.iter() {
-		let (ll_func, extra_globals) = cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs, &mut struct_inst_queue, &mut func_inst_queue);
-		cmped_funcs.push(ll_func);
+	let cmped_funcs_and_extra_globals: Vec<(llvm::Func, Vec<(String, llvm::GlobalDecl)>)> = prog.funcs.par_iter().map(|func| {
+		cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+	}).collect();
+	for (cmped_func, extra_globals) in cmped_funcs_and_extra_globals.into_iter() {
+		cmped_funcs.push(cmped_func);
 		global_decls.extend(extra_globals.into_iter());
 	}
-	for func in prog.erased_funcs.iter() {
-		let (ll_func, extra_globals) = cmp_func(&FuncInst::Erased(func), prog_context, &global_locs, &mut struct_inst_queue, &mut func_inst_queue);
-		cmped_funcs.push(ll_func);
+	let cmped_erased_funcs_and_extra_globals: Vec<(llvm::Func, Vec<(String, llvm::GlobalDecl)>)> = prog.erased_funcs.par_iter().map(|func| {
+		cmp_func(&FuncInst::Erased(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+	}).collect();
+	for (cmped_func, extra_globals) in cmped_erased_funcs_and_extra_globals.into_iter() {
+		cmped_funcs.push(cmped_func);
 		global_decls.extend(extra_globals.into_iter());
 	}
 	//compiling the non-generic funcs and erased funcs will put things in both inst queues, now iterate over those until they are empty
 	//insting a struct will never cause a func inst, so iterate over the func inst queue first, then the struct inst queue
-	while let Some(SeparatedFuncInst{name, type_param, depth}) = func_inst_queue.poll() {
-		if depth > SEPARATED_FUNC_MAX_DEPTH {
-			panic!("reached the maximum separated function instantiation depth when processing function {}@<{:?}>", name, type_param);
+	loop {
+		let queue_entries: Vec<SeparatedFuncInst> = func_inst_queue.get_mut().unwrap().queue.drain(..).collect();
+		if queue_entries.is_empty() {break}
+		let cmped_funcs_and_global_decls: Vec<(llvm::Func, Vec<(String, llvm::GlobalDecl)>)> = queue_entries.par_iter().map(|SeparatedFuncInst{name, type_param, depth}| {
+			if *depth > SEPARATED_FUNC_MAX_DEPTH {
+				panic!("reached the maximum separated function instantiation depth when processing function {}@<{:?}>", name, type_param);
+			}
+			//I only know the name of the function, so I have to iterate over the all the separated functions to find the one with this name
+			let func: &ast::GenericFunc = prog.separated_funcs.iter().find(|gfunc: &&ast::GenericFunc| gfunc.name.as_str() == name).unwrap();
+			cmp_func(&FuncInst::Separated(&func, &type_param, *depth), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+		}).collect();
+		for (cmped_func, extra_globals) in cmped_funcs_and_global_decls.into_iter() {
+			cmped_funcs.push(cmped_func);
+			global_decls.extend(extra_globals.into_iter());
 		}
-		//I only know the name of the function, so I have to iterate over the all the separated functions to find the one with this name
-		let func: &ast::GenericFunc = prog.separated_funcs.iter().find(|gfunc: &&ast::GenericFunc| gfunc.name == name).unwrap();
-		let (ll_func, extra_globals) = cmp_func(&FuncInst::Separated(&func, &type_param, depth), prog_context, &global_locs, &mut struct_inst_queue, &mut func_inst_queue);
-		cmped_funcs.push(ll_func);
-		global_decls.extend(extra_globals.into_iter());
+		
 	}
-	while let Some(SeparatedStructInst{name, type_param}) = struct_inst_queue.poll() {
-		//separated structs containing DSTs should never be added to the struct queue
-		debug_assert!(!(ast::Ty::GenericStruct{name: name.clone(), type_var: Box::new(type_param.clone())}).is_DST(&prog_context.structs, Some(ast::PolymorphMode::Separated)), "struct queue contains {{ name: '{}', type_param: {:?} }}, which is a DST", &name, &type_param);
-		let refcell = RefCell::new(&mut struct_inst_queue);
-		let fields = match prog_context.structs.get(name.as_str()).unwrap() {
-			typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
-			_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
-		};
-		let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, Some(&type_param), Some(ast::PolymorphMode::Separated), &refcell)).collect();
-		type_decls.insert(mangle(name.as_str(), &type_param), cmped_tys);
+	//while let Some(SeparatedStructInst{name, type_param}) = struct_inst_queue.get_mut().unwrap().poll() {
+	loop {
+		let queue_entries: Vec<SeparatedStructInst> = struct_inst_queue.get_mut().unwrap().queue.drain(..).collect();
+		if queue_entries.is_empty() {break}
+		let names_and_cmped_tys: Vec<(String, Vec<llvm::Ty>)> = queue_entries.par_iter().map(|SeparatedStructInst{name, type_param}| {
+			//separated structs containing DSTs should never be added to the struct queue
+			debug_assert!(!(ast::Ty::GenericStruct{name: name.clone(), type_var: Box::new(type_param.clone())}).is_DST(&prog_context.structs, Some(ast::PolymorphMode::Separated)), "struct queue contains {{ name: '{}', type_param: {:?} }}, which is a DST", &name, &type_param);
+			let fields = match prog_context.structs.get(name.as_str()).unwrap() {
+				typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
+				_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
+			};
+			let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, Some(&type_param), Some(ast::PolymorphMode::Separated), &struct_inst_queue)).collect();
+			let mangled_name = mangle(name.as_str(), type_param);
+			(mangled_name, cmped_tys)
+			//type_decls.insert(mangle(name.as_str(), &type_param), cmped_tys);
+		}).collect();
+		type_decls.extend(names_and_cmped_tys.into_iter());
 	}
 	let mut external_decls: Vec<_> = prog.external_funcs.iter().map(|e| cmp_external_decl(e, &prog_context.structs)).collect();
 	external_decls.push( ("__errno_location".to_owned(), llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})), vec![]) );

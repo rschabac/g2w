@@ -292,7 +292,7 @@ match e {
 				},
 				Some(Generic{..}) => panic!("Proj: base type was {}, but struct context contained a generic struct", base_typ)
 			},
-			GenericStruct{type_var: ref type_param, name: ref struct_name} =>  match ctxt.structs.get(struct_name) {
+			GenericStruct{type_var: ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
 				None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 				Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
 				Some(Generic{..}) =>  match ctxt.structs.get(struct_name) {
@@ -978,7 +978,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 	typecheck all functions with typecheck_func_decl (or typecheck_generic_func_decl, later)
 	*/
 	let mut struct_context: StructContext = HashMap::new();
-	for g in gdecls.iter().by_ref(){ match g {
+	for g in gdecls.iter() { match g {
 		GStructDecl{name, fields} => {
 			if struct_context.contains_key(name){
 				return Err(format!("struct '{}' is declared more than once", name));
@@ -1029,29 +1029,26 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 	use ast::Gdecl::*;
 
 	//first, check all external decls for c compatibility, and add them to the func_context
-	for g in gdecls.iter() { match g {
-		Extern{ret_type, name, arg_types} => {
-			if global_context.contains_key(name) {
-				return Err(format!("Cannot declare an extern function named \"{}\", there is already a global variable with that name", name));
+	for g in gdecls.iter() { if let Extern{ret_type, name, arg_types} = g {
+		if global_context.contains_key(name) {
+			return Err(format!("Cannot declare an extern function named \"{}\", there is already a global variable with that name", name));
+		}
+		for (i, arg_type) in arg_types.iter().enumerate() {
+			all_struct_names_valid(arg_type, &struct_context, &None)?;
+			if !type_is_c_compatible(arg_type, &struct_context) {
+				return Err(format!("argument {} to extern function {} has type {:?}, which is not C-compatible", i+1, name, arg_type));
 			}
-			for (i, arg_type) in arg_types.iter().enumerate() {
-				all_struct_names_valid(arg_type, &struct_context, &None)?;
-				if !type_is_c_compatible(arg_type, &struct_context) {
-					return Err(format!("argument {} to extern function {} has type {:?}, which is not C-compatible", i+1, name, arg_type));
-				}
+		}
+		if let Some(ret) = ret_type {
+			all_struct_names_valid(ret, &struct_context, &None)?;
+			if !type_is_c_compatible(ret, &struct_context) {
+				return Err(format!("extern function {} has return type {:?}, which is not C-compatible", name, ret));
 			}
-			if let Some(ret) = ret_type {
-				all_struct_names_valid(ret, &struct_context, &None)?;
-				if !type_is_c_compatible(ret, &struct_context) {
-					return Err(format!("extern function {} has return type {:?}, which is not C-compatible", name, ret));
-				}
-			}
-			func_context.insert(name.clone(), FuncType::NonGeneric{
-				return_type: ret_type.clone(),
-				args: arg_types.clone()
-			});
-		},
-		_ => ()
+		}
+		func_context.insert(name.clone(), FuncType::NonGeneric{
+			return_type: ret_type.clone(),
+			args: arg_types.clone()
+		});
 	}}
 	for g in gdecls.iter() { match g {
 		GFuncDecl{ret_type, name: func_name, args, ..} => {

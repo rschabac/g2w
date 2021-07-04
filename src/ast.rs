@@ -96,6 +96,10 @@ impl Ty {
 			GenericStruct{name, type_var: type_param} => match structs.get(name.as_str()).unwrap() {
 				Generic{mode: PolymorphMode::Erased, fields: _, type_var: _} => true,
 				Generic{mode: PolymorphMode::Separated, fields, type_var: _} => {
+					/* parallel version, might not be worth it because most structs will not have that many fields
+					fields.par_iter()
+						.any(|(_, t)| t.clone().replace_type_var_with(type_param).is_DST(structs, mode))
+					*/
 					for field_ty in fields.iter().map(|(_, t)| t.clone()) {
 						if field_ty.replace_type_var_with(type_param).is_DST(structs, mode) {
 							return true;
