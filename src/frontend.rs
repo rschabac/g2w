@@ -46,6 +46,17 @@ pub enum Component{
 		//unless I need the location of a variable before I Alloca it?
 	//Entry(String, llvm::Instruction),		//instruction that needs to be moved to the entry block (usually an Alloca Instruction)
 }
+impl std::fmt::Debug for Component{
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		use Component::*;
+		match self {
+			Label(s) => writeln!(f, "label '{}'", s),
+			Instr(dest, instr) => writeln!(f, "instr %{} = {}", dest, instr),
+			Term(t) => writeln!(f, "term {}", t),
+			GlobalString(s, gdecl) => writeln!(f, "GlobalString '{}', {}", s, gdecl)
+		}
+	}
+}
 
 pub type Stream = Vec<Component>;
 
@@ -128,13 +139,9 @@ impl std::fmt::Debug for ExpResult {
 		writeln!(f, "llvm_typ: {:?}", self.llvm_typ)?;
 		writeln!(f, "llvm_op: {}", self.llvm_op)?;
 		writeln!(f, "stream:")?;
-		use Component::*;
-		for component in self.stream.iter() { match component {
-			Label(s) => writeln!(f, "label '{}'", s)?,
-			Instr(dest, instr) => writeln!(f, "instr %{} = {}", dest, instr)?,
-			Term(t) => writeln!(f, "term {}", t)?,
-			GlobalString(s, gdecl) => writeln!(f, "GlobalString '{}', {}", s, gdecl)?
-		}}
+		for component in self.stream.iter() {
+			write!(f, "{:?}", component)?;
+		}
 		Ok(())
 	}
 }
@@ -1091,6 +1098,18 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 //the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
 fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 	ast::Expr::Id(s) => {
+		if s == "errno" {
+			let op = gensym("errno_loc");
+			return ExpResult{
+				llvm_typ: llvm::Ty::Int{bits: 32, signed: true},
+				llvm_op: llvm::Operand::Local(op.clone()),
+				stream: vec![Component::Instr(op, llvm::Instruction::Call{
+					func_name: "__errno_location".to_owned(),
+					ret_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})),
+					args: vec![]
+				})]
+			}
+		}
 		let (ll_ty, ll_op) = ctxt.get_var(s);
 		ExpResult{
 			llvm_typ: ll_ty.clone(),
@@ -1489,16 +1508,21 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 				]
 			}));
 			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(None)));
+			expr_result.stream.push(Component::Label(gensym("unreachable_after_return")));
 			expr_result.stream
 		} else { //not returning a DST
 			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
 				Some((expr_result.llvm_typ, expr_result.llvm_op))
 			)));
+			expr_result.stream.push(Component::Label(gensym("unreachable_after_return")));
 			expr_result.stream
 		}
 	},
 	ast::Stmt::Return(None) => {
-		vec![Component::Term(llvm::Terminator::Ret(None))]
+		vec![
+			Component::Term(llvm::Terminator::Ret(None)),
+			Component::Label(gensym("unreachable_after_return"))
+		]
 	},
 	ast::Stmt::SCall(func_name, args) => {
 		let call_result = cmp_call(func_name.clone(), args, ctxt, None);
@@ -1560,11 +1584,6 @@ fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty
 	let mut stream = Vec::new();
 	for stmt in block.iter() {
 		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty));
-	}
-	//if the function returns void, a return statement can be elided. In this case, the stream
-	//will not end with a terminator, and a 'ret void' terminator should be added
-	if stream.is_empty() || !matches!(stream.last().unwrap(), Component::Term(_)) {
-		stream.push(Component::Term(llvm::Terminator::Ret(None)));
 	}
 	stream
 }
@@ -1698,7 +1717,20 @@ fn cmp_func(f: &FuncInst,
 		//a stack slot, and is not inserted into the context.
 		params.push( (llvm::Ty::Int{bits: 64, signed: false}, PARAM_SIZE_NAME.to_owned()) );
 	}
-	let body_stream = cmp_block(body, &mut context, &ll_ret_ty);
+	//if the function body is empty, I still need to add a 'ret void' terminator
+	let mut body_stream = if !body.is_empty() {
+		cmp_block(body, &mut context, &ll_ret_ty)
+	} else {
+		vec![Component::Term(llvm::Terminator::Ret(None))]
+	};
+	//if the last statement is a Return, then there will be a Label(unreachable) after it, which needs to be removed
+	if matches!(body_stream.last(), Some(Component::Label(_))) {
+		body_stream.pop();
+	}
+	if !matches!(body_stream.last(), Some(Component::Term(_))) {
+		debug_assert!(ret_ty.as_ref() == None, "last component of stream is not a terminator in function that does not return void");
+		body_stream.push(Component::Term(llvm::Terminator::Ret(None)));
+	}
 	//convert stream + body_stream to CFG
 	let mut cfg = llvm::CFG{
 		entry: Default::default(),
@@ -1940,10 +1972,12 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 		let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, Some(&type_param), Some(ast::PolymorphMode::Separated), &refcell)).collect();
 		type_decls.insert(mangle(name.as_str(), &type_param), cmped_tys);
 	}
+	let mut external_decls: Vec<_> = prog.external_funcs.iter().map(|e| cmp_external_decl(e, &prog_context.structs)).collect();
+	external_decls.push( ("__errno_location".to_owned(), llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})), vec![]) );
 	llvm::Program {
 		type_decls,
 		global_decls,
 		func_decls: cmped_funcs,
-		external_decls: prog.external_funcs.iter().map(|e| cmp_external_decl(e, &prog_context.structs)).collect()
+		external_decls
 	}
 }

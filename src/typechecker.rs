@@ -748,6 +748,8 @@ pub fn typecheck_func_decl(ctxt: &mut LocalTypeContext, funcs: &FuncContext, nam
 	for (arg_ty, arg_name) in args.iter().cloned() {
 		ctxt.locals.insert(arg_name, arg_ty);
 	}
+	//add errno to the LocalTypeContext as a local variable with type i32
+	ctxt.locals.insert("errno".to_owned(), ast::Ty::Int{signed: true, size: ast::IntSize::Size32});
 	let last_statement_definitely_returns = typecheck_block(ctxt, funcs, body, ret_type)?;
 	if ret_type.is_some() && !last_statement_definitely_returns {
 		return Err(format!("function '{}' might not return", name));

@@ -1,0 +1,15 @@
+/*1
+could not close fd -1, errno = 9: Bad file descriptor
+*/
+extern i32 close(i32);
+extern u8* strerror(i32);
+
+i32 main(i32 argc, u8** argv){
+	i32 fd;
+	fd = cast(i32, -1);
+	if close(fd) == cast(i32, -1) {
+		printf("could not close fd -1, errno = %d: %s%c", errno, strerror(errno), 10);
+		return cast(i32, 1);
+	}
+	return cast(i32, 0);
+}
