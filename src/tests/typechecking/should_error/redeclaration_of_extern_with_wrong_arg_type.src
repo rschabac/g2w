@@ -1,0 +1,2 @@
+extern void g(u8);
+extern void g(i8);

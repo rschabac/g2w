@@ -1033,6 +1033,26 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 		if global_context.contains_key(name) {
 			return Err(format!("Cannot declare an extern function named \"{}\", there is already a global variable with that name", name));
 		}
+		match func_context.get(name) {
+			Some(FuncType::NonGeneric{return_type, args}) => {
+				//extern declarations are allowed to be repeated if the have the same type
+				if return_type != ret_type {
+					return Err(format!("Two extern function declarations of {} do not have the same return type (Previously declared with return type {:?}, declared again with return type {:?})", name, return_type, ret_type));
+				}
+				if args.len() != arg_types.len() {
+					return Err(format!("Two extern function declarations of {} do not have the same number of arguments (Previously declared with {} args, declared again with {} args)", name, args.len(), arg_types.len()));
+				}
+				for (i, (expected_ty, arg_ty)) in args.iter().zip(arg_types.iter()).enumerate() {
+					if expected_ty != arg_ty {
+						return Err(format!("Two extern function declarations of {} do not have the same type for argument {} (Previously declared with argument type {:?}, declared again with aragument type {:?})", name, i, expected_ty, arg_ty));
+					}
+				}
+				//if it is already in the func context with the same types, no need to check those types
+				continue
+			},
+			None => (),
+			Some(FuncType::Generic{..}) => panic!("extern function {} already in func context as generic", name)
+		};
 		for (i, arg_type) in arg_types.iter().enumerate() {
 			all_struct_names_valid(arg_type, &struct_context, &None)?;
 			if !type_is_c_compatible(arg_type, &struct_context) {

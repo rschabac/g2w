@@ -3,6 +3,9 @@
 *.swo
 test.c
 output.ll
+output.s
+output.o
+a.out
 output
 temp.src
 temp2.src

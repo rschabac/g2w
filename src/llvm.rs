@@ -390,11 +390,12 @@ pub struct Program{
 	pub type_decls: HashMap<String, Vec<Ty>>,
 	pub global_decls: Vec<(String, GlobalDecl)>,
 	pub func_decls: Vec<Func>,
-	pub external_decls: Vec<(String, Ty, Vec<Ty>)>
+	pub external_decls: Vec<(String, Ty, Vec<Ty>)>,
+	pub target_triple: String
 }
 impl std::fmt::Display for Program {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		writeln!(f, "target triple = \"x86_64-pc-linux-gnu\"")?;
+		writeln!(f, "target triple = \"{}\"", self.target_triple)?;
 		for (name, types) in self.type_decls.iter() {
 			write!(f, "%{} = type {{", name)?;
 			for (i, ty) in types.iter().enumerate() {

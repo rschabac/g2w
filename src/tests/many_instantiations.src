@@ -1,0 +1,99 @@
+/*0
+*/
+
+extern void* malloc(u64);
+extern void free(void*);
+
+struct vec@<separated 'T> {
+	'T* data;
+	u64 size;
+	u64 capacity;
+}
+
+struct vec@<'T> vec_new@<separated 'T>(u64 capacity) {
+	struct vec@<'T> result;
+	if capacity != 0u {
+		result.data = cast('T*, malloc(capacity * sizeof('T)));
+	} else {
+		//can type_for_lit_nulls figure this out?
+		result.data = null;
+		//result.data = cast('T*, null);
+	}
+	result.size = 0u;
+	result.capacity = capacity;
+	return result;
+}
+
+void vec_delete@<separated 'T>(struct vec@<'T> this){
+	free(cast(void*, this.data));
+}
+
+void vec_push@<separated 'T>(struct vec@<'T>* this, 'T x){
+	if this.size == this.capacity {
+		//reallocate
+		this.capacity = this.capacity * 2u;
+		'T* new_alloc;
+		new_alloc = cast('T*, malloc(this.capacity * sizeof('T)));
+		u64 index;
+		index = 0u;
+		while index < this.size {
+			new_alloc[index] = this.data[index];
+			index = index + 1u;
+		}
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+	}
+	this.data[this.size] = x;
+	this.size = this.size + 1u;
+}
+
+'T vec_pop@<separated 'T>(struct vec@<'T>* this) {
+	'T result;
+	result = this.data[this.size - 1u];
+	this.size = this.size - 1u;
+	if this.capacity == 2u * this.size {
+		//copy data to smaller allocation
+		'T* new_alloc;
+		new_alloc = cast('T*, malloc(this.size * sizeof('T)));
+		u64 index;
+		index = 0u;
+		while index < this.size {
+			new_alloc[index] = this.data[index];
+			index = index + 1u;
+		}
+		free(cast(void*, this.data));
+		this.data = new_alloc;
+		this.capacity = this.size;
+	}
+	return result;
+}
+
+void vec_test@<separated 'T>('T val){
+	struct vec@<'T> v;
+	v = vec_new@<'T>(4u);
+	vec_push@<'T>(&v, val);
+	vec_pop@<'T>(&v);
+	vec_delete@<'T>(v);
+}
+
+i32 main(){
+	//signed ints
+	vec_test@<i8>(cast(i8, 0));
+	vec_test@<i16>(cast(i16, 0));
+	vec_test@<i32>(cast(i32, 0));
+	vec_test@<i64>(cast(i64, 0));
+
+	//unsigned ints
+	vec_test@<u8>(cast(u8, 0u));
+	vec_test@<u16>(cast(u16, 0u));
+	vec_test@<u32>(cast(u32, 0u));
+	vec_test@<u64>(cast(u64, 0u));
+
+	//pointers
+	vec_test@<i8*>(null);
+	vec_test@<i16*>(null);
+	vec_test@<i32*>(null);
+	vec_test@<i64*>(null);
+	
+	return cast(i32, 0);
+}

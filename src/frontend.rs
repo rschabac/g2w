@@ -16,6 +16,7 @@ pub struct Context<'a>{
 	func_inst_queue: &'a Mutex<SeparatedFuncInstQueue>,
 	current_separated_type_param: Option<(&'a ast::Ty, llvm::Ty)>,
 	current_separated_func_depth: u8,
+	errno_func_name: &'a str,
 }
 impl<'a> Context<'a> {
 	fn get_var(&self, name: &str) -> &(llvm::Ty, llvm::Operand) {
@@ -949,7 +950,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			//if cmp_ty returns a Dynamic(_) here, then llvm could try to make a null literal have type i8.
 			//however, this will not happen because if the arg is LitNull, then the type must be a pointer,
 			//which will never be a DST.
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, concretized_type_param.as_ref(), ctxt.mode, &ctxt.struct_inst_queue)),
 			_ => None
 		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
@@ -1102,7 +1103,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				llvm_typ: llvm::Ty::Int{bits: 32, signed: true},
 				llvm_op: llvm::Operand::Local(op.clone()),
 				stream: vec![Component::Instr(op, llvm::Instruction::Call{
-					func_name: "__errno_location".to_owned(),
+					func_name: ctxt.errno_func_name.to_owned(),
 					ret_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})),
 					args: vec![]
 				})]
@@ -1634,7 +1635,8 @@ fn cmp_func(f: &FuncInst,
 			prog_context: &typechecker::ProgramContext,
 			global_locs: &HashMap<String, (llvm::Ty, llvm::Operand)>,
 			struct_inst_queue: &Mutex<SeparatedStructInstQueue>,
-			func_inst_queue: &Mutex<SeparatedFuncInstQueue>)
+			func_inst_queue: &Mutex<SeparatedFuncInstQueue>,
+			errno_func_name: &str)
 			-> (llvm::Func, Vec<(String, llvm::GlobalDecl)>) {
 	//compiling a non-generic function and an erased function are nearly the same thing, but PARAM_SIZE_NAME needs to be added to the params
 	let mut context = Context{
@@ -1647,6 +1649,7 @@ fn cmp_func(f: &FuncInst,
 		func_inst_queue,
 		current_separated_type_param: None,
 		current_separated_func_depth: 0,
+		errno_func_name
 	};
 	let (args, ret_ty, func_name, body) = match f {
 		FuncInst::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
@@ -1913,7 +1916,7 @@ impl SeparatedFuncInstQueue{
 
 }
 
-pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext) -> llvm::Program {
+pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext, target_triple: &str, errno_func_name: &str) -> llvm::Program {
 	let mut type_decls: LLStructContext = HashMap::new();
 	let mut struct_inst_queue: Mutex<SeparatedStructInstQueue> = Mutex::new(SeparatedStructInstQueue::new());
 	let mut func_inst_queue: Mutex<SeparatedFuncInstQueue> = Mutex::new(SeparatedFuncInstQueue::new());
@@ -1936,14 +1939,14 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 	}
 	let mut cmped_funcs: Vec<llvm::Func> = Vec::new();
 	let cmped_funcs_and_extra_globals: Vec<(llvm::Func, Vec<(String, llvm::GlobalDecl)>)> = prog.funcs.par_iter().map(|func| {
-		cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+		cmp_func(&FuncInst::NonGeneric(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue, errno_func_name)
 	}).collect();
 	for (cmped_func, extra_globals) in cmped_funcs_and_extra_globals.into_iter() {
 		cmped_funcs.push(cmped_func);
 		global_decls.extend(extra_globals.into_iter());
 	}
 	let cmped_erased_funcs_and_extra_globals: Vec<(llvm::Func, Vec<(String, llvm::GlobalDecl)>)> = prog.erased_funcs.par_iter().map(|func| {
-		cmp_func(&FuncInst::Erased(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+		cmp_func(&FuncInst::Erased(func), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue, errno_func_name)
 	}).collect();
 	for (cmped_func, extra_globals) in cmped_erased_funcs_and_extra_globals.into_iter() {
 		cmped_funcs.push(cmped_func);
@@ -1960,7 +1963,7 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 			}
 			//I only know the name of the function, so I have to iterate over the all the separated functions to find the one with this name
 			let func: &ast::GenericFunc = prog.separated_funcs.iter().find(|gfunc: &&ast::GenericFunc| gfunc.name.as_str() == name).unwrap();
-			cmp_func(&FuncInst::Separated(&func, &type_param, *depth), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue)
+			cmp_func(&FuncInst::Separated(&func, &type_param, *depth), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue, errno_func_name)
 		}).collect();
 		for (cmped_func, extra_globals) in cmped_funcs_and_global_decls.into_iter() {
 			cmped_funcs.push(cmped_func);
@@ -1986,12 +1989,41 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext)
 		}).collect();
 		type_decls.extend(names_and_cmped_tys.into_iter());
 	}
-	let mut external_decls: Vec<_> = prog.external_funcs.iter().map(|e| cmp_external_decl(e, &prog_context.structs)).collect();
-	external_decls.push( ("__errno_location".to_owned(), llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})), vec![]) );
+	let mut seen_external_decls = HashSet::new();
+	let mut external_decls = Vec::new();
+	for external_func in prog.external_funcs.iter() {
+		if !seen_external_decls.contains(external_func.name.as_str()) {
+			seen_external_decls.insert(external_func.name.as_str());
+			external_decls.push(cmp_external_decl(external_func, &prog_context.structs));
+		}
+	}
+	external_decls.push( (errno_func_name.to_owned(), llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})), vec![]) );
 	llvm::Program {
 		type_decls,
 		global_decls,
 		func_decls: cmped_funcs,
-		external_decls
+		external_decls,
+		target_triple: target_triple.to_owned()
 	}
+}
+
+pub fn get_native_target_triple() -> Result<&'static str, (String, Vec<u8>)> {
+	extern crate guess_host_triple;
+	if let Some(s) = guess_host_triple::guess_host_triple() {
+		return Ok(s);
+	}
+	use std::process::Command;
+	let output = Command::new("clang").arg("-dumpmachine").output().map_err(|e| {
+		(format!("Could not execute 'clang -dumpmachine' to get native target triple: {}", e), Vec::new())
+	})?;
+	if !output.status.success() {
+		return Err(("Failed to get native target triple from clang:".to_owned(), output.stderr));
+	}
+	let mut stdout: String = String::from_utf8(output.stdout).map_err(|e| {
+		(format!("When getting native target triple from 'clang -dumpmachine', target triple was not valid UTF-8: {}", e), Vec::new())
+	})?;
+	if stdout.ends_with('\n') {
+		stdout.pop();
+	}
+	Ok(Box::leak(stdout.into_boxed_str()))
 }

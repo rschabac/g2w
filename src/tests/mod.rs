@@ -433,8 +433,10 @@ fn run_file_tests() {
 	use crate::{typechecker, frontend};
 	use super::parser;
 	use std::fs;
+	use rayon::prelude::*;
+	let native_target_triple = frontend::get_native_target_triple().unwrap();
 	let program_parser = parser::ProgramParser::new();
-	let test_file_names = fs::read_dir("src/tests").unwrap()
+	let test_file_names: Vec<_> = fs::read_dir("src/tests").unwrap()
 		.filter_map(|entry| {
 			let path: std::path::PathBuf = entry.unwrap().path();
 			if path.extension() == Some(std::ffi::OsStr::new("src")) {
@@ -442,8 +444,9 @@ fn run_file_tests() {
 			} else {
 				None
 			}
-		});
-	let test_results = test_file_names.map(|test_file_name| -> Result<(), String>{
+		}).collect();
+	let mut test_results = Vec::new();
+	test_file_names.into_par_iter().map(|test_file_name| -> Result<(), String>{
 		let program_source = fs::read_to_string(&test_file_name).map_err(|e| format!("io error on {}: {}", test_file_name.display(), e.to_string()))?;
 		let mut lines = program_source.split('\n');
 		/*
@@ -467,7 +470,7 @@ fn run_file_tests() {
 		let should_print: Vec<u8> = should_print.into();
 		let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).map_err(|parse_err| format!("parse error in file {}: {}", test_file_name.display(), parse_err))?;
 		let program_context = typechecker::typecheck_program(&ast).map_err(|type_err_msg| format!("type error in file {}: {}", test_file_name.display(), type_err_msg))?;
-		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context);
+		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, native_target_triple, "__errno_location");
 		let mut output_file_name: std::path::PathBuf = test_file_name;
 		output_file_name.set_extension("ll");
 		use std::ffi::{OsString, OsStr};
@@ -500,7 +503,7 @@ fn run_file_tests() {
 			return Err(format!("{} output does not match expected", output_file_name.file_name().unwrap().to_string_lossy()));
 		}
 		Ok(())
-	});
+	}).collect_into_vec(&mut test_results);
 	let mut total_tests = 0;
 	let mut passed_tests = 0;
 	let mut cumulative_err_msg = String::new();

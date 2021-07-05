@@ -1,0 +1,5 @@
+extern u64 f(u8*);
+
+'T* f@<separated 'T>(){
+	return null;
+}
