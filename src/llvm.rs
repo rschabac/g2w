@@ -407,7 +407,12 @@ impl std::fmt::Display for Program {
 			writeln!(f, "}}")?;
 		}
 		for (name, gdecl) in self.global_decls.iter() {
-			writeln!(f, "@{} = global {}", name, gdecl)?;
+			if matches!(gdecl, GlobalDecl::GString(_)) {
+				//writing 'unnamed_addr' before a string allows llvm to merge it with any other string literals in the program
+				writeln!(f, "@{} = unnamed_addr constant {}", name, gdecl)?;
+			} else {
+				writeln!(f, "@{} = global {}", name, gdecl)?;
+			}
 		}
 		//llvm's builtin memcpy is not declared automatically
 		writeln!(f, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)")?;

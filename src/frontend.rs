@@ -1910,6 +1910,7 @@ impl SeparatedFuncInstQueue{
 			true
 		}
 	}
+	#[allow(dead_code)]
 	fn poll(&mut self) -> Option<SeparatedFuncInst>{
 		self.queue.pop_front()
 	}

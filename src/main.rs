@@ -353,12 +353,12 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, options.target_triple, options.errno_func_name);
 	timeinfo.frontend.as_mut().unwrap().1 = Instant::now();
 	timeinfo.write_output = Some((timeinfo.frontend.unwrap().1, Instant::now()));
-	use std::io::Write;
+	use std::io::{Write, BufWriter};
 	if last_phase == Phase::Frontend {
 		use std::fs::OpenOptions;
-		let mut output_ll_file = OpenOptions::new().read(true).write(true).create(true).truncate(true)
+		let output_ll_file = OpenOptions::new().read(true).write(true).create(true).truncate(true)
 			.open(&options.output_file_name).map_err(|e| format!("Could not open output file {}: {}", &options.output_file_name, e))?;
-		write!(output_ll_file, "{}", llvm_prog).map_err(|e| format!("IO error writing to ll file: {}", e))?;
+		write!(BufWriter::new(output_ll_file), "{}", llvm_prog).map_err(|e| format!("IO error writing to ll file: {}", e))?;
 		timeinfo.write_output.as_mut().unwrap().1 = Instant::now();
 		timeinfo.end_time = timeinfo.write_output.unwrap().1;
 		if options.print_timings {
@@ -374,7 +374,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		.rand_bytes(0)
 		.tempfile()
 		.map_err(|e| format!("Could not create temporary ll file: {}", e))?;
-	write!(output_ll_file, "{}", llvm_prog).map_err(|e| format!("IO error writing to temporary ll file: {}", e))?;
+	write!(BufWriter::new(&mut output_ll_file), "{}", llvm_prog).map_err(|e| format!("IO error writing to temporary ll file: {}", e))?;
 	timeinfo.write_output.as_mut().unwrap().1 = Instant::now();
 	timeinfo.clang = Some((timeinfo.write_output.unwrap().1, Instant::now()));
 	use std::process::Command;
@@ -469,12 +469,12 @@ fn main() -> Result<(), String> {
 	if let Some(frontend_duration) = frontend_duration {
 		print_duration(&frontend_duration, "frontend");
 	} else {
-		println!("0.000s ( 0.0%) frontend (not executed)");
+		println!("0.000s ( 0.000%) frontend (not executed)");
 	}
 	if let Some(write_output_duration) = write_output_duration {
 		print_duration(&write_output_duration, "write_output");
 	} else {
-		println!("0.000s ( 0.0%) write_output (not executed)");
+		println!("0.000s ( 0.000%) write_output (not executed)");
 	}
 	if let Some(clang_duration) = clang_duration {
 		print_duration(&clang_duration, "clang");
