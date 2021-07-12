@@ -170,10 +170,14 @@ Erased:
 
 Because G2W was intended as a proof of concept, certain convenience features that are not necessary for a working prototype are not included. These include:
 * `for` loops
-* Increment and operator-assignment (`x++` and `x += 1` will not work)
-* Declaring and assigning to a variable in one statement (hopefully coming soon though)
+* Increment and operator-assignment ¹
+* Declaring and assigning to a variable in one statement ¹
+* Syntax/Type error messages are not very helpful ¹
+* String escape sequences and character literals ¹
 * Generic structs/functions can only have one type parameter, cannot be generic over two or more types
 * Generic functions have no information about the type they are passed (other than its size). This means that generic functions cannot do any type-specific operations on generic data, and can only move/copy it around. In the future, function pointers will provide a solution to this.
+
+¹ These should be fixed after I rewrite the parser.
 
 ### Compilation model
 Currently, the compiler will read all the `.src` files it is given as input, concatenate them into one big string, and compile that into a single `.ll` file. This will likely change soon. The `.ll` file,

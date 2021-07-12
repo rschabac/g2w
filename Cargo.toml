@@ -1,5 +1,5 @@
 [package]
-name = "lang"
+name = "g2w"
 version = "0.1.0"
 authors = ["Robert Schabacker <rschabac@stevens.edu>"]
 edition = "2018"

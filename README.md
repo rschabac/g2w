@@ -38,22 +38,31 @@ struct A@<'T> new@<erased 'T>(i32 x){
 
 Because the goal of this language was to proof out the concepts, many convenience features
 you may expect from other languages are not implemented, as they are not necessary to demonstrate the new ideas
-that this language introduces. I do not recommend using this language for any large-scale software projects.
+that this language introduces (see [here](#tutorial.md#limitations) for more details). I do not recommend using this language for any large-scale software projects.
 
 See the [Tutorial](tutorial.md) for an explanation of how the language works.
 
-### FAQ
-
-* What features were left out for simplicity?
-* What is coming in future versions?
-
 ### Requirements
-- Clang
+- Clang\
 If you can\'t run `clang` from the same command line you run this project from, it will not work.
-- Unix-like system
+- Unix-like system\
 I\'ve only tested this on Linux, but MacOS and BSD should be close enough.
 All platform-specific work is delegated to clang as much as possible.
 You\'re welcome to try this on Windows, but you will either have to run the linker manually, or get clang to detect `link.exe`
+
+### Future Plans
+In the near future, I plan on writing the parser myself, instead of using a parser generator. Parsing
+is currently the slowest non-clang phase of compilation, and writing a custom parser would speed it up, and allow
+for better error messages. I also have an idea on how to save the copies of separated structs and functions to eliminate redundant work
+when recompiling the same code. Also, I will try to test this on more platforms, such as ARM.
+
+Further down the line, I plan on adding function pointers, and allowing more than one type parameter in generic.
+Without these, generics are very limited, and adding these features will make it much more feasible to write significant programs.
+These changes will likely require revisiting most of the typechecking/frontend code, so they will take
+more time than the previously mentioned changes. 
+
+I'd also like to add a more robust module system to import code in a more organized way, as well as a
+minimal standard library. This is a lower priority compared to the other changes, so don't expect these any time soon.
 
 ### Building
 
@@ -64,7 +73,7 @@ To build:
 
 ```
 git clone https://github.com/rschabac/g2w
-cd lang
+cd g2w
 cargo build --release
 ```
 

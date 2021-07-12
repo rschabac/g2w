@@ -1,0 +1,36 @@
+extern void* memset(void*, i32, u64);
+extern i32 atoi(u8*);
+
+struct person{
+	u8 age;
+	u8* firstName;
+	u8* middleName;
+	u8* lastName;
+}
+
+//Similar type signature as C, but i32 instead of int, and u8 instead of char
+i32 main(i32 argc, u8** argv){
+	struct person person1;
+	memset(cast(void*, &person1), cast(i32, 0), sizeof(struct person));
+	//argc has type i32, and numeric literals have type i64, so a cast is needed
+	if argc >= cast(i32, 2) {
+		//cast is a keyword here
+		person1.age = cast(u8, atoi(argv[1]));
+	}
+	if argc >= cast(i32, 3) {
+		person1.firstName = argv[2];
+	}
+	if argc >= cast(i32, 4) {
+		person1.middleName = argv[3];
+	}
+	if argc >= cast(i32, 5) {
+		person1.lastName = argv[4];
+	}
+
+	//Until string escape sequences are implemented, you can add a newline to printf statements
+	//by using the '%c' format with a 10 (ASCII code for \n).
+	printf("Hello %s %s %s%c", person1.firstName, person1.middleName, person1.lastName, 10);
+	
+	//main must return an i32, hence the cast
+	return cast(i32, 0);
+}
