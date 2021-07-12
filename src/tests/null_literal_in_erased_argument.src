@@ -1,0 +1,10 @@
+/*0
+*/
+void f@<erased 'T>('T* x){
+
+}
+
+i32 main(){
+	f@<i8>(null);
+	return cast(i32, 0);
+}

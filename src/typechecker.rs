@@ -58,9 +58,9 @@ pub fn replace_type_var_with(original: ast::Ty, type_var_str: &str, replacement:
 			let replaced = replace_type_var_with(*typ, type_var_str, replacement);
 			Array{typ: Box::new(replaced), length}
 		}
-		GenericStruct{type_var, name} => {
-			let replaced = replace_type_var_with(*type_var, type_var_str, replacement);
-			GenericStruct{type_var: Box::new(replaced), name}
+		GenericStruct{type_param, name} => {
+			let replaced = replace_type_var_with(*type_param, type_var_str, replacement);
+			GenericStruct{type_param: Box::new(replaced), name}
 		}
 		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => original
 	}
@@ -78,7 +78,7 @@ fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext, current_t
 		Some(Generic{..}) => Err(format!("struct {} is generic", s)),
 		Some(NonGeneric(_)) => Ok(())
 	},
-	GenericStruct{name, type_var: type_param} => match struct_context.get(name) {
+	GenericStruct{name, type_param} => match struct_context.get(name) {
 		None => Err(format!("struct {} does not exist", name)),
 		Some(NonGeneric(_)) => Err(format!("struct {} is not generic", name)),
 		Some(Generic{mode, ..}) => {
@@ -111,7 +111,7 @@ fn all_struct_names_valid(t: &ast::Ty, struct_context: &StructContext, current_t
 //when typechecking a function call, it the function is one of these, the
 //number and type of arguments are not checked (each individual argument must
 //still be well-typed though).
-pub static PRINTF_FAMILY: &[&str] = &[
+pub const PRINTF_FAMILY: &[&str] = &[
 	"printf",
 	"sprintf",
 	//"fprintf", //this requires a FILE*, which will require c header files to define
@@ -259,7 +259,7 @@ match e {
 					},
 					Some(Generic{..}) => panic!("Proj: base had type {}, but struct context contained a generic struct for {}", base_typ, struct_name)
 				},
-				GenericStruct{type_var: ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
+				GenericStruct{ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
 					None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 					Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
 					Some(Generic{mode: _, type_var, fields}) => {
@@ -292,7 +292,7 @@ match e {
 				},
 				Some(Generic{..}) => panic!("Proj: base type was {}, but struct context contained a generic struct", base_typ)
 			},
-			GenericStruct{type_var: ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
+			GenericStruct{ref type_param, name: ref struct_name} => match ctxt.structs.get(struct_name) {
 				None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 				Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
 				Some(Generic{..}) =>  match ctxt.structs.get(struct_name) {
@@ -356,7 +356,7 @@ match e {
 		}
 		Ok(return_type)
 	},
-	GenericCall{name: func_name, type_var: type_param, args} => {
+	GenericCall{name: func_name, type_param, args} => {
 		use FuncType::*;
 		all_struct_names_valid(&type_param, &ctxt.structs, &ctxt.type_var)?;
 		let return_type;
@@ -648,9 +648,9 @@ match s {
 		}
 		Ok(false)
 	},
-	GenericSCall{name: func_name, type_var, args} => {
+	GenericSCall{name: func_name, type_param, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_var, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(&type_param, &ctxt.structs, &ctxt.type_var)?;
 		let arg_type_list;
 		let callee_mode;
 		let type_var_string;
@@ -668,7 +668,7 @@ match s {
 
 			}
 		};
-		let type_var_str_in_type_var = type_var.recursively_find_type_var();
+		let type_var_str_in_type_var = type_param.recursively_find_type_var();
 		match (type_var_str_in_type_var, &ctxt.type_var) {
 			(None, _) => (),
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -695,7 +695,7 @@ match s {
 				.zip(arg_type_list.iter()) //(Expr, Ty)
 				.enumerate() //(usize, (Expr, Ty))
 				.map(|(index, (arg, expected_type))| { //(usize, (Ty, Ty))
-					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_var);
+					let correct_type = replace_type_var_with(expected_type.clone(), type_var_string.as_str(), type_param);
 					ctxt.type_for_lit_nulls = Some(correct_type.clone());
 					(index, (typecheck_expr(ctxt, funcs, arg), correct_type))
 				}){
@@ -818,7 +818,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 					use ast::Ty::*;
 					match field_type {
 						Struct(s) => queue.push_back((s.as_str(), None)),
-						GenericStruct{type_var: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((&fully_concrete_type as &ast::Ty).clone()))),
+						GenericStruct{type_param: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((&fully_concrete_type as &ast::Ty).clone()))),
 						_ => ()
 					}
 				}
@@ -855,7 +855,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 					//but I will debug_assert them anyway
 					match field_type {
 						Struct(s) => queue.push_back((s.as_str(), None)),
-						GenericStruct{type_var, name} => {
+						GenericStruct{type_param, name} => {
 							//if the current struct is erased, and the field struct is separated, and
 							//the current struct is passing its TypeVar to it (type param is not concrete),
 							//then there is an error
@@ -864,14 +864,14 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								Generic{mode, ..} => mode
 							};
 							use ast::PolymorphMode::*;
-							let type_param_found_in_type_var = type_var.recursively_find_type_var();
+							let type_param_found_in_type_var = type_param.recursively_find_type_var();
 							let field_type_param_is_concrete = type_param_found_in_type_var.is_none();
 							if current_mode == Erased
 								&& *field_mode == Separated
 								&& !field_type_param_is_concrete {
 								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
 							}
-							let substituted1 = replace_type_var_with((type_var as &ast::Ty).clone(), type_param_string_of_current_struct, &type_param);
+							let substituted1 = replace_type_var_with((type_param as &ast::Ty).clone(), type_param_string_of_current_struct, &type_param);
 							let type_param_string_of_field_struct: &str = match struct_context.get(name).unwrap_or_else(|| panic!("why is struct {} not in the context?", name)) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
 								Generic{type_var, ..} => type_var.as_str()

@@ -12,7 +12,7 @@ fn parse_type_test(){
 		("u8 * ", Ty::Ptr(Some(Box::new(Ty::Int{signed: false, size: IntSize::Size8})))),
 		("void*", Ty::Ptr(None)),
 		("struct\tvector", Ty::Struct(String::from("vector"))),
-		("struct vector@<bool>", Ty::GenericStruct{type_var: Box::new(Ty::Bool), name: "vector".to_owned()}),
+		("struct vector@<bool>", Ty::GenericStruct{type_param: Box::new(Ty::Bool), name: "vector".to_owned()}),
 		("u8 [64]", Ty::Array{length: 64, typ: Box::new(Ty::Int{signed: false, size: IntSize::Size8})}),
 		("'\nT\n", Ty::TypeVar(String::from("T"))),
 		("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
@@ -118,7 +118,7 @@ fn parse_expr_test(){
 		("print@<bool>(null)",
 			Expr::GenericCall{
 				name: "print".to_owned(),
-				type_var: Ty::Bool,
+				type_param: Ty::Bool,
 				args: vec![
 					Expr::LitNull
 				]
@@ -163,7 +163,7 @@ fn parse_stmt_test(){
 		("f();", Stmt::SCall("f".to_owned(), vec![])),
 		("f@<bool>();", Stmt::GenericSCall{
 				name: "f".to_owned(),
-				type_var: Ty::Bool,
+				type_param: Ty::Bool,
 				args: vec![]
 			}
 		),
@@ -430,13 +430,13 @@ mod typechecking_tests {
 
 #[test]
 fn run_file_tests() {
-	use crate::{typechecker, frontend};
+	use crate::{typechecker, driver, frontend};
 	use super::parser;
 	use std::fs;
 	use rayon::prelude::*;
-	let native_target_triple = frontend::get_native_target_triple().unwrap();
+	let native_target_triple = driver::get_native_target_triple().unwrap();
 	let program_parser = parser::ProgramParser::new();
-	let test_file_names: Vec<_> = fs::read_dir("src/tests").unwrap()
+	let test_file_names: Vec<std::path::PathBuf> = fs::read_dir("src/tests").unwrap()
 		.filter_map(|entry| {
 			let path: std::path::PathBuf = entry.unwrap().path();
 			if path.extension() == Some(std::ffi::OsStr::new("src")) {

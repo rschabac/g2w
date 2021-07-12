@@ -63,9 +63,8 @@ impl std::fmt::Debug for Component{
 
 pub type Stream = Vec<Component>;
 
-//static mut GENSYM_COUNT: usize = 0;
-static GENSYM_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub fn gensym(s: &str) -> String {
+	static GENSYM_COUNT: AtomicUsize = AtomicUsize::new(0);
 	let n_copy: usize = GENSYM_COUNT.fetch_add(1, Ordering::Relaxed);
 	let n_string = n_copy.to_string();
 	let mut result_string = String::with_capacity(s.len() + n_string.len() + 1);
@@ -97,7 +96,7 @@ fn cmp_ty(t: &ast::Ty, structs: &typechecker::StructContext, type_var_replacemen
 		ast::Ty::Ptr(Some(t1)) => llvm::Ty::Ptr(Box::new(cmp_ty(t1, structs, type_var_replacement, mode, struct_inst_queue))),
 		ast::Ty::Array{length, typ} => llvm::Ty::Array{length: *length as usize, typ: Box::new(cmp_ty(typ, structs, type_var_replacement, mode, struct_inst_queue))},
 		ast::Ty::Struct(s) => llvm::Ty::NamedStruct(s.clone(), s.clone(), None),
-		ast::Ty::GenericStruct{type_var: type_param, name} => {
+		ast::Ty::GenericStruct{type_param, name} => {
 			match structs.get(name) {
 				Some(typechecker::StructType::Generic{mode: ast::PolymorphMode::Erased, ..}) =>
 					//already checked for is_DST above
@@ -226,7 +225,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let mut base_type_param: Option<ast::Ty> = None;
 		let (is_dynamic, base_is_ptr, struct_name) = match &base_result.llvm_typ {
 			llvm::Ty::Dynamic(ast::Ty::Struct(s)) => (true, true, s.clone()),
-			llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_var: type_param}) => {
+			llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_param}) => {
 				base_type_param = Some(type_param.as_ref().clone());
 				(true, true, s.clone())
 			},
@@ -236,7 +235,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			},
 			llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
 				llvm::Ty::Dynamic(ast::Ty::Struct(s)) => (true, true, s.clone()),
-				llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_var: type_param}) => {
+				llvm::Ty::Dynamic(ast::Ty::GenericStruct{name: s, type_param}) => {
 					base_type_param = Some(type_param.as_ref().clone());
 					(true, true, s.clone())
 				},
@@ -805,7 +804,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 						panic!("struct context contains generic struct for non-generic struct {}", name);
 					}
 				},
-				ast::Ty::GenericStruct{type_var: type_param, name} => {
+				ast::Ty::GenericStruct{type_param, name} => {
 					//even separated structs can be DSTs
 					if let typechecker::StructType::Generic{fields, ..} = ctxt.structs.get(name).unwrap() {
 						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, type_param);
@@ -852,7 +851,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		}
 	},
 	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt, None),
-	ast::Expr::GenericCall{name: func_name, type_var: type_param, args} => {
+	ast::Expr::GenericCall{name: func_name, type_param, args} => {
 		cmp_call(func_name.clone(), args, ctxt, Some(type_param))
 	}
 }}
@@ -1256,7 +1255,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				is_dynamic = true;
 				match t {
 					ast::Ty::Struct(s) => s.clone(),
-					ast::Ty::GenericStruct{name, type_var: type_param} => {
+					ast::Ty::GenericStruct{name, type_param} => {
 						base_type_param = Some((type_param as &ast::Ty).clone());
 						name.clone()
 					},
@@ -1272,7 +1271,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 					is_dynamic = true;
 					match t {
 						ast::Ty::Struct(s) => s.clone(),
-						ast::Ty::GenericStruct{name, type_var: type_param} => {
+						ast::Ty::GenericStruct{name, type_param} => {
 							base_type_param = Some((type_param as &ast::Ty).clone());
 							name.clone()
 						},
@@ -1528,7 +1527,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 		//I can just ignore the operand that this produces
 		call_result.stream
 	},
-	ast::Stmt::GenericSCall{name: func_name, type_var: type_param, args} => {
+	ast::Stmt::GenericSCall{name: func_name, type_param, args} => {
 		let call_result = cmp_call(func_name.clone(), args, ctxt, Some(type_param));
 		call_result.stream
 	},
@@ -1612,7 +1611,7 @@ fn mangle(name: &str, ty: &ast::Ty) -> String {
 				output.push_str(s);
 				output.push_str(".struct");
 			},
-			GenericStruct{type_var: type_param, name} => {
+			GenericStruct{type_param, name} => {
 				output.push_str(name);
 				output.push('$');
 				mangle_type(type_param, output);
@@ -1978,7 +1977,7 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext,
 		if queue_entries.is_empty() {break}
 		let names_and_cmped_tys: Vec<(String, Vec<llvm::Ty>)> = queue_entries.par_iter().map(|SeparatedStructInst{name, type_param}| {
 			//separated structs containing DSTs should never be added to the struct queue
-			debug_assert!(!(ast::Ty::GenericStruct{name: name.clone(), type_var: Box::new(type_param.clone())}).is_DST(&prog_context.structs, Some(ast::PolymorphMode::Separated)), "struct queue contains {{ name: '{}', type_param: {:?} }}, which is a DST", &name, &type_param);
+			debug_assert!(!(ast::Ty::GenericStruct{name: name.clone(), type_param: Box::new(type_param.clone())}).is_DST(&prog_context.structs, Some(ast::PolymorphMode::Separated)), "struct queue contains {{ name: '{}', type_param: {:?} }}, which is a DST", &name, &type_param);
 			let fields = match prog_context.structs.get(name.as_str()).unwrap() {
 				typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
 				_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
@@ -2006,25 +2005,4 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext,
 		external_decls,
 		target_triple: target_triple.to_owned()
 	}
-}
-
-pub fn get_native_target_triple() -> Result<&'static str, (String, Vec<u8>)> {
-	extern crate guess_host_triple;
-	if let Some(s) = guess_host_triple::guess_host_triple() {
-		return Ok(s);
-	}
-	use std::process::Command;
-	let output = Command::new("clang").arg("-dumpmachine").output().map_err(|e| {
-		(format!("Could not execute 'clang -dumpmachine' to get native target triple: {}", e), Vec::new())
-	})?;
-	if !output.status.success() {
-		return Err(("Failed to get native target triple from clang:".to_owned(), output.stderr));
-	}
-	let mut stdout: String = String::from_utf8(output.stdout).map_err(|e| {
-		(format!("When getting native target triple from 'clang -dumpmachine', target triple was not valid UTF-8: {}", e), Vec::new())
-	})?;
-	if stdout.ends_with('\n') {
-		stdout.pop();
-	}
-	Ok(Box::leak(stdout.into_boxed_str()))
 }
