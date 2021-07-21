@@ -173,7 +173,7 @@ Because G2W was intended as a proof of concept, certain convenience features tha
 * Increment and operator-assignment ¹
 * Declaring and assigning to a variable in one statement ¹
 * Syntax/Type error messages are not very helpful ¹
-* String escape sequences and character literals ¹
+* String escape sequences ¹
 * Generic structs/functions can only have one type parameter, cannot be generic over two or more types
 * Generic functions have no information about the type they are passed (other than its size). This means that generic functions cannot do any type-specific operations on generic data, and can only move/copy it around. In the future, function pointers will provide a solution to this.
 

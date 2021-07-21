@@ -11,6 +11,8 @@ mod typechecker;
 mod frontend;
 ///Data structures that represent an llvm program
 mod llvm;
+///Turns source text into a stream of lists of tokens
+mod lexer;
 
 #[cfg(test)]
 mod tests;
