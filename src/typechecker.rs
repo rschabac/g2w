@@ -985,13 +985,13 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			}
 			struct_context.insert(name.clone(), StructType::NonGeneric(fields.iter().cloned().map(|(t, n)| {(n, t)}).collect()));
 		},
-		GGenericStructDecl{name, param, mode, fields} => {
+		GGenericStructDecl{name, var, mode, fields} => {
 			if struct_context.contains_key(name){
 				return Err(format!("struct '{}' is declared more than once", name));
 			}
 			struct_context.insert(name.clone(), StructType::Generic{
 				mode: *mode,
-				type_var: param.clone(),
+				type_var: var.clone(),
 				fields: fields.iter().cloned().map(|(t, n)| (n, t)).collect()
 			});
 		},
@@ -1100,7 +1100,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				args: args.iter().cloned().map(|(t, _)| t).collect()
 			});
 		},
-		GGenericFuncDecl{name: func_name, ret_type, args, param, mode, ..} => {
+		GGenericFuncDecl{name: func_name, ret_type, args, var, mode, ..} => {
 			if func_context.contains_key(func_name) {
 				return Err(format!("function '{}' is declared more than once", func_name));
 			}
@@ -1108,9 +1108,9 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type {
-				all_struct_names_valid(&ret, &struct_context, &Some((param.clone(), *mode)))?;
+				all_struct_names_valid(&ret, &struct_context, &Some((var.clone(), *mode)))?;
 				match ret.recursively_find_type_var() {
-					Some(s) if s != param => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
+					Some(s) if s != var => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
 					_ => ()
 				};
 			}
@@ -1120,9 +1120,9 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				all_struct_names_valid(&arg_type, &struct_context, &Some((param.clone(), *mode)))?;
+				all_struct_names_valid(&arg_type, &struct_context, &Some((var.clone(), *mode)))?;
 				match arg_type.recursively_find_type_var() {
-					Some(s) if s != param => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
+					Some(s) if s != var => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
 					_ => ()
 				}
 			}
@@ -1130,7 +1130,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				return_type: ret_type.clone(),
 				args: args.iter().cloned().map(|(t, _)| t).collect(),
 				mode: *mode,
-				type_var: param.clone(),
+				type_var: var.clone(),
 			});
 		},
 		//need to make sure there are no name collisions between global vars and functions
@@ -1166,9 +1166,9 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 			struct_context = ctxt.structs;
 			global_context = ctxt.globals;
 		},
-		GGenericFuncDecl{ret_type, name, args, body, param, mode} => {
+		GGenericFuncDecl{ret_type, name, args, body, var, mode} => {
 			let (mut ctxt, _) = get_empty_localtypecontext();
-			ctxt.type_var = Some((param.clone(), *mode));		
+			ctxt.type_var = Some((var.clone(), *mode));		
 			ctxt.globals = global_context;
 			ctxt.structs = struct_context;
 			typecheck_func_decl(&mut ctxt, &func_context, name.clone(), args, body, ret_type)?;

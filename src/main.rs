@@ -14,6 +14,9 @@ mod llvm;
 ///Turns source text into a stream of lists of tokens
 mod lexer;
 
+#[allow(dead_code)] //TODO: remove this
+mod ast2;
+
 #[cfg(test)]
 mod tests;
 

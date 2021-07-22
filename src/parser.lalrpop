@@ -229,20 +229,20 @@ pub GDecl: ast::Gdecl = {
 		body: b
 	},
 
-	<ret: Type> <fname: Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+	<ret: Type> <fname: Identifier> "@" "<" <mode: PolyMode> "'" <var:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
 		ret_type: Some(ret),
 		name: fname,
 		args: fargs,
 		body: b,
-		param: param_name,
+		var,
 		mode: mode
 	},
-	"void" <fname: Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
+	"void" <fname: Identifier> "@" "<" <mode: PolyMode> "'" <var:Identifier> ">" "(" <fargs: FuncParam> ")" <b:Block> => ast::Gdecl::GGenericFuncDecl{
 		ret_type: None,
 		name: fname,
 		args: fargs,
 		body: b,
-		param: param_name,
+		var,
 		mode: mode
 	},
 
@@ -251,10 +251,10 @@ pub GDecl: ast::Gdecl = {
 		fields: field_list
 	},
 
-	"struct" <n:Identifier> "@" "<" <mode: PolyMode> "'" <param_name:Identifier> ">"
+	"struct" <n:Identifier> "@" "<" <mode: PolyMode> "'" <var:Identifier> ">"
 		"{" <field_list: (<Type> <Identifier> ";")*> "}" => ast::Gdecl::GGenericStructDecl{
 		name: n,
-		param: param_name,
+		var,
 		mode: mode,
 		fields: field_list
 	}

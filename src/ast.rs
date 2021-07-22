@@ -189,7 +189,6 @@ pub enum Expr{
 	LitFloat(f64),
 	LitString(String),
 	Id(String),
-	//Type of an array literal will be inferred based on the first element
 	Index(Box<Expr>, Box<Expr>),
 	//maybe add this back in later
 	//LitStruct{struct_name: String, values: Vec<(String, Expr)>},
@@ -229,8 +228,8 @@ pub enum Gdecl{
 	GVarDecl(Ty, String),
 	GFuncDecl{ret_type: Option<Ty>, name: String, args: Vec<(Ty, String)>, body: Block},
 	GStructDecl{name: String, fields: Vec<(Ty, String)>},
-	GGenericStructDecl{name: String, param: String, mode: PolymorphMode, fields: Vec<(Ty, String)>},
-	GGenericFuncDecl{name: String, ret_type: Option<Ty>, args: Vec<(Ty, String)>, body: Block, param: String, mode: PolymorphMode}
+	GGenericStructDecl{name: String, var: String, mode: PolymorphMode, fields: Vec<(Ty, String)>},
+	GGenericFuncDecl{name: String, ret_type: Option<Ty>, args: Vec<(Ty, String)>, body: Block, var: String, mode: PolymorphMode}
 }
 
 pub struct Func{
@@ -247,7 +246,7 @@ pub struct Struct{
 
 pub struct GenericStruct{
 	pub name: String,
-	pub param: String,
+	pub var: String,
 	pub fields: Vec<(Ty, String)>
 }
 
@@ -256,7 +255,7 @@ pub struct GenericFunc{
 	pub ret_type: Option<Ty>,
 	pub args: Vec<(Ty, String)>,
 	pub body: Block,
-	pub param: String,
+	pub var: String,
 }
 
 pub struct ExternalFunc{
@@ -306,17 +305,17 @@ impl From<Vec<Gdecl>> for Program {
 				GStructDecl{name, fields} => result.structs.push(Struct{
 					name, fields
 				}),
-				GGenericStructDecl{name, param, mode: PolymorphMode::Erased, fields} => result.erased_structs.push(GenericStruct{
-					name, param, fields
+				GGenericStructDecl{name, var, mode: PolymorphMode::Erased, fields} => result.erased_structs.push(GenericStruct{
+					name, var, fields
 				}),
-				GGenericStructDecl{name, param, mode: PolymorphMode::Separated, fields} => result.separated_structs.push(GenericStruct{
-					name, param, fields
+				GGenericStructDecl{name, var, mode: PolymorphMode::Separated, fields} => result.separated_structs.push(GenericStruct{
+					name, var, fields
 				}),
-				GGenericFuncDecl{name, ret_type, args, body, param, mode: PolymorphMode::Erased} => result.erased_funcs.push(GenericFunc{
-					name, ret_type, args, body, param
+				GGenericFuncDecl{name, ret_type, args, body, var, mode: PolymorphMode::Erased} => result.erased_funcs.push(GenericFunc{
+					name, ret_type, args, body, var
 				}),
-				GGenericFuncDecl{name, ret_type, args, body, param, mode: PolymorphMode::Separated} => result.separated_funcs.push(GenericFunc{
-					name, ret_type, args, body, param
+				GGenericFuncDecl{name, ret_type, args, body, var, mode: PolymorphMode::Separated} => result.separated_funcs.push(GenericFunc{
+					name, ret_type, args, body, var
 				})
 			}
 		}

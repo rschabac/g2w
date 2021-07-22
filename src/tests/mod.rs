@@ -251,7 +251,7 @@ fn parse_gdecl_test(){
 		}),
 		("struct a@<erased 'T>{}", Gdecl::GGenericStructDecl{
 			name: "a".to_owned(),
-			param: "T".to_owned(),
+			var: "T".to_owned(),
 			mode: PolymorphMode::Erased,
 			fields: vec![]
 		}),
@@ -260,7 +260,7 @@ fn parse_gdecl_test(){
 			name: "h".to_owned(),
 			args: vec![],
 			body: vec![],
-			param: "T".to_owned(),
+			var: "T".to_owned(),
 			mode: PolymorphMode::Separated
 		})
 	];
