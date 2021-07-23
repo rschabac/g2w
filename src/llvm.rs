@@ -273,9 +273,13 @@ impl std::fmt::Display for Instruction{
 			Cmp{cond, typ, ..} => panic!("cannot format {:?} cmp of typ {:?}", cond, typ),
 			Call{func_name, ret_typ, args} => {
 				write!(f, "call {} ", ret_typ)?;
-				if typechecker::PRINTF_FAMILY.contains(&func_name.as_str()) {
-					write!(f, "(i8*, ...) ")?;
-				}
+				match func_name.as_str() {
+					"printf" => write!(f, "(i8*, ...) ")?,
+					"sprintf" => write!(f, "(i8*, i8*, ...) ")?,
+					"snprintf" => write!(f, "(i8*, i64, i8*, ...) ")?,
+					"dprintf" => write!(f, "(i32, i8*, ...) ")?,
+					other => debug_assert!(!typechecker::PRINTF_FAMILY.contains(&other), "need to add special case in llvm::Instruction Display for printf-like function {}", other)
+				};
 				write!(f, "@{}(", func_name)?;
 				for (i, (arg_ty, arg_op)) in args.iter().enumerate() {
 					write!(f, "{} {}", arg_ty, arg_op)?;

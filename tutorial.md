@@ -16,11 +16,12 @@ the same way it does in C. Arrays of a constant length are represented with the 
 after the type. For example, `i32[7]` is the type of an array of 7 `i32` values.
 
 Structs are similar to C structs, but can only be referred to using the `struct` keyword, followed by their name (there is no `typedef`).
+Accessing a field of a struct uses a `.`, even when accessing the field through a pointer (there is no `->` like there is in C).
 
 When using generics, a "type variable" can be used to represent a type that the struct/function is parameterized over (more on generics later).
 These type variables must start with a `'` character, followed by a name.
 
-Currently, there are no function pointers. Hopefully, this will change in the near future.
+Currently, there are no function pointers. Hopefully, this will change in the near future, as it will allow a lot more functionality.
 
 Casting uses a different syntax than C. Instead of `(i32) x`, the syntax is `cast(i32, x)`
 Compared to most languages, there are much less implicit conversions between types (almost none).
@@ -30,6 +31,8 @@ Integer literals are always `i64`, or `u64` if suffixed with `u` (I plan on impr
 types more often.
 
 There are no `union` types like in C. Types and values cannot be marked as `const` as in C.
+
+The order that functions and structs are declared in does not matter. There is no need to forward-declare functions or structs like in C.
 
 ### Separated Generics
 
@@ -170,6 +173,7 @@ Erased:
 
 Because G2W was intended as a proof of concept, certain convenience features that are not necessary for a working prototype are not included. These include:
 * `for` loops
+* `break` and `continue` in loops
 * Increment and operator-assignment ¹
 * Declaring and assigning to a variable in one statement ¹
 * Syntax/Type error messages are not very helpful ¹

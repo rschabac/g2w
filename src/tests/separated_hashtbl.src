@@ -1,0 +1,185 @@
+/*0
+John is 30 years old
+after adding 0 to values, size = 1, capacity = 16
+after adding 1 to values, size = 2, capacity = 16
+after adding 2 to values, size = 3, capacity = 16
+after adding 3 to values, size = 4, capacity = 16
+after adding 4 to values, size = 5, capacity = 16
+after adding 5 to values, size = 6, capacity = 16
+after adding 6 to values, size = 7, capacity = 16
+after adding 7 to values, size = 8, capacity = 16
+after adding 8 to values, size = 9, capacity = 32
+after adding 9 to values, size = 10, capacity = 32
+after adding 10 to values, size = 11, capacity = 32
+values["8"] = 8
+*/
+/*
+Very simple Generic hash table implementation
+Simplified rewrite of https://github.com/benhoyt/ht, but uses generics for type safety
+
+MIT License
+
+Copyright (c) 2021 Ben Hoyt
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+extern void* calloc(u64, u64);
+extern void free(void*);
+extern i32 strcmp(u8*, u8*);
+extern u8* strdup(u8*);
+
+//Hashtable that maps strings to 'T
+struct Hashtbl@<separated 'T>{
+	struct Entry@<'T>* entries;
+	u64 capacity; //number of entries allocated
+	u64 size; //number of key-value pairs stored
+}
+
+struct Entry@<separated 'T>{
+	u8* key;
+	'T value;
+}
+
+struct Hashtbl@<'T> Hashtbl_new@<separated 'T>() {
+	struct Hashtbl@<'T> result;
+	result.entries = cast(struct Entry@<'T>*, calloc(16u, sizeof(struct Entry@<'T>)));
+	result.capacity = 16u;
+	result.size = 0u;
+	return result;
+}
+
+void Hashtbl_destroy@<separated 'T>(struct Hashtbl@<'T> tbl) {
+	u64 i;
+	i = 0u;
+	while i < tbl.capacity {
+		if tbl.entries[i].key != cast(u8*, null) {
+			free(cast(void*, tbl.entries[i].key));
+		}
+		i = i + 1u;
+	}
+	free(cast(void*, tbl.entries));
+}
+
+//https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
+u64 hash(u8* s){
+	u64 hash;
+	hash = 0xcbf29ce484222325u;
+	while *s != 0u {
+		hash = (hash ^ cast(u64, *s)) * 0x100000001b3u;
+		s = s + 1u;
+	}
+	return hash;
+}
+
+'T* Hashtbl_get@<separated 'T>(struct Hashtbl@<'T>* this, u8* key) {
+	u64 hash;
+	hash = hash(key);
+	u64 index;
+	//capacity must always be a power of 2
+	index = hash & (this.capacity - 1u);
+
+	while this.entries[index].key != cast(u8*, null) {
+		if strcmp(key, this.entries[index].key) == 0 {
+			//found key, return the value associated with it
+			return &this.entries[index].value;
+		}
+		index = (index + 1u) & (this.capacity - 1u);
+	}
+
+	return cast('T*, null);
+}
+
+void Hashtbl_set_entry@<separated 'T>(struct Entry@<'T>* entries, u64 capacity, u8* key, 'T value, u64* plength) {
+	u64 hash;
+	hash = hash(key);
+	u64 index;
+	index = hash & (capacity - 1u);
+
+	while entries[index].key != cast(u8*, null) {
+		if strcmp(key, entries[index].key) == 0 {
+			entries[index].value = value;
+		}
+
+		index = (index + 1u) & (capacity - 1u);
+	}
+
+	if plength != cast(u64*, null) {
+		key = strdup(key);
+		*plength = *plength + 1u;
+	}
+	entries[index].key = key;
+	entries[index].value = value;
+}
+
+void Hashtbl_expand@<separated 'T>(struct Hashtbl@<'T>* this) {
+	u64 new_capacity;
+	new_capacity = this.capacity * 2u;
+	struct Entry@<'T>* new_entries;
+	new_entries = cast(struct Entry@<'T>*, calloc(new_capacity, sizeof(struct Entry@<'T>)));
+
+	u64 i;
+	i = 0u;
+	while i < this.capacity {
+		if this.entries[i].key != cast(u8*, null) {
+			Hashtbl_set_entry@<'T>(new_entries, new_capacity, this.entries[i].key, this.entries[i].value, cast(u64*, null));
+		}
+		i = i + 1u;
+	}
+
+	free(cast(void*, this.entries));
+	this.entries = new_entries;
+	this.capacity = new_capacity;
+}
+
+void Hashtbl_put@<separated 'T>(struct Hashtbl@<'T>* this, u8* key, 'T value) {
+	f@<'T>();
+	if this.size >= this.capacity / 2u {
+		Hashtbl_expand@<'T>(this);
+	}
+	Hashtbl_set_entry@<'T>(this.entries, this.capacity, key, value, &this.size);
+}
+
+void f@<separated 'T>(){}
+
+i32 main() {
+	struct Hashtbl@<i64> ages;
+	ages = Hashtbl_new@<i64>();
+	Hashtbl_put@<i64>(&ages, "John", 30);
+	Hashtbl_put@<i64>(&ages, "Carl", 58);
+	Hashtbl_put@<i64>(&ages, "Marissa", 33);
+	printf("John is %d years old%c", *Hashtbl_get@<i64>(&ages, "John"), 10);
+
+	Hashtbl_destroy@<i64>(ages);
+
+	struct Hashtbl@<u64> values;
+	values = Hashtbl_new@<u64>();
+	u8[10] buf;
+	u64 i;
+	i = 0u;
+	while i <= 10u {
+		sprintf(&buf[0], "%lu", i);
+		Hashtbl_put@<u64>(&values, &buf[0], i);
+		printf("after adding %lu to values, size = %lu, capacity = %lu%c", i, values.size, values.capacity, 10);
+		i = i + 1u;
+	}
+	//String escape sequences are not implemented yet, so in order to get quotes to appear in the string,
+	//you need to use the '%c' format and 34 (ASCII code for '\"')
+	printf("values[%c8%c] = %lu%c", 34, 34, *Hashtbl_get@<u64>(&values, "8"), 10);
+	return cast(i32, 0);
+}
