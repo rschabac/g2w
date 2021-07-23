@@ -17,6 +17,7 @@ pub struct Context<'a>{
 	current_separated_type_param: Option<(&'a ast::Ty, llvm::Ty)>,
 	current_separated_func_depth: u8,
 	errno_func_name: &'a str,
+	stream: Stream,
 }
 impl<'a> Context<'a> {
 	fn get_var(&self, name: &str) -> &(llvm::Ty, llvm::Operand) {
@@ -130,28 +131,22 @@ pub struct ExpResult{
 	//If llvm_typ is not Dynamic(_), then llvm_op has that type
 	//if llvm_typ is Dynamic(_), then llvm_op is an i8*
 	pub llvm_op: llvm::Operand,
-	pub stream: Stream,
 }
 impl std::fmt::Debug for ExpResult {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		writeln!(f, "llvm_typ: {:?}", self.llvm_typ)?;
 		writeln!(f, "llvm_op: {}", self.llvm_op)?;
-		writeln!(f, "stream:")?;
-		for component in self.stream.iter() {
-			write!(f, "{:?}", component)?;
-		}
 		Ok(())
 	}
 }
 
-fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>) -> ExpResult { match e {
+fn cmp_exp(e: &ast::Expr, ctxt: &mut Context, type_for_lit_nulls: Option<&llvm::Ty>) -> ExpResult { match e {
 	ast::Expr::LitNull => match type_for_lit_nulls {
 		None => panic!("type_for_lit_nulls is None in cmp_exp"),
 		Some(t @ llvm::Ty::Ptr(_)) => {
 			ExpResult{
 				llvm_typ: t.clone(),
 				llvm_op: llvm::Operand::Const(llvm::Constant::Null(t.clone())),
-				stream: vec![],
 			}
 		},
 		Some(t) => panic!("type_for_lit_nulls in cmp_exp is not a pointer: {:?}", t)
@@ -159,22 +154,18 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	ast::Expr::LitBool(b) => ExpResult{
 		llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 		llvm_op: llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: if *b {1} else {0} }),
-		stream: vec![],
 	},
 	ast::Expr::LitSignedInt(i) => ExpResult{
 		llvm_typ: llvm::Ty::Int{bits: 64, signed: true},
 		llvm_op: llvm::Operand::Const(llvm::Constant::SInt{bits: 64, val: *i}),
-		stream: vec![],
 	},
 	ast::Expr::LitUnsignedInt(i) => ExpResult{
 		llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
 		llvm_op: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: *i}),
-		stream: vec![],
 	},
 	ast::Expr::LitFloat(f) => ExpResult{
 		llvm_typ: llvm::Ty::Float64,
 		llvm_op: llvm::Operand::Const(llvm::Constant::Float64(*f)),
-		stream: vec![],
 	},
 	ast::Expr::LitString(s) => {
 		let global_string_ident = gensym("string_literal_array");
@@ -183,18 +174,15 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			length: s.len()+1,
 			typ: Box::new(llvm::Ty::Int{bits: 8, signed: false})
 		};
-		let stream = vec![
-			Component::GlobalString(global_string_ident.clone(), llvm::GlobalDecl::GString(s.clone())),
-			Component::Instr(casted_local_ident.clone(), llvm::Instruction::Bitcast{
-				original_typ: llvm::Ty::Ptr(Box::new(global_typ)),
-				new_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
-				op: llvm::Operand::Global(global_string_ident)
-			})
-		];
+		ctxt.stream.push(Component::GlobalString(global_string_ident.clone(), llvm::GlobalDecl::GString(s.clone())));
+		ctxt.stream.push(Component::Instr(casted_local_ident.clone(), llvm::Instruction::Bitcast{
+			original_typ: llvm::Ty::Ptr(Box::new(global_typ)),
+			new_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
+			op: llvm::Operand::Global(global_string_ident)
+		}));
 		ExpResult{
 			llvm_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
 			llvm_op: llvm::Operand::Local(casted_local_ident),
-			stream,
 		}
 	},
 	ast::Expr::Id(s) => cmp_lvalue_to_rvalue(e, &format!("{}_loaded", s) as &str, ctxt),
@@ -220,7 +208,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		%field = extractvalue %vec_i32 %v_loaded, index
 		*/
 		let mut base_result = cmp_exp(base as &ast::Expr, ctxt, None);
-		let mut stream = base_result.stream;
 		//The cases for Dynamic(Struct(s)) and Ptr(Dynamic(Struct(s))) are the same thing
 		let mut base_type_param: Option<ast::Ty> = None;
 		let (is_dynamic, base_is_ptr, struct_name) = match &base_result.llvm_typ {
@@ -263,10 +250,9 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		if is_dynamic {
 			let preceding_fields_iter = fields.iter().take(field_index).map(|(_, t)| t.clone());
 			let base_type_param = base_type_param.unwrap_or_else(|| ast::Ty::TypeVar("_should_not_happen".to_owned()));
-			let (offset_op, offset_stream) = cmp_size_of_erased_struct(preceding_fields_iter, ctxt, &base_type_param);
-			stream.extend(offset_stream);
+			let offset_op = cmp_size_of_erased_struct(preceding_fields_iter, ctxt, &base_type_param);
 			let ptr_offset_op = gensym("DST_offset");
-			stream.push(Component::Instr(ptr_offset_op.clone(), llvm::Instruction::Gep{
+			ctxt.stream.push(Component::Instr(ptr_offset_op.clone(), llvm::Instruction::Gep{
 				typ: llvm::Ty::Int{bits: 8, signed: false},
 				base: base_result.llvm_op,
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
@@ -283,27 +269,25 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					&ctxt.struct_inst_queue
 				);
 				let bitcasted_uid = gensym("proj_bitcast");
-				stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
+				ctxt.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
 					original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
 					op: llvm::Operand::Local(ptr_offset_op),
 					new_typ: llvm::Ty::Ptr(Box::new(llvm_field_typ.clone()))
 				}));
 				let loaded_uid = gensym("proj_load");
-				stream.push(Component::Instr(loaded_uid.clone(), llvm::Instruction::Load{
+				ctxt.stream.push(Component::Instr(loaded_uid.clone(), llvm::Instruction::Load{
 					typ: llvm_field_typ.clone(),
 					src: llvm::Operand::Local(bitcasted_uid)
 				}));
 				return ExpResult{
 					llvm_typ: llvm_field_typ,
 					llvm_op: llvm::Operand::Local(loaded_uid),
-					stream
 				}
 			}
 			//if the result is dynamic, it is already an i8*, so nothing needs to be done
 			return ExpResult{
 				llvm_typ: llvm::Ty::Dynamic(field_typ),
 				llvm_op: llvm::Operand::Local(ptr_offset_op),
-				stream
 			}
 		}
 		use std::convert::TryFrom;
@@ -314,7 +298,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			base_result.llvm_typ = base_result.llvm_typ.remove_ptr();
 			let base_loaded_uid = gensym("base_loaded");
 			base_loaded_op = llvm::Operand::Local(base_loaded_uid.clone());
-			stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
+			ctxt.stream.push(Component::Instr(base_loaded_uid, llvm::Instruction::Load{
 				typ: base_result.llvm_typ.clone(),
 				src: base_result.llvm_op
 			}));
@@ -322,7 +306,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 			base_loaded_op = base_result.llvm_op;
 		}
 		let extracted_uid = gensym("extract");
-		stream.push(Component::Instr(extracted_uid.clone(), llvm::Instruction::Extract{
+		ctxt.stream.push(Component::Instr(extracted_uid.clone(), llvm::Instruction::Extract{
 			typ: base_result.llvm_typ,
 			base: base_loaded_op,
 			offset: field_index
@@ -330,7 +314,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		ExpResult{
 			llvm_typ: result_ty,
 			llvm_op: llvm::Operand::Local(extracted_uid),
-			stream
 		}
 	},
 	ast::Expr::Cast(new_type, src) => {
@@ -346,8 +329,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				}
 				if new_bits < old_bits {
 					let truncated_uid = gensym("truncated");
-					let mut stream = src_result.stream;
-					stream.push(Component::Instr(truncated_uid.clone(), llvm::Instruction::Trunc{
+					ctxt.stream.push(Component::Instr(truncated_uid.clone(), llvm::Instruction::Trunc{
 						old_bits: *old_bits,
 						op: src_result.llvm_op,
 						new_bits: *new_bits,
@@ -355,12 +337,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: new_llvm_typ,
 						llvm_op: llvm::Operand::Local(truncated_uid),
-						stream
 					}
 				} else {
 					let extended_uid = gensym("extended");
-					let mut stream = src_result.stream;
-					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+					ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 						old_bits: *old_bits,
 						op: src_result.llvm_op,
 						new_bits: *new_bits,
@@ -369,46 +349,40 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: new_llvm_typ,
 						llvm_op: llvm::Operand::Local(extended_uid),
-						stream
 					}
 				}
 			},
 			(Float32, Float32) | (Float64, Float64) => src_result,
 			(Float32, Float64) => {
 				let truncated_uid = gensym("float_truncated");
-				let mut stream = src_result.stream;
-				stream.push(Component::Instr(truncated_uid.clone(), 
+				ctxt.stream.push(Component::Instr(truncated_uid.clone(), 
 					llvm::Instruction::FloatTrunc(src_result.llvm_op)
 				));
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(truncated_uid),
-					stream
 				}
 			},
 			(Float64, Float32) => {
 				let extended_uid = gensym("float_extended");
-				let mut stream = src_result.stream;
-				stream.push(Component::Instr(extended_uid.clone(), 
+				ctxt.stream.push(Component::Instr(extended_uid.clone(), 
 					llvm::Instruction::FloatExt(src_result.llvm_op)
 				));
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(extended_uid),
-					stream
 				}
 			},
 			(Float32, Int{bits, signed}) | (Float64, Int{bits, signed}) => {
 				let converted_uid = gensym("int_to_float");
-				let mut stream = src_result.stream;
 				if *signed {
-					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::SignedToFloat{
+					ctxt.stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::SignedToFloat{
 						old_bits: *bits,
 						op: src_result.llvm_op,
 						result_is_64_bit: matches!(new_llvm_typ, Float64)
 					}));
 				} else {
-					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::UnsignedToFloat{
+					ctxt.stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::UnsignedToFloat{
 						old_bits: *bits,
 						op: src_result.llvm_op,
 						result_is_64_bit: matches!(new_llvm_typ, Float64)
@@ -417,20 +391,18 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(converted_uid),
-					stream
 				}
 			},
 			(Int{bits, signed}, Float32) | (Int{bits, signed}, Float64) => {
 				let converted_uid = gensym("float_to_int");
-				let mut stream = src_result.stream;
 				if *signed {
-					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToSigned{
+					ctxt.stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToSigned{
 						new_bits: *bits,
 						op: src_result.llvm_op,
 						src_is_64_bit: matches!(new_llvm_typ, Float64)
 					}));
 				} else {
-					stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToUnsigned{
+					ctxt.stream.push(Component::Instr(converted_uid.clone(), llvm::Instruction::FloatToUnsigned{
 						new_bits: *bits,
 						op: src_result.llvm_op,
 						src_is_64_bit: matches!(new_llvm_typ, Float64)
@@ -439,13 +411,11 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(converted_uid),
-					stream
 				}
 			},
 			(Ptr(_), Ptr(_)) => {
 				let casted_uid = gensym("ptr_cast");
-				let mut stream = src_result.stream;
-				stream.push(Component::Instr(casted_uid.clone(), llvm::Instruction::Bitcast{
+				ctxt.stream.push(Component::Instr(casted_uid.clone(), llvm::Instruction::Bitcast{
 					original_typ: src_result.llvm_typ,
 					op: src_result.llvm_op,
 					new_typ: new_llvm_typ.clone()
@@ -453,7 +423,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: new_llvm_typ,
 					llvm_op: llvm::Operand::Local(casted_uid),
-					stream
 				}
 			}
 			(new, old) => panic!("trying to cast from {:?} to {:?}", old, new)
@@ -461,9 +430,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Binop(left, bop, right) => {
 		let left_result = cmp_exp(left, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let mut right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let mut stream = left_result.stream;
-		stream.append(&mut right_result.stream);
+		let right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
 		use ast::BinaryOp::*;
 		match (bop, &left_result.llvm_typ, &right_result.llvm_typ) {
 			//Arithmetic between Ints
@@ -476,7 +443,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				match l_bits.cmp(r_bits) {
 					Ordering::Less => {
 						let extended_uid = gensym("extend_for_binop");
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+						ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 							old_bits: *l_bits,
 							op: extended_left_op,
 							new_bits: *r_bits,
@@ -486,7 +453,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					},
 					Ordering::Greater => {
 						let extended_uid = gensym("extend_for_binop");
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+						ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 							old_bits: *r_bits,
 							op: extended_right_op,
 							new_bits: *l_bits,
@@ -496,7 +463,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					},
 					Ordering::Equal => ()
 				};
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 					op: cmp_binary_op(bop),
 					typ: llvm::Ty::Int{bits: std::cmp::max(*l_bits, *r_bits), signed: false},
 					left: extended_left_op,
@@ -505,7 +472,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: left_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			//Comparisons between Ints
@@ -517,7 +483,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				match l_bits.cmp(r_bits) {
 					Ordering::Less => {
 						let extended_uid = gensym("extend_for_binop");
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+						ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 							old_bits: *l_bits,
 							op: extended_left_op,
 							new_bits: *r_bits,
@@ -527,7 +493,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					},
 					Ordering::Greater => {
 						let extended_uid = gensym("extend_for_binop");
-						stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+						ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 							old_bits: *r_bits,
 							op: extended_right_op,
 							new_bits: *l_bits,
@@ -537,7 +503,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					},
 					Ordering::Equal => ()
 				};
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
 					cond: cmp_cond_op(cond_op),
 					typ: llvm::Ty::Int{bits: std::cmp::max(*l_bits, *r_bits), signed: *signed},
 					left: extended_left_op,
@@ -546,14 +512,13 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			//Arithmetic and Comparisons between Floats
 			(_, llvm::Ty::Float32, llvm::Ty::Float32) | (_, llvm::Ty::Float64, llvm::Ty::Float64) => match bop {
 				Equ | Neq | Gt | Gte | Lt | Lte => {
 					let uid = gensym("float_cmp");
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
 						cond: cmp_cond_op(bop),
 						typ: left_result.llvm_typ,
 						left: left_result.llvm_op,
@@ -562,12 +527,11 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				},
 				arith => {
 					let uid = gensym("float_arith");
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 						op: cmp_binary_op(arith),
 						typ: left_result.llvm_typ,
 						left: left_result.llvm_op,
@@ -576,7 +540,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: right_result.llvm_typ,
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				}
 			},
@@ -584,8 +547,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				Equ | Neq | Gt | Gte | Lt | Lte => {
 					let uid = gensym("float_cmp");
 					let extended_uid = gensym("float_ext");
-					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+					ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
 						cond: cmp_cond_op(bop),
 						typ: llvm::Ty::Float64,
 						left: llvm::Operand::Local(extended_uid),
@@ -594,14 +557,13 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				},
 				_arith => {
 					let uid = gensym("float_arith");
 					let extended_uid = gensym("float_ext");
-					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(left_result.llvm_op)));
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 						op: cmp_binary_op(bop),
 						typ: llvm::Ty::Float64,
 						left: llvm::Operand::Local(extended_uid),
@@ -610,7 +572,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				}
 			},
@@ -618,8 +579,8 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				Equ | Neq | Gt | Gte | Lt | Lte => {
 					let uid = gensym("float_cmp");
 					let extended_uid = gensym("float_ext");
-					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+					ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
 						cond: cmp_cond_op(bop),
 						typ: llvm::Ty::Float64,
 						right: llvm::Operand::Local(extended_uid),
@@ -628,14 +589,13 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				},
 				_arith => {
 					let uid = gensym("float_arith");
 					let extended_uid = gensym("float_ext");
-					stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
-					stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+					ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::FloatExt(right_result.llvm_op)));
+					ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 						op: cmp_binary_op(bop),
 						typ: llvm::Ty::Float64,
 						right: llvm::Operand::Local(extended_uid),
@@ -644,7 +604,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					ExpResult{
 						llvm_typ: llvm::Ty::Float64,
 						llvm_op: llvm::Operand::Local(uid),
-						stream
 					}
 				}
 			},
@@ -655,7 +614,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				let offset_op;
 				if matches!(bop, ast::BinaryOp::Sub) {
 					let negated_offset_uid = gensym("negated_offset");
-					stream.push(Component::Instr(negated_offset_uid.clone(), llvm::Instruction::Binop{
+					ctxt.stream.push(Component::Instr(negated_offset_uid.clone(), llvm::Instruction::Binop{
 						op: llvm::BinaryOp::Mul,
 						typ: right_result.llvm_typ.clone(),
 						left: right_result.llvm_op,
@@ -665,7 +624,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				} else {
 					offset_op = right_result.llvm_op;
 				}
-				stream.push(Component::Instr(ptr_arith_uid.clone(), llvm::Instruction::Gep{
+				ctxt.stream.push(Component::Instr(ptr_arith_uid.clone(), llvm::Instruction::Gep{
 					typ: pointee_type.as_ref().clone(),
 					base: left_result.llvm_op,
 					offsets: vec![
@@ -675,13 +634,12 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: left_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(ptr_arith_uid),
-					stream
 				}
 			},
 			//Pointer Comparison
 			(_cond_op, llvm::Ty::Ptr(_), llvm::Ty::Ptr(_)) => {
 				let uid = gensym("ptr_cmp");
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Cmp{
 					cond: cmp_cond_op(bop),
 					typ: left_result.llvm_typ,
 					left: left_result.llvm_op,
@@ -690,7 +648,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			_ => panic!("cannot use binop {:?} on llvm types {:?} and {:?}", bop, left_result.llvm_typ, right_result.llvm_typ)
@@ -698,13 +655,12 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 	},
 	ast::Expr::Unop(uop, base) => {
 		let base_result = cmp_exp(base, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let mut stream = base_result.stream;
 		use ast::UnaryOp::*;
 		match (uop, &base_result.llvm_typ) {
 			(Neg, llvm::Ty::Int{bits, signed}) => {
 				debug_assert!(*signed, "negating an unsigned int");
 				let uid = gensym("neg_int");
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 					op: llvm::BinaryOp::Mul,
 					typ: llvm::Ty::Int{bits: *bits, signed: *signed},
 					left: base_result.llvm_op,
@@ -713,26 +669,24 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			(Neg, llvm::Ty::Float32) | (Neg, llvm::Ty::Float64) => {
 				let uid = gensym("neg_float");
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::FloatNeg{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::FloatNeg{
 					is_64_bit: base_result.llvm_typ == llvm::Ty::Float64,
 					op: base_result.llvm_op
 				}));
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			(Neg, t) => panic!("neg of type {:?}", t),
 			(Lognot, llvm::Ty::Int{bits, signed}) => {
 				debug_assert!(*bits == 1 && !signed);
 				let uid = gensym("lognot");
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 					op: llvm::BinaryOp::Sub,
 					typ: llvm::Ty::Int{bits: 1, signed: false},
 					left: llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 1}),
@@ -741,13 +695,12 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			(Lognot, t) => panic!("neg of type {:?}", t),
 			(Bitnot, llvm::Ty::Int{bits, signed}) => {
 				let uid = gensym("bitnot");
-				stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
+				ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Binop{
 					op: llvm::BinaryOp::Bitxor,
 					typ: llvm::Ty::Int{bits: *bits, signed: *signed},
 					left: base_result.llvm_op,
@@ -756,7 +709,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ExpResult{
 					llvm_typ: base_result.llvm_typ,
 					llvm_op: llvm::Operand::Local(uid),
-					stream
 				}
 			},
 			(Bitnot, t) => panic!("lognot of type {:?}", t)
@@ -781,7 +733,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ast::Ty::Array{length, typ} => {
 					let mut base_typ_result = cmp_exp(&ast::Expr::Sizeof((typ as &ast::Ty).clone()), ctxt, None);
 					let mul_name = gensym("sizeof_arr_mul");
-					base_typ_result.stream.push(Component::Instr(mul_name.clone(), llvm::Instruction::Binop{
+					ctxt.stream.push(Component::Instr(mul_name.clone(), llvm::Instruction::Binop{
 						op: llvm::BinaryOp::Mul,
 						typ: llvm::Ty::Int{bits: 64, signed: false},
 						left: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: *length}),
@@ -794,11 +746,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ast::Ty::Struct(name) => {
 					if let typechecker::StructType::NonGeneric(fields) = ctxt.structs.get(name).unwrap() {
 						//I need to pass some type param to cmp_size_of_erased_struct here, using a TypeVar should ensure a crash rather than a miscompile
-						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, &ast::Ty::TypeVar("_should_not_happen".to_owned()));
+						let llvm_op = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, &ast::Ty::TypeVar("_should_not_happen".to_owned()));
 						return ExpResult{
 							llvm_op,
 							llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
-							stream
 						};
 					} else {
 						panic!("struct context contains generic struct for non-generic struct {}", name);
@@ -807,11 +758,10 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 				ast::Ty::GenericStruct{type_param, name} => {
 					//even separated structs can be DSTs
 					if let typechecker::StructType::Generic{fields, ..} = ctxt.structs.get(name).unwrap() {
-						let (llvm_op, stream) = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, type_param);
+						let llvm_op = cmp_size_of_erased_struct(fields.iter().map(|(_, t)| t.clone()), ctxt, type_param);
 						return ExpResult {
 							llvm_op,
 							llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
-							stream
 						}
 					} else {
 						panic!("struct context does not contain a generic struct for '{}'", name);
@@ -821,7 +771,6 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 					return ExpResult {
 						llvm_op: llvm::Operand::Local(PARAM_SIZE_NAME.to_owned()),
 						llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
-						stream: vec![]
 					};
 				},
 				_ => panic!("type {} cannot be a DST", t)
@@ -831,23 +780,20 @@ fn cmp_exp(e: &ast::Expr, ctxt: &Context, type_for_lit_nulls: Option<&llvm::Ty>)
 		let size_int_uid = gensym("sizeof_int");
 		let llvm_typ = cmp_ty(t, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
-		let stream = vec![
-			Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
-				typ: llvm_typ.clone(),
-				base: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
-				offsets: vec![
-					(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1}))
-				]
-			}),
-			Component::Instr(size_int_uid.clone(), llvm::Instruction::PtrToInt{
-				ptr_ty: llvm_ptr_typ,
-				op: llvm::Operand::Local(size_uid)
-			})
-		];
+		ctxt.stream.push(Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
+			typ: llvm_typ.clone(),
+			base: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
+			offsets: vec![
+				(llvm::Ty::Int{bits: 32, signed: true}, llvm::Operand::Const(llvm::Constant::SInt{bits: 32, val: 1}))
+			]
+		}));
+		ctxt.stream.push(Component::Instr(size_int_uid.clone(), llvm::Instruction::PtrToInt{
+			ptr_ty: llvm_ptr_typ,
+			op: llvm::Operand::Local(size_uid)
+		}));
 		ExpResult{
 			llvm_typ: llvm::Ty::Int{bits: 64, signed: false},
 			llvm_op: llvm::Operand::Local(size_int_uid),
-			stream
 		}
 	},
 	ast::Expr::Call(func_name, args) => cmp_call(func_name.clone(), args, ctxt, None),
@@ -871,7 +817,7 @@ const SEPARATED_FUNC_MAX_DEPTH: u8 = 100;
 
 //This function returns code that computes the size of an erased struct. This function can be used
 //to find the offset of a field in a struct by calling it with only the fields that come before the desired field
-pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: TypeIter, ctxt: &Context, type_param: &ast::Ty) -> (llvm::Operand, Stream) {
+pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields: TypeIter, ctxt: &mut Context, type_param: &ast::Ty) -> llvm::Operand {
 	/*
 	%acc = 0 + 0
 	%acc = %acc + cmp sizeof fields[0]
@@ -881,9 +827,8 @@ pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields:
 	%acc = %acc + 7
 	%acc = %acc & ~8u64
 	*/
-	let mut stream = Vec::new();
 	let mut acc_name = gensym("sizeof_acc");
-	stream.push(Component::Instr(acc_name.clone(), llvm::Instruction::Binop{
+	ctxt.stream.push(Component::Instr(acc_name.clone(), llvm::Instruction::Binop{
 		op: llvm::BinaryOp::Add,
 		typ: llvm::Ty::Int{bits: 64, signed: false},
 		left: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 0}),
@@ -893,22 +838,21 @@ pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields:
 		let added_acc_name = gensym("sizeof_acc");
 		let field_ty = field_ty.replace_type_var_with(type_param);
 		let sizeof_result = cmp_exp(&ast::Expr::Sizeof(field_ty), ctxt, None);
-		stream.extend(sizeof_result.stream);
-		stream.push(Component::Instr(added_acc_name.clone(), llvm::Instruction::Binop{
+		ctxt.stream.push(Component::Instr(added_acc_name.clone(), llvm::Instruction::Binop{
 			op: llvm::BinaryOp::Add,
 			typ: llvm::Ty::Int{bits: 64, signed: false},
 			left: llvm::Operand::Local(acc_name),
 			right: sizeof_result.llvm_op
 		}));
 		let add7_acc_name = gensym("sizeof_acc");
-		stream.push(Component::Instr(add7_acc_name.clone(), llvm::Instruction::Binop{
+		ctxt.stream.push(Component::Instr(add7_acc_name.clone(), llvm::Instruction::Binop{
 			op: llvm::BinaryOp::Add,
 			typ: llvm::Ty::Int{bits: 64, signed: false},
 			left: llvm::Operand::Local(added_acc_name),
 			right: llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 7u64})
 		}));
 		let anded_acc_name = gensym("sizeof_acc");
-		stream.push(Component::Instr(anded_acc_name.clone(), llvm::Instruction::Binop{
+		ctxt.stream.push(Component::Instr(anded_acc_name.clone(), llvm::Instruction::Binop{
 			op: llvm::BinaryOp::Bitand,
 			typ: llvm::Ty::Int{bits: 64, signed: false},
 			left: llvm::Operand::Local(add7_acc_name),
@@ -916,11 +860,10 @@ pub fn cmp_size_of_erased_struct<TypeIter: IntoIterator<Item = ast::Ty>>(fields:
 		}));
 		acc_name = anded_acc_name;
 	}
-	(llvm::Operand::Local(acc_name), stream)
+	llvm::Operand::Local(acc_name)
 }
 
-fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: Option<&ast::Ty>) -> ExpResult {
-	let mut stream: Vec<Component> = Vec::with_capacity(args.len());
+fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_param: Option<&ast::Ty>) -> ExpResult {
 	let mut arg_ty_ops: Vec<(llvm::Ty, llvm::Operand)> = Vec::with_capacity(args.len());
 	//these 2 variables need to be half-declared out here so that they live long enough
 	let printf_expected_args_vec;
@@ -978,25 +921,24 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
 		//however, the type used for this operand should be i8*, not i8 (really Dynamic(_), but gets printed as i8)
-		let mut arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
-		stream.append(&mut arg_result.stream);
+		let arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
 		if matches!(arg_result.llvm_typ, llvm::Ty::Dynamic(_)) {
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(arg_result.llvm_typ)), arg_result.llvm_op) );
 		} else if expected_ty.is_DST(&ctxt.structs, callee_mode) {
 			//if arg is statically sized in the caller, but dynamically sized in the callee, alloca enough space for it
 			//store it, then pass the address to the function
 			let alloca_uid = gensym("callee_DST");
-			stream.push(Component::Instr(alloca_uid.clone(), llvm::Instruction::Alloca(
+			ctxt.stream.push(Component::Instr(alloca_uid.clone(), llvm::Instruction::Alloca(
 				arg_result.llvm_typ.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None
 			)));
-			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
 				typ: arg_result.llvm_typ.clone(),
 				data: arg_result.llvm_op,
 				dest: llvm::Operand::Local(alloca_uid.clone())
 			}));
 			let i8_ptr: llvm::Ty = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
 			let bitcasted_uid = gensym("callee_bitcast");
-			stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
+			ctxt.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm::Ty::Ptr(Box::new(arg_result.llvm_typ)),
 				op: llvm::Operand::Local(alloca_uid),
 				new_typ: i8_ptr.clone()
@@ -1014,7 +956,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 				}
 				//%bitcasted_chain = bitcast arg_result.llvm_typ arg_result.llvm_op to ptr_chain
 				let bitcasted_chain_uid = gensym("ptr_chain");
-				stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
+				ctxt.stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
 					original_typ: arg_result.llvm_typ,
 					op: arg_result.llvm_op,
 					new_typ: ptr_chain.clone()
@@ -1033,11 +975,10 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			//compute the size of this type, alloca this much space, pass the pointer as an extra arg
 			//if the func context claims that `func_name` returns a 'T, but the type param for this call is i16, then replace
 			let replaced_return_type: ast::Ty = t.clone().replace_type_var_with(concretized_type_param.as_ref().unwrap_or(&ast::Ty::TypeVar("_should_not_happen".to_owned())));
-			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(replaced_return_type), ctxt, None);
-			stream.append(&mut sizeof_stream);
+			let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(replaced_return_type), ctxt, None);
 			let result_addr_uid = gensym("DST_retval_result");
 			dst_result_uid = Some(result_addr_uid.clone());
-			stream.push(Component::Instr(result_addr_uid.clone(), llvm::Instruction::Alloca(
+			ctxt.stream.push(Component::Instr(result_addr_uid.clone(), llvm::Instruction::Alloca(
 				llvm::Ty::Int{bits: 8, signed: false}, sizeof_op, Some(8)
 			)));
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})), llvm::Operand::Local(result_addr_uid)) );
@@ -1061,7 +1002,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			*/
 			(
 				false,
-				//NOTE: was using ctxt.mode here, now trying out callee_mode
+				//NOTE: was using ctxt.mode here, now trying out callee_mode. This seems to work
 				cmp_ty(t, &ctxt.structs, concretized_type_param.as_ref(), callee_mode, &ctxt.struct_inst_queue),
 				depth_of_DST_in_ptr_chain(t, &ctxt.structs, callee_mode).is_some()
 			)
@@ -1070,8 +1011,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 	if callee_mode == Some(ast::PolymorphMode::Erased) {
 		let call_type_param = concretized_type_param.as_ref().unwrap();
 		//compute the size of the type param
-		let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(call_type_param.clone()), ctxt, None);
-		stream.append(&mut sizeof_stream);
+		let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(call_type_param.clone()), ctxt, None);
 		arg_ty_ops.push( (llvm::Ty::Int{bits: 64, signed: false}, sizeof_op) );
 	}
 	if callee_mode == Some(ast::PolymorphMode::Separated) {
@@ -1089,7 +1029,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			mangle(&func_name, &possibly_replaced_type_param)
 		}
 	};
-	stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
+	ctxt.stream.push(Component::Instr(uid.clone(), llvm::Instruction::Call{
 		func_name: possibly_mangled_name,
 		ret_typ: llvm_ret_ty.clone(),
 		args: arg_ty_ops
@@ -1106,20 +1046,19 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 				//replacing the type var in the return type makes it no longer a DST
 				let static_llvm_ty = cmp_ty(&replaced_result_ty, &ctxt.structs, ctxt.current_src_type_param(), Some(ast::PolymorphMode::Erased), &ctxt.struct_inst_queue);
 				let cast_op = gensym("bitcast");
-				stream.push(Component::Instr(cast_op.clone(), llvm::Instruction::Bitcast{
+				ctxt.stream.push(Component::Instr(cast_op.clone(), llvm::Instruction::Bitcast{
 					original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
 					op: llvm::Operand::Local(dst_result_uid.unwrap()),
 					new_typ: llvm::Ty::Ptr(Box::new(static_llvm_ty.clone()))
 				}));
 				let loaded_op = gensym("static_type_load");
-				stream.push(Component::Instr(loaded_op.clone(), llvm::Instruction::Load{
+				ctxt.stream.push(Component::Instr(loaded_op.clone(), llvm::Instruction::Load{
 					typ: static_llvm_ty.clone(),
 					src: llvm::Operand::Local(cast_op)
 				}));
 				return ExpResult{
 					llvm_typ: static_llvm_ty,
 					llvm_op: llvm::Operand::Local(loaded_op),
-					stream
 				};
 			}
 			//if the type is still dynamic, just change the llvm type, but it will still be a Dynamic(_)
@@ -1127,7 +1066,6 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 		ExpResult{
 			llvm_typ: llvm::Ty::Dynamic(return_type.as_ref().unwrap().clone().concretized(concretized_type_param.as_ref())),
 			llvm_op: llvm::Operand::Local(dst_result_uid.unwrap()),
-			stream
 		}
 	} else if result_needs_ptr_chain_bitcast {
 		//llvm_ret_ty will be i8*...* callee's src return type could be {any DST}*..*
@@ -1137,13 +1075,12 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			ExpResult{
 				llvm_typ: llvm_ret_ty,
 				llvm_op: llvm::Operand::Local(uid),
-				stream
 			}
 		} else {
 			//the caller is not expecting a DST, so bitcast
 			let caller_llvm_ret_ty = cmp_ty(&caller_src_ret_ty, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
 			let bitcasted_chain_uid = gensym("ptr_chain_ret");
-			stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
+			ctxt.stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm_ret_ty,
 				op: llvm::Operand::Local(uid),
 				new_typ: caller_llvm_ret_ty.clone()
@@ -1151,39 +1088,36 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			ExpResult{
 				llvm_typ: caller_llvm_ret_ty,
 				llvm_op: llvm::Operand::Local(bitcasted_chain_uid),
-				stream
 			}
 		}
 	} else {
 		ExpResult{
 			llvm_typ: llvm_ret_ty,
 			llvm_op: llvm::Operand::Local(uid),
-			stream
 		}
 	}
 }
 
 //the op this function returns is a pointer to where the data is stored
 //the llvm::Ty this function returns is the type of the thing being pointed to, it may not be a Ptr
-fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
+fn cmp_lvalue(e: &ast::Expr, ctxt: &mut Context) -> ExpResult { match e {
 	ast::Expr::Id(s) => {
 		if s == "errno" {
 			let op = gensym("errno_loc");
+			ctxt.stream.push(Component::Instr(op.clone(), llvm::Instruction::Call{
+				func_name: ctxt.errno_func_name.to_owned(),
+				ret_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})),
+				args: vec![]
+			}));
 			return ExpResult{
 				llvm_typ: llvm::Ty::Int{bits: 32, signed: true},
-				llvm_op: llvm::Operand::Local(op.clone()),
-				stream: vec![Component::Instr(op, llvm::Instruction::Call{
-					func_name: ctxt.errno_func_name.to_owned(),
-					ret_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 32, signed: true})),
-					args: vec![]
-				})]
+				llvm_op: llvm::Operand::Local(op),
 			}
 		}
 		let (ll_ty, ll_op) = ctxt.get_var(s);
 		ExpResult{
 			llvm_typ: ll_ty.clone(),
 			llvm_op: ll_op.clone(),
-			stream: vec![]
 		}
 	},
 	ast::Expr::Index(base, index) => {
@@ -1204,7 +1138,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				//if base is an array, convert it to a pointer to the first element
 				llvm::Ty::Array{typ, ..} => {
 					let decay_id = gensym("arr_decay");
-					base_lvalue_result.stream.push(Component::Instr(decay_id.clone(), llvm::Instruction::Bitcast{
+					ctxt.stream.push(Component::Instr(decay_id.clone(), llvm::Instruction::Bitcast{
 						original_typ: llvm::Ty::Ptr(Box::new(base_lvalue_result.llvm_typ.clone())),
 						op: base_lvalue_result.llvm_op,
 						new_typ: llvm::Ty::Ptr(typ.clone())
@@ -1215,7 +1149,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				//if base is a Ptr, convert base_lvalue_result directly to the pointer itself, similar to what cmp_lvalue_to_rvalue does
 				llvm::Ty::Ptr(_) => {
 					let loaded_id = gensym("index_load");
-					base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+					ctxt.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 						typ: base_lvalue_result.llvm_typ.clone(),
 						src: base_lvalue_result.llvm_op
 					}));
@@ -1226,21 +1160,18 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			};
 		}
 		//base_lvalue_result is now the address of the first element of the array
-		let mut stream = base_lvalue_result.stream;
 		let mut index_result = cmp_exp(index as &ast::Expr, ctxt, None);
-		stream.append(&mut index_result.stream);
 		let result_op = gensym("index_offset");
 		let result_typ = base_lvalue_result.llvm_typ.remove_ptr();
 		if let llvm::Ty::Dynamic(dst) = &result_typ {
-			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst.clone()), ctxt, None);
-			stream.append(&mut sizeof_stream);
+			let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(dst.clone()), ctxt, None);
 			let (index_result_bits, signed) = match index_result.llvm_typ {
 				llvm::Ty::Int{bits, signed} => (bits, signed),
 				_ => panic!("array index's llvm_typ is not an integer")
 			};
 			if index_result_bits < 64 {
 				let extended_uid = gensym("extended");
-				stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
+				ctxt.stream.push(Component::Instr(extended_uid.clone(), llvm::Instruction::Ext{
 					old_bits: index_result_bits,
 					op: index_result.llvm_op,
 					new_bits: 64,
@@ -1250,14 +1181,14 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				index_result.llvm_typ = llvm::Ty::Int{bits: 64, signed};
 			}
 			let mul_uid = gensym("dyn_index_mul");
-			stream.push(Component::Instr(mul_uid.clone(), llvm::Instruction::Binop{
+			ctxt.stream.push(Component::Instr(mul_uid.clone(), llvm::Instruction::Binop{
 				op: llvm::BinaryOp::Mul,
 				typ: index_result.llvm_typ,
 				left: index_result.llvm_op,
 				right: sizeof_op
 			}));
 			let add_uid = gensym("dyn_index_add");
-			stream.push(Component::Instr(add_uid.clone(), llvm::Instruction::Gep{
+			ctxt.stream.push(Component::Instr(add_uid.clone(), llvm::Instruction::Gep{
 				typ: llvm::Ty::Int{bits: 8, signed: false},
 				base: base_lvalue_result.llvm_op,
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, llvm::Operand::Local(mul_uid))]
@@ -1265,10 +1196,9 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			ExpResult{
 				llvm_typ: result_typ,
 				llvm_op: llvm::Operand::Local(add_uid),
-				stream
 			}
 		} else {
-			stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
+			ctxt.stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Gep{
 				typ: result_typ.clone(),
 				base: base_lvalue_result.llvm_op,
 				offsets: vec![(index_result.llvm_typ, index_result.llvm_op)]
@@ -1276,7 +1206,6 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 			ExpResult{
 				llvm_typ: result_typ,
 				llvm_op: llvm::Operand::Local(result_op),
-				stream
 			}
 		}
 
@@ -1307,7 +1236,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				llvm::Ty::Ptr(boxed) => match boxed as &llvm::Ty {
 					llvm::Ty::NamedStruct(_, _, _) | llvm::Ty::Dynamic(_) => {
 						let loaded_id = gensym("struct_deref");
-						base_lvalue_result.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
+						ctxt.stream.push(Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 							typ: base_lvalue_result.llvm_typ.clone(),
 							src: base_lvalue_result.llvm_op
 						}));
@@ -1376,10 +1305,9 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		if is_dynamic {
 			let preceding_fields_iter = fields.iter().take(field_index).map(|(_, t)| t.clone());
 			let base_type_param = base_type_param.unwrap_or_else(|| ast::Ty::TypeVar("_should_not_happen".to_owned()));
-			let (offset_op, offset_stream) = cmp_size_of_erased_struct(preceding_fields_iter, ctxt, &base_type_param);
-			base_lvalue_result.stream.extend(offset_stream);
+			let offset_op = cmp_size_of_erased_struct(preceding_fields_iter, ctxt, &base_type_param);
 			let ptr_offset_op = gensym("DST_offset");
-			base_lvalue_result.stream.push(Component::Instr(ptr_offset_op.clone(), llvm::Instruction::Gep{
+			ctxt.stream.push(Component::Instr(ptr_offset_op.clone(), llvm::Instruction::Gep{
 				typ: llvm::Ty::Int{bits: 8, signed: false},
 				base: base_lvalue_result.llvm_op,
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
@@ -1393,7 +1321,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				&ctxt.struct_inst_queue
 			);
 			let bitcasted_uid = gensym("DST_proj_bitcast");
-			base_lvalue_result.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
+			ctxt.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
 				op: llvm::Operand::Local(ptr_offset_op),
 				new_typ: if matches!(base_lvalue_result.llvm_typ, llvm::Ty::Dynamic(_)) {
@@ -1408,7 +1336,6 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		use std::convert::TryFrom;
 		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, (&base_type_param).as_ref(), ctxt.mode, &ctxt.struct_inst_queue);
 		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
-		let mut stream = base_lvalue_result.stream;
 		let field_addr_uid = gensym("field");
 		let possibly_mangled_name = match &base_type_param {
 			None => struct_name,
@@ -1421,7 +1348,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 				mangle(&struct_name, &possibly_replaced_type_param)
 			}
 		};
-		stream.push(Component::Instr(field_addr_uid.clone(), llvm::Instruction::Gep{
+		ctxt.stream.push(Component::Instr(field_addr_uid.clone(), llvm::Instruction::Gep{
 			//String::new() and None here will not be inspected for type info, so they can be set to dummy values
 			//the llvm code printer will ignore them
 			typ: llvm::Ty::NamedStruct(possibly_mangled_name, String::new(), None),
@@ -1434,7 +1361,6 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 		ExpResult{
 			llvm_typ: result_ty,
 			llvm_op: llvm::Operand::Local(field_addr_uid),
-			stream
 		}
 	},
 	ast::Expr::Deref(base) => {
@@ -1445,7 +1371,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &Context) -> ExpResult { match e {
 	other => panic!("{:?} is not a valid lvalue", other)
 }}
 
-fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> ExpResult {
+fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &mut Context) -> ExpResult {
 	let mut lvalue_result = cmp_lvalue(e, ctxt);
 	if matches!(lvalue_result.llvm_typ, llvm::Ty::Dynamic(_)) {
 		//when dealing with rvalues, if it's llvm type is Dynamic(_), then the operand is a pointer
@@ -1454,7 +1380,7 @@ fn cmp_lvalue_to_rvalue(e: &ast::Expr, gensym_seed: &str, ctxt: &Context) -> Exp
 	}
 	let loaded_id = gensym(gensym_seed);
 	//lvalue_result.llvm_typ = lvalue_result.llvm_typ.remove_ptr();
-	lvalue_result.stream.push(
+	ctxt.stream.push(
 		Component::Instr(loaded_id.clone(), llvm::Instruction::Load{
 			typ: lvalue_result.llvm_typ.clone(),
 			src: lvalue_result.llvm_op
@@ -1500,24 +1426,21 @@ fn cmp_cond_op(bop: &ast::BinaryOp) -> llvm::Cond {
 	}
 }
 
-fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream { match stmt {
+fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) { match stmt {
 	ast::Stmt::Assign(lhs, rhs) => {
 		let dest_result = cmp_lvalue(lhs, ctxt);
-		let mut data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ));
+		let data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ));
 		#[cfg(debug_assertions)]
 		if dest_result.llvm_typ != data_result.llvm_typ {
 			eprintln!("BUG: Assignment type discrepancy on when cmping {:?} = {:?};", lhs, rhs);
 			eprintln!("dest_result.llvm_typ = {:?}", dest_result.llvm_typ);
 			eprintln!("data_result.llvm_typ = {:?}", data_result.llvm_typ);
 		}
-		let mut stream = dest_result.stream;
-		stream.append(&mut data_result.stream);
 		if let llvm::Ty::Dynamic(dst) = data_result.llvm_typ {
-			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
-			stream.append(&mut sizeof_stream);
+			let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
 			//memcpy(dest_result.llvm_op, data_result.llvm_op, sizeof_result.llvm_op);
 			let i8_ptr: llvm::Ty = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
-			stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
 				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
 				ret_typ: llvm::Ty::Void,
 				args: vec![
@@ -1529,13 +1452,12 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 			}));
 			
 		} else {
-			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
 				typ: data_result.llvm_typ,
 				data: data_result.llvm_op,
 				dest: dest_result.llvm_op
 			}));
 		}
-		stream
 	},
 	ast::Stmt::Decl(typ, var_name) => {
 		let uid = gensym(format!("{}_loc", var_name).as_str());
@@ -1543,11 +1465,10 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 			//this declaration requires dynamic alloca
 			let llvm_typ = llvm::Ty::Dynamic(typ.clone());
 			ctxt.locals.insert(var_name.clone(), (llvm_typ, llvm::Operand::Local(uid.clone())));
-			let mut sizeof_result = cmp_exp(&ast::Expr::Sizeof(typ.clone()), ctxt, None);
-			sizeof_result.stream.push(Component::Instr(uid, llvm::Instruction::Alloca(
+			let sizeof_result = cmp_exp(&ast::Expr::Sizeof(typ.clone()), ctxt, None);
+			ctxt.stream.push(Component::Instr(uid, llvm::Instruction::Alloca(
 				llvm::Ty::Int{bits: 8, signed: false}, sizeof_result.llvm_op, Some(8)
 			)));
-			sizeof_result.stream
 		} else {
 			//even if the type is not dynamically sized, it could be a pointer to a DST,
 			//and cmp_ty will yield a Ptr(llvm::Ty::Dynamic). It is OK to have Dynamic(_) llvm types in the stream, because
@@ -1556,17 +1477,16 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 			let llvm_typ = cmp_ty(typ, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue);
 			ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
 			//replace_dynamic_with_i8(&mut llvm_typ);
-			vec![Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None))]
+			ctxt.stream.push(Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)))
 		}
 	},
 	ast::Stmt::Return(Some(expr)) => {
-		let mut expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
+		let expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
 		if let llvm::Ty::Dynamic(dst) = expr_result.llvm_typ {
 			//there will be an llvm local that indicates where to write the result to
-			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
-			expr_result.stream.append(&mut sizeof_stream);
+			let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(dst), ctxt, None);
 			let i8_ptr = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
-			expr_result.stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
 				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
 				ret_typ: llvm::Ty::Void,
 				args: vec![
@@ -1576,85 +1496,68 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) ->
 					(llvm::Ty::Int{bits: 1, signed: false}, llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: 0}))
 				]
 			}));
-			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(None)));
-			expr_result.stream.push(Component::Label(gensym("unreachable_after_return")));
-			expr_result.stream
+			ctxt.stream.push(Component::Term(llvm::Terminator::Ret(None)));
+			ctxt.stream.push(Component::Label(gensym("unreachable_after_return")));
 		} else { //not returning a DST
-			expr_result.stream.push(Component::Term(llvm::Terminator::Ret(
+			ctxt.stream.push(Component::Term(llvm::Terminator::Ret(
 				Some((expr_result.llvm_typ, expr_result.llvm_op))
 			)));
-			expr_result.stream.push(Component::Label(gensym("unreachable_after_return")));
-			expr_result.stream
+			ctxt.stream.push(Component::Label(gensym("unreachable_after_return")));
 		}
 	},
 	ast::Stmt::Return(None) => {
-		vec![
-			Component::Term(llvm::Terminator::Ret(None)),
-			Component::Label(gensym("unreachable_after_return"))
-		]
+		ctxt.stream.push(Component::Term(llvm::Terminator::Ret(None)));
+		ctxt.stream.push(Component::Label(gensym("unreachable_after_return")));
 	},
 	ast::Stmt::SCall(func_name, args) => {
-		let call_result = cmp_call(func_name.clone(), args, ctxt, None);
-		//I can just ignore the operand that this produces
-		call_result.stream
+		cmp_call(func_name.clone(), args, ctxt, None);
 	},
 	ast::Stmt::GenericSCall{name: func_name, type_param, args} => {
-		let call_result = cmp_call(func_name.clone(), args, ctxt, Some(type_param));
-		call_result.stream
+		cmp_call(func_name.clone(), args, ctxt, Some(type_param));
 	},
 	ast::Stmt::If(cond, then_block, else_block) => {
 		let cond_result = cmp_exp(cond, ctxt, None);
 		let then_lbl = gensym("then");
 		let else_lbl = gensym("else");
 		let merge_lbl = gensym("merge");
-		let mut then_stream = cmp_block(then_block, ctxt, expected_ret_ty);
-		let mut else_stream = cmp_block(else_block, ctxt, expected_ret_ty);
-		let mut stream = cond_result.stream;
-		stream.reserve(then_stream.len() + else_stream.len() + 6);
-		stream.push(Component::Term(llvm::Terminator::CondBr{
+		//stream.reserve(then_stream.len() + else_stream.len() + 6);
+		ctxt.stream.push(Component::Term(llvm::Terminator::CondBr{
 			condition: cond_result.llvm_op,
 			true_dest: then_lbl.clone(),
 			false_dest: else_lbl.clone(),
 		}));
-		stream.push(Component::Label(then_lbl));
-		stream.append(&mut then_stream);
-		stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
-		stream.push(Component::Label(else_lbl));
-		stream.append(&mut else_stream);
-		stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
-		stream.push(Component::Label(merge_lbl));
-		stream
+		ctxt.stream.push(Component::Label(then_lbl));
+		cmp_block(then_block, ctxt, expected_ret_ty);
+		ctxt.stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
+		ctxt.stream.push(Component::Label(else_lbl));
+		cmp_block(else_block, ctxt, expected_ret_ty);
+		ctxt.stream.push(Component::Term(llvm::Terminator::Br(merge_lbl.clone())));
+		ctxt.stream.push(Component::Label(merge_lbl));
 	},
 	ast::Stmt::While(cond, body) => {
-		let mut cond_result = cmp_exp(cond, ctxt, None);
 		let check_lbl = gensym("check_cond");
 		let body_lbl = gensym("body");
 		let after_lbl = gensym("after");
-		let mut body_stream = cmp_block(body, ctxt, expected_ret_ty);
-		let mut stream = Vec::new();
-		stream.reserve(cond_result.stream.len() + body_stream.len() + 6);
-		stream.push(Component::Term(llvm::Terminator::Br(check_lbl.clone())));
-		stream.push(Component::Label(check_lbl.clone()));
-		stream.append(&mut cond_result.stream);
-		stream.push(Component::Term(llvm::Terminator::CondBr{
+		//stream.reserve(cond_result.stream.len() + body_stream.len() + 6);
+		ctxt.stream.push(Component::Term(llvm::Terminator::Br(check_lbl.clone())));
+		ctxt.stream.push(Component::Label(check_lbl.clone()));
+		let cond_result = cmp_exp(cond, ctxt, None);
+		ctxt.stream.push(Component::Term(llvm::Terminator::CondBr{
 			condition: cond_result.llvm_op,
 			true_dest: body_lbl.clone(),
 			false_dest: after_lbl.clone()
 		}));
-		stream.push(Component::Label(body_lbl));
-		stream.append(&mut body_stream);
-		stream.push(Component::Term(llvm::Terminator::Br(check_lbl)));
-		stream.push(Component::Label(after_lbl));
-		stream
+		ctxt.stream.push(Component::Label(body_lbl));
+		cmp_block(body, ctxt, expected_ret_ty);
+		ctxt.stream.push(Component::Term(llvm::Terminator::Br(check_lbl)));
+		ctxt.stream.push(Component::Label(after_lbl));
 	}
 }}
 
-fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty) -> Stream {
-	let mut stream = Vec::new();
+fn cmp_block(block: &[ast::Stmt], ctxt: &mut Context, expected_ret_ty: &llvm::Ty) {
 	for stmt in block.iter() {
-		stream.append(&mut cmp_stmt(stmt, ctxt, expected_ret_ty));
+		cmp_stmt(stmt, ctxt, expected_ret_ty);
 	}
-	stream
 }
 
 
@@ -1719,7 +1622,8 @@ fn cmp_func(f: &FuncInst,
 		func_inst_queue,
 		current_separated_type_param: None,
 		current_separated_func_depth: 0,
-		errno_func_name
+		errno_func_name,
+		stream: Vec::new()
 	};
 	let (args, ret_ty, func_name, body) = match f {
 		FuncInst::NonGeneric(f) => (&f.args, &f.ret_type, &f.name as &str, &f.body),
@@ -1731,7 +1635,7 @@ fn cmp_func(f: &FuncInst,
 			(&f.args, &f.ret_type, &f.name as &str, &f.body)
 		}
 	};
-	let mut stream = Vec::with_capacity(args.len() * 2);
+	context.stream = Vec::with_capacity(args.len() * 2);
 	let mut params = Vec::with_capacity(args.len());
 	let (ret_is_dst, ll_ret_ty) = match ret_ty {
 		None => (false, llvm::Ty::Void),
@@ -1742,17 +1646,16 @@ fn cmp_func(f: &FuncInst,
 		if arg_ty.is_DST(&prog_context.structs, context.mode) {
 			//the type signature of cmp_exp says that it needs a Context, but for the Sizeof case, it onyl ever uses the .structs field, which
 			//is already set up by now, so it is not an issue that `context` is not quite complete yet.
-			let ExpResult{llvm_op: sizeof_op, stream: mut sizeof_stream, ..} = cmp_exp(&ast::Expr::Sizeof(arg_ty.clone()), &context, None);
-			stream.append(&mut sizeof_stream);
+			let ExpResult{llvm_op: sizeof_op, ..} = cmp_exp(&ast::Expr::Sizeof(arg_ty.clone()), &mut context, None);
 			//alloca enough space for this type
 			let dst_copy_uid = gensym("dst_param_copy");
-			stream.push(Component::Instr(dst_copy_uid.clone(), llvm::Instruction::Alloca(
+			context.stream.push(Component::Instr(dst_copy_uid.clone(), llvm::Instruction::Alloca(
 				llvm::Ty::Int{bits: 8, signed: false}, sizeof_op.clone(), Some(8)
 			)));
 			let ll_arg_id = gensym("arg");
 			//memcpy from %ll_arg_id to %dst_copy_uid
 			let i8_ptr: llvm::Ty = llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}));
-			stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
+			context.stream.push(Component::Instr(String::new(), llvm::Instruction::Call{
 				func_name: LLVM_MEMCPY_FUNC_NAME.to_owned(),
 				ret_typ: llvm::Ty::Void,
 				args: vec![
@@ -1768,8 +1671,8 @@ fn cmp_func(f: &FuncInst,
 			let alloca_slot_id = gensym("arg_slot");
 			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, context.current_src_type_param(), context.mode, &context.struct_inst_queue);
 			let ll_arg_id = gensym("arg");
-			stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
-			stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+			context.stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
+			context.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
 				typ: ll_ty.clone(),
 				data: llvm::Operand::Local(ll_arg_id.clone()),
 				dest: llvm::Operand::Local(alloca_slot_id.clone())
@@ -1789,18 +1692,18 @@ fn cmp_func(f: &FuncInst,
 		params.push( (llvm::Ty::Int{bits: 64, signed: false}, PARAM_SIZE_NAME.to_owned()) );
 	}
 	//if the function body is empty, I still need to add a 'ret void' terminator
-	let mut body_stream = if !body.is_empty() {
+	if !body.is_empty() {
 		cmp_block(body, &mut context, &ll_ret_ty)
 	} else {
-		vec![Component::Term(llvm::Terminator::Ret(None))]
+		context.stream.push(Component::Term(llvm::Terminator::Ret(None)));
 	};
 	//if the last statement is a Return, then there will be a Label(unreachable) after it, which needs to be removed
-	if matches!(body_stream.last(), Some(Component::Label(_))) {
-		body_stream.pop();
+	if matches!(context.stream.last(), Some(Component::Label(_))) {
+		context.stream.pop();
 	}
-	if !matches!(body_stream.last(), Some(Component::Term(_))) {
+	if !matches!(context.stream.last(), Some(Component::Term(_))) {
 		debug_assert!(ret_ty.as_ref() == None, "last component of stream is not a terminator in function that does not return void");
-		body_stream.push(Component::Term(llvm::Terminator::Ret(None)));
+		context.stream.push(Component::Term(llvm::Terminator::Ret(None)));
 	}
 	//convert stream + body_stream to CFG
 	let mut cfg = llvm::CFG{
@@ -1812,7 +1715,7 @@ fn cmp_func(f: &FuncInst,
 	//the Program.global_decls needs to have (ident, GString("abc") appended to it.
 	let mut additional_gdecls = Vec::new();
 	let mut seen_first_term = false;
-	for component in stream.into_iter().chain(body_stream.into_iter()) { match component {
+	for component in context.stream.into_iter() { match component {
 		Component::Label(s) => {
 			debug_assert!(seen_first_term, "entry block of function {} does not have a terminator", func_name);
 			cfg.other_blocks.push( (s, Default::default()) );
