@@ -942,14 +942,38 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			}
 		}
 	};
-	let concretized_type_param: Option<ast::Ty> = type_param.map(|t| t.clone().concretized(ctxt.current_src_type_param()));
+	let concretized_type_param: Option<ast::Ty> = type_param.map(|t|
+		//at this point, the function must be generic because type_param is Some(_)
+		if ctxt.mode == Some(ast::PolymorphMode::Erased) {
+			//callee can't be separated, this call is in an erased function
+			//if the type param is already concrete, no problem
+			//if the type param is not concrete, leave it
+			t.clone()
+		} else {
+			t.clone().concretized(ctxt.current_src_type_param())
+		}
+	);
+	/*
+	when calling an erased function, any 'T in the type signature that is behind a sequence of pointers needs to have the 'T
+	converted to i8. When calling the erased function, any arguments that contain a 'T but are not DSTs must be a sequence of pointers,
+	and should be bitcasted to a a type with the same number of pointers, but with the root type replaced with i8. If the return
+	value contains a 'T but is not a DST, then bitcast from Ptrchain...(i8) to Ptrchain...(expected type)
+	*/
+	#[allow(non_snake_case)]
+	fn depth_of_DST_in_ptr_chain<'a>(t: &'a ast::Ty, structs: &typechecker::StructContext, mode: Option<ast::PolymorphMode>) -> Option<usize> {
+		match t {
+			ast::Ty::Ptr(Some(boxed)) => depth_of_DST_in_ptr_chain(boxed.as_ref(), structs, mode).map(|i| i+1),
+			other if other.is_DST(structs, mode) => Some(0),
+			_ => None
+		}
+	}
 	for (arg, expected_ty) in args.iter().zip(expected_arg_types) {
 		//only need to compute this if the arg is a LitNull
 		let type_for_lit_nulls = match arg {
 			//if cmp_ty returns a Dynamic(_) here, then llvm could try to make a null literal have type i8.
 			//however, this will not happen because if the arg is LitNull, then the type must be a pointer,
 			//which will never be a DST.
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, concretized_type_param.as_ref(), ctxt.mode, &ctxt.struct_inst_queue)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, concretized_type_param.as_ref(), callee_mode, &ctxt.struct_inst_queue)),
 			_ => None
 		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
@@ -980,13 +1004,31 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			arg_ty_ops.push( (i8_ptr, llvm::Operand::Local(bitcasted_uid)) );
 		} else {
 			//the arg is statically sized in both the caller and the callee
-			arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
+			//however, the arg could be a ptr to something that is a DST in the callee, so the caller and callee
+			//could disagree on its type (i.e. caller sees an i32**, callee sees a 'T**, thus a i8**). In this case,
+			//bitcast the arg to a i8*...*
+			if let Some(ptr_chain_len) = depth_of_DST_in_ptr_chain(expected_ty, &ctxt.structs, callee_mode) {
+				let mut ptr_chain = llvm::Ty::Int{bits: 8, signed: false};
+				for _ in 0..ptr_chain_len {
+					ptr_chain = llvm::Ty::Ptr(Box::new(ptr_chain));
+				}
+				//%bitcasted_chain = bitcast arg_result.llvm_typ arg_result.llvm_op to ptr_chain
+				let bitcasted_chain_uid = gensym("ptr_chain");
+				stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
+					original_typ: arg_result.llvm_typ,
+					op: arg_result.llvm_op,
+					new_typ: ptr_chain.clone()
+				}));
+				arg_ty_ops.push((ptr_chain, llvm::Operand::Local(bitcasted_chain_uid)))
+			} else {
+				arg_ty_ops.push((arg_result.llvm_typ, arg_result.llvm_op));
+			}
 		}
 	}
 	let uid = gensym("call");
 	let mut dst_result_uid: Option<String> = None;
-	let (result_is_dst, llvm_ret_ty) = match return_type {
-		None => (false, llvm::Ty::Void),
+	let (result_is_dst, llvm_ret_ty, result_needs_ptr_chain_bitcast) = match return_type {
+		None => (false, llvm::Ty::Void, false),
 		Some(t) if t.is_DST(&ctxt.structs, callee_mode) => {
 			//compute the size of this type, alloca this much space, pass the pointer as an extra arg
 			//if the func context claims that `func_name` returns a 'T, but the type param for this call is i16, then replace
@@ -999,7 +1041,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 				llvm::Ty::Int{bits: 8, signed: false}, sizeof_op, Some(8)
 			)));
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})), llvm::Operand::Local(result_addr_uid)) );
-			(true, llvm::Ty::Void)
+			(true, llvm::Ty::Void, false)
 		},
 		Some(t) => {
 			//if the function being called is separated and has a return type of struct A@<'T>, and the function call
@@ -1017,8 +1059,12 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			which I think will just be when calling a generic function, cmping a generic function, Proj on a generic struct,
 			Sizeof, Cast
 			*/
-
-			(false, cmp_ty(t, &ctxt.structs, concretized_type_param.as_ref(), ctxt.mode, &ctxt.struct_inst_queue))
+			(
+				false,
+				//NOTE: was using ctxt.mode here, now trying out callee_mode
+				cmp_ty(t, &ctxt.structs, concretized_type_param.as_ref(), callee_mode, &ctxt.struct_inst_queue),
+				depth_of_DST_in_ptr_chain(t, &ctxt.structs, callee_mode).is_some()
+			)
 		}
 	};
 	if callee_mode == Some(ast::PolymorphMode::Erased) {
@@ -1082,6 +1128,31 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &Context, type_param: O
 			llvm_typ: llvm::Ty::Dynamic(return_type.as_ref().unwrap().clone().concretized(concretized_type_param.as_ref())),
 			llvm_op: llvm::Operand::Local(dst_result_uid.unwrap()),
 			stream
+		}
+	} else if result_needs_ptr_chain_bitcast {
+		//llvm_ret_ty will be i8*...* callee's src return type could be {any DST}*..*
+		let caller_src_ret_ty = return_type.as_ref().unwrap().clone().concretized(type_param);
+		if caller_src_ret_ty.is_DST(&ctxt.structs, ctxt.mode) {
+			//if the base of the ptr chain in the caller is still a dst, don't do anything
+			ExpResult{
+				llvm_typ: llvm_ret_ty,
+				llvm_op: llvm::Operand::Local(uid),
+				stream
+			}
+		} else {
+			//the caller is not expecting a DST, so bitcast
+			let caller_llvm_ret_ty = cmp_ty(&caller_src_ret_ty, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
+			let bitcasted_chain_uid = gensym("ptr_chain_ret");
+			stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
+				original_typ: llvm_ret_ty,
+				op: llvm::Operand::Local(uid),
+				new_typ: caller_llvm_ret_ty.clone()
+			}));
+			ExpResult{
+				llvm_typ: caller_llvm_ret_ty,
+				llvm_op: llvm::Operand::Local(bitcasted_chain_uid),
+				stream
+			}
 		}
 	} else {
 		ExpResult{

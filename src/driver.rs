@@ -283,7 +283,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 				.help("Input files to compile")
 				.long_help( concat!(
 					"Input files to be processed. The type of the file is determined by its extension, and can be one of the following:\n\
-					- .src  Source code\n\
+					- .src  G2W code\n\
 					- .c    C code\n\
 					- .ll   LLVM intermediate representation, in a human-readable form\n\
 					- .bc   LLVM intermediate representation, in a machine-readable form\n\
@@ -487,7 +487,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		Phase::Check | Phase::Frontend => panic!("Should have been caught by now")
 	}.map_err(|e| format!("Could not execute clang: {}", e))?;
 	if !clang_exit_status.success() {
-		return Err("clang failed".to_owned());
+		return Err("clang exited unsuccessfully".to_owned());
 	}
 	timeinfo.clang.as_mut().unwrap().1 = Instant::now();
 	timeinfo.end_time = timeinfo.clang.unwrap().1;

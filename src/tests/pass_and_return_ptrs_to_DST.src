@@ -1,0 +1,100 @@
+/*0
+*/
+struct D_normal e1@<erased 'T>(struct D_normal a){
+	return a;
+}
+struct D_normal* e2@<erased 'T>(struct D_normal* a){
+	return a;
+}
+struct D_normal*** e3@<erased 'T>(struct D_normal*** a){
+	return a;
+}
+struct D@<i64> e4@<erased 'T>(struct D@<i64> a){
+	return a;
+}
+struct D@<i64>* e5@<erased 'T>(struct D@<i64>* a){
+	return a;
+}
+struct D@<'T>* e6@<erased 'T>(struct D@<'T>* a){
+	return a;
+}
+struct D@<i64>*** e7@<erased 'T>(struct D@<i64>*** a){
+	return a;
+}
+
+struct D_normal s1@<separated 'T>(struct D_normal a){
+	return a;
+}
+struct D_normal* s2@<separated 'T>(struct D_normal* a){
+	return a;
+}
+struct D_normal*** s3@<separated 'T>(struct D_normal*** a){
+	return a;
+}
+struct D@<i64> s4@<separated 'T>(struct D@<i64> a){
+	return a;
+}
+struct D@<i64>* s5@<separated 'T>(struct D@<i64>* a){
+	return a;
+}
+struct D@<'T>* s6@<separated 'T>(struct D@<'T>* a){
+	return a;
+}
+struct D@<i64>*** s7@<separated 'T>(struct D@<i64>*** a){
+	return a;
+}
+
+void f@<erased 'T>(struct D_normal a, struct D_normal* b, struct D@<i64> c, struct D@<'T> d){
+	'T x;
+	g@<'T>(null);
+	'T* y;
+	y = g@<'T>(&x);
+}
+
+'T* g@<erased 'T>('T* a) {
+	return a;
+}
+
+void s@<separated 'T>(struct D_normal a, struct D_normal* b){
+	'T x;
+	g@<'T>(null);
+	'T* y;
+	y = g@<'T>(&x);
+}
+
+struct D@<erased 'T>{
+	'T a;
+}
+
+struct D_normal {
+	struct D@<i64> x;
+	void* y;
+}
+
+i32 main() {
+	struct D_normal d;
+	struct D_normal* dp;
+	struct D_normal*** dp3;
+	struct D@<i64>* p;
+	struct D@<i64>*** p3;
+	s@<bool>(d, &d);
+	f@<i64>(d, &d, d.x, d.x);
+	
+	d = e1@<i64>(d);
+	dp = e2@<i64>(dp);
+	dp3 = e3@<i64>(dp3);
+	d.x = e4@<i64>(d.x);
+	p = e5@<i64>(&d.x);
+	p = e6@<i64>(&d.x);
+	p3 = e7@<i64>(p3);
+
+	d = s1@<i64>(d);
+	dp = s2@<i64>(dp);
+	dp3 = s3@<i64>(dp3);
+	d.x = s4@<i64>(d.x);
+	p = s5@<i64>(&d.x);
+	p = s6@<i64>(&d.x);
+	p3 = s7@<i64>(p3);
+	
+	return cast(i32, 0);
+}
