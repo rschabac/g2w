@@ -13,6 +13,8 @@ mod frontend;
 mod llvm;
 ///Turns source text into a stream of lists of tokens
 mod lexer;
+///Turns a list of tokens into an ast2
+mod parser;
 
 #[allow(dead_code)] //TODO: remove this
 mod ast2;
@@ -23,7 +25,7 @@ mod tests;
 lalrpop_mod!(
 	#[doc(hidden)]	//don't include generated parser code in documentation
 	#[allow(clippy::all)] //This seems to prevent clippy from checking the generated parser file
-	pub parser
+	pub oldparser
 );
 
 ///Just calls [driver::print_timings], does nothing else.

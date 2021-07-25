@@ -1,6 +1,9 @@
 extern crate clap;
 extern crate tempfile;
-use super::{parser, ast, typechecker, frontend};
+use super::{parser::Parser, ast, lexer::{Lexer, TokenLoc}, ast2, typechecker, frontend};
+use rayon::prelude::*;
+use bumpalo::Bump;
+use bumpalo_herd::{Herd, Member};
 
 use std::time::{Instant, Duration};
 
@@ -163,7 +166,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		clang: None,
 		end_time: Instant::now() //will be overridden later
 	};
-	use clap::{Arg, ArgGroup, app_from_crate, crate_name, crate_version, crate_authors, crate_description};
+	use clap::{Arg, ArgGroup, app_from_crate, crate_name, crate_authors, crate_description, crate_version};
 	timeinfo.arg_parse.0 = Instant::now();
 	let matches = app_from_crate!()
 		.arg(
@@ -331,8 +334,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	let mut ll_and_bc_file_names = Vec::new();
 	let mut asm_file_names = Vec::new();
 	let mut obj_file_names = Vec::new();
-	let mut combined_src = String::new();
-	//TODO: need to read each file individually in order to get line/col info, once lexer/parser is better
+	let mut src_file_names = Vec::new();
 	for filename in input_file_names {
 		if filename.ends_with(".c") {
 			c_file_names.push(filename);
@@ -353,25 +355,39 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		if !filename.ends_with(".src") {
 			return Err(format!("unknown file extension, cannot process file {}", filename));
 		}
+		src_file_names.push(filename);
+	}
+	//TODO: read .src files in parallel, probably use rayon's try_fold
+	let mut src_inputs = Vec::new();
+	for filename in src_file_names.iter() {
 		use std::fs::*;
 		let mut src_file: File = File::open(filename).map_err(|e| {
 			format!("Could not open input file {}: {}", filename, e)
 		})?;
 		use std::io::Read;
-		src_file.read_to_string(&mut combined_src).map_err(|e| {
+		let mut src_string = String::new();
+		src_file.read_to_string(&mut src_string).map_err(|e| {
 			format!("Could not read file {}: {}", filename, e)
 		})?;
+		src_inputs.push(src_string);
 	}
-	let multiple_output_files: bool = ll_and_bc_file_names.len() + asm_file_names.len() + obj_file_names.len() + if combined_src.is_empty() {0} else {1} >= 2;
+	let multiple_output_files: bool = ll_and_bc_file_names.len() + asm_file_names.len() + obj_file_names.len() + src_inputs.is_empty() as usize >= 2;
 	if multiple_output_files && matches.is_present("output-file-name") {
 		return Err("Cannot specify an output file name when generating multiple output files".to_owned());
 	}
 	timeinfo.read_input.1 = Instant::now();
 	timeinfo.parsing.0 = timeinfo.read_input.1;
-	let program_parser = parser::ProgramParser::new();
-	let ast: Vec<ast::Gdecl> = program_parser.parse(combined_src.as_str()).map_err(|e| {
-		format!("Parse error: {}", e)
-	})?;
+	//'arena starts here
+	let mut type_arena = Bump::new();
+	use std::sync::{Mutex, RwLock};
+	use std::collections::HashMap;
+	let typecache = ast2::TypeCache{
+		arena: Mutex::new(&mut type_arena),
+		cached: RwLock::new(HashMap::new())
+	};
+	let arena_arena = Herd::new();
+	let LexParseResult{ast, errors: lex_and_parse_errors} = lex_and_parse(src_inputs.as_slice(), &typecache, &arena_arena);
+	let ast: Vec<ast::Gdecl> = ast.iter().map(|&g| g.to_owned_ast()).collect();
 	timeinfo.parsing.1 = Instant::now();
 	timeinfo.typechecking.0 = timeinfo.parsing.1;
 	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
@@ -554,4 +570,44 @@ pub fn print_timings() -> Result<(), String> {
 	print_duration(&other_duration, "other");
 	println!("{:width$}.{:03}s           total", overall_duration.as_secs(), overall_duration.as_millis(), width = seconds_width);
 	Ok(())
+}
+
+#[derive(Debug)]
+pub struct Error {
+	pub err: String,
+	pub byte_offset: usize,
+	pub approx_len: usize,
+	pub file_id: u16,
+}
+
+//contains the ast, vec of errors, and any other data that needs to outlive lex_and_parse() (which may not work???)
+struct LexParseResult<'src: 'arena, 'arena> {
+	ast: Vec<&'arena ast2::Gdecl<'src, 'arena>>,
+	errors: Vec<Error>,
+}
+
+fn lex_and_parse<'src: 'arena, 'arena>(input_srcs: &'src [String], typecache: &'arena ast2::TypeCache<'src, 'arena>, arena_arena: &'arena Herd) -> LexParseResult<'src, 'arena> {
+	let (errors, gdecls) = input_srcs.par_iter().enumerate().map(|(file_id, src): (usize, &'src String)| {
+		let src = src.as_str();
+		let lexer = Lexer::new(src, file_id as u16);
+		lexer.par_bridge() //par_iter of Result<Vec<TokenLoc<'src>>, Error>
+		.map_init(|| arena_arena.get(), move |bump: &mut Member<'arena>, token_chunk_or_lex_err: Result<Vec<TokenLoc<'src>>, Error>| /* -> par_iter<&'arena ast2::Gdecl<'src, 'arena>> */{
+			let (gdecls, this_chunk_errors) = match token_chunk_or_lex_err {
+				Ok(token_chunk) => {
+					let arena: &'arena Bump = bump.alloc(Bump::new());
+					let parser = Parser::new(token_chunk.into_iter(), file_id as u16, arena, typecache);
+					parser.parse_gdecls()
+					//gdecls.into_par_iter().map(|g| Ok(g)).chain(this_chunk_errors.into_par_iter().map(|e| Err(e)))
+				},
+				Err(lex_err) => {
+					(Vec::new(), vec![lex_err])
+				}
+			};
+			gdecls.into_par_iter().map(Ok).chain(this_chunk_errors.into_par_iter().map(Err))
+		}) //par_iter<par_iter<Result<&'arena Gdecl, Error>>>
+		.flatten() //par_iter<Result<&'arena Gdecl, Error>>
+	})
+	.flatten() //par_iter<Result<&'arena Gdecl, Error>>
+	.partition_map(|result| result.into());
+	LexParseResult{ast: gdecls, errors}
 }

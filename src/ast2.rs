@@ -1,10 +1,12 @@
 use crate::ast;
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Loc<T> {
-	elt: T,
-	byte_offset: usize,
-	byte_len: usize
+	pub elt: T,
+	pub byte_offset: usize,
+	pub byte_len: usize
 }
+
+impl<T: Copy> Copy for Loc<T> {}
 
 //Some traits (like Debug and Clone) can just be derived, but some traits need to have customized behavior
 //to ignore the location info and just defer to .elt
@@ -118,8 +120,8 @@ pub enum Ty<'src, 'arena> where 'src: 'arena { //'src lives longer than 'arena
 use std::sync::{RwLock, Mutex};
 use std::collections::HashMap;
 pub struct TypeCache<'src, 'arena> where 'src: 'arena {
-	arena: Mutex<&'arena bumpalo::Bump>,
-	cached: RwLock< HashMap<Ty<'src, 'arena>, &'arena Ty<'src, 'arena>> >
+	pub arena: Mutex<&'arena mut bumpalo::Bump>,
+	pub cached: RwLock< HashMap<Ty<'src, 'arena>, &'arena Ty<'src, 'arena>> >
 }
 impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 	///Recurses through a type, returning the type variable that it contains, if any.
@@ -152,14 +154,46 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 	//when a new type is created, call this method on it to see if it is in the cache
 	//if it is, this method will return a reference to the place in the arena where it already exists
 	//if it is not, this method will allocate it in the arena, and return a reference to it
-	pub fn getref(self, cache: &'arena TypeCache<'src, 'arena>) -> &'arena Self {
-		if let Some(cached) = cache.cached.read().unwrap().get(&self) {
+	pub fn getref(&self, cache: &'arena TypeCache<'src, 'arena>) -> &'arena Self {
+		println!("thread {:?} called getref on {}", rayon::current_thread_index(), self);
+		let read_access = cache.cached.read().unwrap();
+		let cached_result: Option<&'arena Ty<'src, 'arena>> = read_access.get(self).cloned();
+		drop(read_access);
+		if let Some(cached) = cached_result {
+			println!("thread {:?} sees that {} was cached", rayon::current_thread_index(), self);
 			cached
 		} else {
-			let new_alloc: &'arena Ty<'src, 'arena> = cache.arena.lock().unwrap().alloc(self.clone());
-			let mut locked = cache.cached.write().unwrap();
-			locked.insert(self.clone(), new_alloc);
+			/*
+			It's possible for 2 threads to see that a type is not in self.cached, and both of them try to allocate it.
+			If this happens, and 2 threads are in this else block at the same time, they should both try to get write access first.
+			One will get the access and allocate the type, the other will see that it the type has already been allocated, and return it.
+			It should be faster to do this rather than always getting write access because seeing a type that is already cached
+			is much more common, and multiple threads should be able to do that at the same time.
+			*/
+			let mut write_access = cache.cached.write().unwrap();
+			println!("thread {:?} got write access", rayon::current_thread_index());
+			if let Some(cached) = cached_result {
+				println!("thread {:?} sees that {} was already allocated, dropped write access", rayon::current_thread_index(), self);
+				return cached;
+			}
+			/*
+			I can't clone a & &'arena Bump that came from a & &'arena mut Bump because another thread could obtain
+			the &'arena mut bump while I still have the &'arena Bump
+			*/
+			let lock_guard = cache.arena.lock().unwrap();
+			println!("thread {:?} locked arena mutex", rayon::current_thread_index());
+			let arenaref: & &'arena mut bumpalo::Bump = &lock_guard;
+			let arenaref: &'arena bumpalo::Bump = unsafe {
+				*(arenaref as *const &'arena mut bumpalo::Bump) as &'arena bumpalo::Bump
+			};
+			let new_alloc: &'arena Ty<'src, 'arena> = arenaref.alloc(self.clone());
+			drop(lock_guard);
+			drop(arenaref);
+			println!("thread {:?} unlocked arena mutex", rayon::current_thread_index());
+			write_access.insert(self.clone(), new_alloc);
+			println!("thread {:?} dropped write access", rayon::current_thread_index());
 			new_alloc
+			//todo!()
 		}
 	}
 
@@ -466,7 +500,44 @@ pub enum Gdecl<'src, 'arena> where 'src: 'arena {
 		mode: Loc<PolymorphMode>
 	}
 }
-//not implementing to_owned_ast for Gdecl, I will sort the gdecls before converting them to old ast
+//typecheck_program expects a &[ast::Gdecl], so I need a .to_owned_ast() for this enum
+impl <'src: 'arena, 'arena> Gdecl<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::Gdecl {
+		use Gdecl::*;
+		match self {
+			Extern{ret_type, name, arg_types} => ast::Gdecl::Extern{
+				ret_type: ret_type.elt.map(|t| t.to_owned_ast()),
+				name: name.elt.to_owned(),
+				arg_types: arg_types.iter().map(|t| t.elt.to_owned_ast()).collect()
+			},
+			GVarDecl(t_loc, name_loc) => ast::Gdecl::GVarDecl(t_loc.elt.to_owned_ast(), name_loc.elt.to_owned()),
+			GFuncDecl{ret_type, name, args, body} => ast::Gdecl::GFuncDecl{
+				ret_type: ret_type.elt.map(|t| t.to_owned_ast()),
+				name: name.elt.to_owned(),
+				args: args.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+				body: body.to_owned_ast()
+			},
+			GStructDecl{name, fields} => ast::Gdecl::GStructDecl{
+				name: name.elt.to_owned(),
+				fields: fields.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+			},
+			GGenericFuncDecl{ret_type, name, args, body, mode, var} => ast::Gdecl::GGenericFuncDecl{
+				ret_type: ret_type.elt.map(|t| t.to_owned_ast()),
+				name: name.elt.to_owned(),
+				args: args.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+				body: body.to_owned_ast(),
+				mode: mode.to_owned_ast(),
+				var: var.elt.to_owned(),
+			},
+			GGenericStructDecl{name, fields, mode, var} => ast::Gdecl::GGenericStructDecl{
+				name: name.elt.to_owned(),
+				fields: fields.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+				mode: mode.to_owned_ast(),
+				var: var.elt.to_owned(),
+			}
+		}
+	}
+}
 
 pub struct Func<'src: 'arena, 'arena> {
 	pub ret_type: Loc<Option<&'arena Ty<'src, 'arena>>>,

@@ -22,6 +22,7 @@ clap = "2.33.3"
 tempfile = "3.2.0"
 guess_host_triple = "0.1.2"
 bumpalo = "3.7.0"
+bumpalo-herd = "0.1.1"
 
 # Add a build-time dependency on the lalrpop library:
 [build-dependencies]

@@ -1,7 +1,8 @@
 use crate::lexer::*;
+use crate::driver::Error;
 
 fn lex_str(s: &'static str) -> Vec<TokenLoc<'static>> {
-	let mut lexer = Lexer::new(s);
+	let mut lexer = Lexer::new(s, 0);
 	lexer.lex_until_balanced_brackets().unwrap()
 }
 
@@ -173,7 +174,7 @@ fn block_comments() {
 fn lexing_in_chunks() {
 	use Token::*;
 	let source = r#"bool void{erased if{f32}}return{.}"#;
-	let mut lexer = Lexer::new(source);
+	let mut lexer = Lexer::new(source, 0);
 	let chunk1 = lexer.lex_until_balanced_brackets().unwrap();
 	assert_eq!(9, chunk1.len());
 	let expected_chunk1 = &[
@@ -209,8 +210,8 @@ fn lexing_in_chunks() {
 
 //testing lex errors
 //not testing the error messages, those might change, just the byte_offset and approx_len
-fn lex_str_err(s: &'static str) -> LexError {
-	let mut lexer = Lexer::new(s);
+fn lex_str_err(s: &'static str) -> Error {
+	let mut lexer = Lexer::new(s, 0);
 	lexer.lex_until_balanced_brackets().unwrap_err()
 }
 

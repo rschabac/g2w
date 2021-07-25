@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use crate::ast;
+use crate::driver::Error;
 
 use std::borrow::Cow;
 use std::str::Chars;
@@ -7,7 +8,7 @@ use std::str::Chars;
 #[cfg(test)]
 mod tests;
 
-const LEX_MAX_PEEK: usize = 5;
+const LEX_MAX_PEEK: usize = 2;
 
 struct Peeker<'src> {
 	chars: Chars<'src>,
@@ -97,29 +98,37 @@ pub enum Token<'src> {
 	EQ, SEMI, IF, ELSE, WHILE, RETURN,
 	EXTERN
 }
+impl<'src> Default for Token<'src> {
+	fn default() -> Self {
+		//this string will never be a valid identifier
+		Token::IDENT("!@#$%__DEFAULT_TOKEN")
+	}
+}
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct TokenLoc<'src> {
-	token: Token<'src>,
-	byte_offset: usize,
+	pub token: Token<'src>,
+	pub byte_offset: usize,
 	//Tokens need to store their length because of string literals:
 	//"a" and "\x61" are represented the same way, but have different byte lens
-	byte_len: usize
+	pub byte_len: usize
+}
+impl<'src> Default for TokenLoc<'src> {
+	fn default() -> Self {
+		TokenLoc{
+			token: Default::default(),
+			byte_offset: usize::MAX,
+			byte_len: usize::MAX,
+		}
+	}
 }
 
 pub struct Lexer<'src> {
 	src: &'src str,
 	peeker: Peeker<'src>,
 	current_byte_offset: usize,
-	brace_count: u32
-}
-
-
-#[derive(Debug)]
-pub struct LexError {
-	err: String,
-	byte_offset: usize,
-	approx_len: usize
+	brace_count: u32,
+	file_id: u16
 }
 
 //determines if a char is something that can be in an identifier
@@ -128,12 +137,13 @@ fn valid_in_ident(c: char) -> bool {
 }
 
 impl<'src> Lexer<'src> {
-	pub fn new(source: &'src str) -> Self{
+	pub fn new(source: &'src str, file_id: u16) -> Self{
 		Lexer {
 			src: source,
 			peeker: Peeker::new(source.chars()),
 			current_byte_offset: 0,
-			brace_count: 0
+			brace_count: 0,
+			file_id
 		}
 	}
 	//use these instead of accessing self.peeker directly to automatically increment current_byte_offset
@@ -178,8 +188,8 @@ impl<'src> Lexer<'src> {
 			}
 		}
 	}
-	//If a LexErrorLoc is returned, self is still advanced until brace_count == 0
-	pub fn lex_until_balanced_brackets(&mut self) -> Result<Vec<TokenLoc<'src>>, LexError> {
+	//If an Error is returned, self is still advanced until brace_count == 0
+	pub fn lex_until_balanced_brackets(&mut self) -> Result<Vec<TokenLoc<'src>>, Error> {
 		use Token::*;
 		let mut result: Vec<TokenLoc<'src>> = Vec::new();
 		let mut initial_offset: usize;
@@ -269,10 +279,11 @@ impl<'src> Lexer<'src> {
 								//Either hit EOF right after *, or hit EOF before finding a *
 								//in either case, return an error
 								self.advance_until_balanced();
-								return Err(LexError{
+								return Err(Error{
 									err: "Input file ends without terminating block comment".to_owned(),
 									byte_offset: initial_offset,
-									approx_len
+									approx_len,
+									file_id: self.file_id
 								});
 							} else {
 								//the char consumed by self.poll() above must be a '*'
@@ -294,10 +305,11 @@ impl<'src> Lexer<'src> {
 						match self.peeker.peek(0) {
 							None => {
 								//string literal runs until EOF
-								let error = LexError {
+								let error = Error {
 									err: "Input file ends without terminating string literal".to_owned(),
 									byte_offset: initial_offset,
-									approx_len: len + '"'.len_utf8()
+									approx_len: len + '"'.len_utf8(),
+									file_id: self.file_id
 								};
 								self.advance_until_balanced(); //shouldn't really make a difference, it's already at EOF
 								return Err(error);
@@ -328,10 +340,11 @@ impl<'src> Lexer<'src> {
 							match self.peeker.peek(0) {
 								None => {
 									//string literal runs until EOF
-									let error = LexError {
+									let error = Error {
 										err: "Input file ends without terminating string literal".to_owned(),
 										byte_offset: initial_offset,
-										approx_len: len + '"'.len_utf8()
+										approx_len: len + '"'.len_utf8(),
+										file_id: self.file_id
 									};
 									self.advance_until_balanced(); //shouldn't really make a difference, it's already at EOF
 									return Err(error);
@@ -348,10 +361,11 @@ impl<'src> Lexer<'src> {
 										//escape sequence
 										match self.poll() {
 											None => {
-												let error = LexError {
+												let error = Error {
 													err: "Input file ends without terminating string literal".to_owned(),
 													byte_offset: initial_offset,
-													approx_len: len + '"'.len_utf8()
+													approx_len: len + '"'.len_utf8(),
+													file_id: self.file_id
 												};
 												self.advance_until_balanced();
 												return Err(error);
@@ -378,10 +392,11 @@ impl<'src> Lexer<'src> {
 													hex_acc = 16 * hex_acc + c.to_digit(16).unwrap() as u64;
 												});
 												if amount_of_digits == 0 {
-													let error = LexError {
+													let error = Error {
 														err: "No hexadecimal digits after \\x escape sequence".to_owned(),
 														byte_offset: byte_offset_of_slash,
-														approx_len: 2 //just \x
+														approx_len: 2, //just \x
+														file_id: self.file_id
 													};
 													self.advance_until_balanced();
 													return Err(error);
@@ -390,10 +405,11 @@ impl<'src> Lexer<'src> {
 												let byte_result = match u8::try_from(hex_acc) {
 													Ok(x) => x,
 													Err(_) => {
-														let error = LexError {
+														let error = Error {
 															err: "\\x escape sequence out of range of u8".to_owned(),
 															byte_offset: byte_offset_of_slash,
-															approx_len: 2 + amount_of_digits //2 for \ and x, then the amount of digits seen
+															approx_len: 2 + amount_of_digits, //2 for \ and x, then the amount of digits seen
+															file_id: self.file_id
 														};
 														self.advance_until_balanced();
 														return Err(error);
@@ -402,19 +418,21 @@ impl<'src> Lexer<'src> {
 												acc.push(byte_result.into());
 											},
 											Some('u') | Some('U') => {
-												let error = LexError {
+												let error = Error {
 													err: "\\u and \\U escape sequences are not yet supported".to_owned(),
 													byte_offset: initial_offset + len,
-													approx_len: 2
+													approx_len: 2,
+													file_id: self.file_id
 												};
 												self.advance_until_balanced();
 												return Err(error);
 											},
 											Some(other) => {
-												let error = LexError {
+												let error = Error {
 													err: format!("Unknown escape sequence \\{}", other),
 													byte_offset: initial_offset + len,
-													approx_len: 2
+													approx_len: 2,
+													file_id: self.file_id
 												};
 												self.advance_until_balanced();
 												return Err(error);
@@ -447,10 +465,11 @@ impl<'src> Lexer<'src> {
 							Some(d) if d.is_ascii_digit() => {
 								self.poll();
 								//numeric literal starting with 0, octal literals are not supported
-								let error = LexError{
+								let error = Error{
 									err: "Octal numbers are not supported (integer literals starting with 0)".to_owned(),
 									byte_offset: initial_offset,
-									approx_len: 2
+									approx_len: 2,
+									file_id: self.file_id
 								};
 								self.advance_until_balanced();
 								return Err(error);
@@ -470,10 +489,11 @@ impl<'src> Lexer<'src> {
 								if !seen_numbers {
 									//there must be numbers after the 0x
 									self.advance_until_balanced();
-									return Err(LexError{
+									return Err(Error{
 										err: format!("No hexadecimal digits found after 0{}", which_x.unwrap()),
 										byte_offset: initial_offset,
-										approx_len: 2
+										approx_len: 2,
+										file_id: self.file_id
 									});
 								}
 							},
@@ -491,10 +511,11 @@ impl<'src> Lexer<'src> {
 						//Float literal
 						if is_hex {
 							//can't do something like 0x3A.5
-							let error = LexError {
+							let error = Error {
 								err: "Hexadecimal numbers cannot have a fractional part".to_owned(),
 								byte_offset: initial_offset,
-								approx_len
+								approx_len,
+								file_id: self.file_id
 							};
 							self.advance_until_balanced();
 							return Err(error);
@@ -522,10 +543,11 @@ impl<'src> Lexer<'src> {
 								},
 								(first, second) => {
 									approx_len += first.map(char::len_utf8).unwrap_or(0) + second.map(char::len_utf8).unwrap_or(0);
-									let error = LexError {
+									let error = Error {
 										err: "Invalid suffix on a float literal (must be either f32 or f64)".to_owned(),
 										byte_offset: initial_offset,
-										approx_len 
+										approx_len ,
+										file_id: self.file_id
 									};
 									self.advance_until_balanced();
 									return Err(error);
@@ -578,10 +600,11 @@ impl<'src> Lexer<'src> {
 								},
 								(first, second) => {
 									approx_len += first.is_some() as usize + second.is_some() as usize;
-									let error = LexError {
+									let error = Error {
 										err: "Invalid suffix on integer literal (must be i8, i16, i32, or i64)".to_owned(),
 										byte_offset: initial_offset,
-										approx_len
+										approx_len,
+										file_id: self.file_id
 									};
 									self.advance_until_balanced();
 									return Err(error);
@@ -630,18 +653,20 @@ impl<'src> Lexer<'src> {
 				//identifiers cannot start with _
 				'_' => {
 					self.advance_until_balanced();
-					return Err(LexError{
+					return Err(Error{
 						err: "Identifiers cannot start with _".to_owned(),
 						byte_offset: initial_offset,
-						approx_len: 1
+						approx_len: 1,
+						file_id: self.file_id
 					});
 				}
 				//any other characters are an error
 				_ => {
-					let err = LexError {
+					let err = Error {
 						err: format!("Invalid character {} ({:?})", c, c),
 						byte_offset: initial_offset,
-						approx_len: c.len_utf8()
+						approx_len: c.len_utf8(),
+						file_id: self.file_id
 					};
 					self.advance_until_balanced();
 					return Err(err);
@@ -650,5 +675,17 @@ impl<'src> Lexer<'src> {
 		}
 		//after the loop, either hit the end of the string or brace_count is 0
 		Ok(result)
+	}
+}
+impl<'src> Iterator for Lexer<'src> {
+	type Item = Result<Vec<TokenLoc<'src>>, Error>;
+	fn next(&mut self) -> Option<Self::Item> {
+		//if the remaining characters are whitespace, return None
+		self.do_while(|c| c.is_whitespace(), |_| {});
+		if self.peeker.peek(0) == None {
+			None
+		} else {
+			Some(self.lex_until_balanced_brackets())
+		}
 	}
 }

@@ -1,5 +1,5 @@
 use super::ast;
-use super::parser;
+use super::oldparser;
 
 #[test]
 fn parse_type_test(){
@@ -17,7 +17,7 @@ fn parse_type_test(){
 		("'\nT\n", Ty::TypeVar(String::from("T"))),
 		("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
 	];
-	let type_parser = parser::TypeParser::new();
+	let type_parser = oldparser::TypeParser::new();
 	let mut all_succeeded = true;
 	for (test_str, expected_parse) in tests {
 		match type_parser.parse(test_str) {
@@ -125,7 +125,7 @@ fn parse_expr_test(){
 			}
 		)
 	];
-	let expr_parser = parser::ExprParser::new();
+	let expr_parser = oldparser::ExprParser::new();
 	let mut all_succeeded = true;
 	for (test_str, expected_parse) in tests {
 		match expr_parser.parse(test_str) {
@@ -199,7 +199,7 @@ fn parse_stmt_test(){
 		)),
 			
 	];
-	let stmt_parser = parser::StmtParser::new();
+	let stmt_parser = oldparser::StmtParser::new();
 	let mut all_succeeded = true;
 	for (test_str, expected_parse) in tests {
 		match stmt_parser.parse(test_str) {
@@ -264,7 +264,7 @@ fn parse_gdecl_test(){
 			mode: PolymorphMode::Separated
 		})
 	];
-	let gdecl_parser = parser::GDeclParser::new();
+	let gdecl_parser = oldparser::GDeclParser::new();
 	let mut all_succeeded = true;
 	for (test_str, expected_parse) in tests {
 		match gdecl_parser.parse(test_str) {
@@ -289,7 +289,7 @@ mod typechecking_tests {
 	use crate::typechecker::*;
 	use crate::ast::*;
 	use crate::ast::Ty::*;
-	use super::parser;
+	use super::oldparser;
 	fn setup_expr(expr: &str) -> Result<Ty, String>{
 		let (mut ctxt, func_context) = get_empty_localtypecontext();
 		return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context);
@@ -303,7 +303,7 @@ mod typechecking_tests {
 		return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs);
 	}
 	fn setup_expr_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
-		let expr_parser = parser::ExprParser::new();
+		let expr_parser = oldparser::ExprParser::new();
 		let expr = expr_parser.parse(expr).expect("parse error");
 		return typecheck_expr(ctxt, funcs, &expr);
 	}
@@ -368,7 +368,7 @@ mod typechecking_tests {
 		return setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, funcs, expected_ret_ty);
 	}
 	fn setup_stmt_with_localtypecontext_and_funcs(stmt: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
-		let stmt_parser = parser::StmtParser::new();
+		let stmt_parser = oldparser::StmtParser::new();
 		let stmt = stmt_parser.parse(stmt).expect("parse error");
 		return typecheck_stmt(ctxt, funcs, &stmt, &expected_ret_ty);
 	}
@@ -410,7 +410,7 @@ mod typechecking_tests {
 	#[test]
 	fn typecheck_files_test(){
 		use std::fs;
-		let program_parser = parser::ProgramParser::new();
+		let program_parser = oldparser::ProgramParser::new();
 		for path in fs::read_dir("src/tests/typechecking/should_error").unwrap()
 				.filter_map(|entry| {
 					//gets only the filenames that end in .src
@@ -431,11 +431,11 @@ mod typechecking_tests {
 #[test]
 fn run_file_tests() {
 	use crate::{typechecker, driver, frontend};
-	use super::parser;
+	use super::oldparser;
 	use std::fs;
 	use rayon::prelude::*;
 	let native_target_triple = driver::get_native_target_triple().unwrap();
-	let program_parser = parser::ProgramParser::new();
+	let program_parser = oldparser::ProgramParser::new();
 	let test_file_names: Vec<std::path::PathBuf> = fs::read_dir("src/tests").unwrap()
 		.filter_map(|entry| {
 			let path: std::path::PathBuf = entry.unwrap().path();
