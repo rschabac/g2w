@@ -1,3 +1,4 @@
+use crate::ast;
 #[derive(Debug, Clone, Copy)]
 pub struct Loc<T> {
 	elt: T,
@@ -23,7 +24,7 @@ impl<T: Hash> Hash for Loc<T> {
 
 impl<T: PartialEq> PartialEq for Loc<T> {
 	fn eq(&self, other: &Self) -> bool {
-		&self.elt == &other.elt
+		self.elt == other.elt
 	}
 }
 impl<T: Eq> Eq for Loc<T> {}
@@ -51,6 +52,14 @@ impl IntSize{
 			IntSize::Size64 => 64
 		}
 	}
+	pub fn to_owned_ast(self) -> ast::IntSize {
+		match self {
+			IntSize::Size8 => ast::IntSize::Size8,
+			IntSize::Size16 => ast::IntSize::Size16,
+			IntSize::Size32 => ast::IntSize::Size32,
+			IntSize::Size64 => ast::IntSize::Size64,
+		}
+	}
 }
 impl Display for IntSize {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -64,7 +73,15 @@ pub enum FloatSize{
 	FSize32,
 	FSize64
 }
-impl std::fmt::Display for FloatSize {
+impl FloatSize{
+	pub fn to_owned_ast(self) -> ast::FloatSize {
+		match self {
+			FloatSize::FSize32 => ast::FloatSize::FSize32,
+			FloatSize::FSize64 => ast::FloatSize::FSize64
+		}
+	}
+}
+impl Display for FloatSize {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		use FloatSize::*;
 		write!(f, "{}", 
@@ -226,9 +243,24 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 		}
 	}
 
+	pub fn to_owned_ast(&self) -> ast::Ty {
+		use Ty::*;
+		match self {
+			Bool => ast::Ty::Bool,
+			Int{signed, size} => ast::Ty::Int{signed: *signed, size: size.to_owned_ast()},
+			Float(size) => ast::Ty::Float(size.to_owned_ast()),
+			Ptr(None) => ast::Ty::Ptr(None),
+			Ptr(Some(t)) => ast::Ty::Ptr(Some(Box::new(t.to_owned_ast()))),
+			Array{length, typ} => ast::Ty::Array{length: *length, typ: Box::new(typ.to_owned_ast())},
+			Struct(s) => ast::Ty::Struct((*s).to_owned()),
+			TypeVar(s) => ast::Ty::TypeVar((*s).to_owned()),
+			GenericStruct{type_param, name} => ast::Ty::GenericStruct{type_param: Box::new(type_param.to_owned_ast()), name: (*name).to_owned()}
+		}
+	}
+
 }
 
-impl<'src, 'arena> std::fmt::Display for Ty<'src, 'arena> {
+impl<'src, 'arena> Display for Ty<'src, 'arena> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		use Ty::*;
 		match self {
@@ -251,6 +283,16 @@ impl<'src, 'arena> std::fmt::Display for Ty<'src, 'arena> {
 pub enum UnaryOp{
 	Neg, Lognot, Bitnot
 }
+impl UnaryOp {
+	pub fn to_owned_ast(self) -> ast::UnaryOp {
+		use UnaryOp::*;
+		match self {
+			Neg => ast::UnaryOp::Neg,
+			Lognot => ast::UnaryOp::Lognot,
+			Bitnot => ast::UnaryOp::Bitnot
+		}
+	}
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOp{
@@ -260,6 +302,32 @@ pub enum BinaryOp{
 	And, Or,
 	Bitand, Bitor, Bitxor,
 	Shl /* << */, Shr /* >> */, Sar	/* >>> */
+}
+impl BinaryOp {
+	pub fn to_owned_ast(self) -> ast::BinaryOp {
+		use BinaryOp::*;
+		match self {
+			Add => ast::BinaryOp::Add,
+			Sub => ast::BinaryOp::Sub,
+			Mul => ast::BinaryOp::Mul,
+			Div => ast::BinaryOp::Div,
+			Mod => ast::BinaryOp::Mod,
+			Equ => ast::BinaryOp::Equ,
+			Neq => ast::BinaryOp::Neq,
+			Lt => ast::BinaryOp::Lt,
+			Lte => ast::BinaryOp::Lte,
+			Gt => ast::BinaryOp::Gt,
+			Gte => ast::BinaryOp::Gte,
+			And => ast::BinaryOp::And,
+			Or => ast::BinaryOp::Or,
+			Bitand => ast::BinaryOp::Bitand,
+			Bitor => ast::BinaryOp::Bitor,
+			Bitxor => ast::BinaryOp::Bitxor,
+			Shl => ast::BinaryOp::Shl,
+			Shr => ast::BinaryOp::Shr,
+			Sar => ast::BinaryOp::Sar
+		}
+	}
 }
 
 use std::borrow::Cow;
@@ -285,6 +353,35 @@ pub enum Expr<'src, 'arena> where 'src: 'arena {
 	Deref(Loc<&'arena Expr<'src, 'arena>>),
 	Sizeof(Loc<&'arena Ty<'src, 'arena>>)
 }
+impl<'src: 'arena, 'arena> Expr<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::Expr {
+		use Expr::*;
+		match self {
+			LitNull => ast::Expr::LitNull,
+			LitBool(b) => ast::Expr::LitBool(*b),
+			LitSignedInt(val, size) => ast::Expr::Cast(ast::Ty::Int{signed: true, size: size.to_owned_ast()}, Box::new(ast::Expr::LitSignedInt(*val))),
+			LitUnsignedInt(val, size) => ast::Expr::Cast(ast::Ty::Int{signed: false, size: size.to_owned_ast()}, Box::new(ast::Expr::LitUnsignedInt(*val))),
+			LitFloat(f) => ast::Expr::LitFloat(*f),
+			LitString(s) => ast::Expr::LitString(s.clone().into_owned()),
+			Id(s) => ast::Expr::Id((*s).to_owned()),
+			Index(base_loc, index_loc) => ast::Expr::Index(Box::new(base_loc.elt.to_owned_ast()), Box::new(index_loc.elt.to_owned_ast())),
+			Proj(base_loc, field) => ast::Expr::Proj(Box::new(base_loc.elt.to_owned_ast()), field.elt.to_owned()),
+			Call(name_loc, arg_locs) => ast::Expr::Call(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.to_owned_ast()).collect()),
+			GenericCall{name, type_param, args} =>
+				ast::Expr::GenericCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.to_owned_ast()).collect()},
+			Cast(ty_loc, e_loc) => ast::Expr::Cast(ty_loc.elt.to_owned_ast(), Box::new(e_loc.elt.to_owned_ast())),
+			Binop(lhs_loc, op, rhs_loc) => ast::Expr::Binop(
+				Box::new(lhs_loc.elt.to_owned_ast()),
+				op.to_owned_ast(),
+				Box::new(rhs_loc.elt.to_owned_ast()),
+			),
+			Unop(op, e_loc) => ast::Expr::Unop(op.to_owned_ast(), Box::new(e_loc.elt.to_owned_ast())),
+			GetRef(e_loc) => ast::Expr::GetRef(Box::new(e_loc.elt.to_owned_ast())),
+			Deref(e_loc) => ast::Expr::Deref(Box::new(e_loc.elt.to_owned_ast())),
+			Sizeof(ty_loc) => ast::Expr::Sizeof(ty_loc.elt.to_owned_ast())
+		}
+	}
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Stmt<'src, 'arena> where 'src: 'arena {
@@ -294,15 +391,46 @@ pub enum Stmt<'src, 'arena> where 'src: 'arena {
 	SCall(Loc<&'src str>, &'arena [Loc<Expr<'src, 'arena>>]),
 	GenericSCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena [Loc<Expr<'src, 'arena>>]},
 	If(Loc<Expr<'src, 'arena>>, Block<'src, 'arena>, Block<'src, 'arena>),
-	While(Expr<'src, 'arena>, Block<'src, 'arena>)
+	While(Loc<Expr<'src, 'arena>>, Block<'src, 'arena>)
+}
+impl<'src: 'arena, 'arena> Stmt<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::Stmt {
+		use Stmt::*;
+		match self {
+			Assign(lhs_loc, rhs_loc) => ast::Stmt::Assign(lhs_loc.elt.to_owned_ast(), rhs_loc.elt.to_owned_ast()),
+			Decl(ty_loc, name_loc) => ast::Stmt::Decl(ty_loc.elt.to_owned_ast(), name_loc.elt.to_owned()),
+			Return(None) => ast::Stmt::Return(None),
+			Return(Some(e_loc)) => ast::Stmt::Return(Some(e_loc.elt.to_owned_ast())),
+			SCall(name_loc, arg_locs) => ast::Stmt::SCall(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.to_owned_ast()).collect()),
+			GenericSCall{name, type_param, args} =>
+				ast::Stmt::GenericSCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.to_owned_ast()).collect()},
+			If(cond_loc, then_block, else_block) => ast::Stmt::If(cond_loc.elt.to_owned_ast(), then_block.to_owned_ast(), else_block.to_owned_ast()),
+			While(cond_loc, block) => ast::Stmt::While(cond_loc.elt.to_owned_ast(), block.to_owned_ast())
+		}
+	}
 }
 
-pub type Block<'src, 'arena> = &'arena [Loc<Stmt<'src, 'arena>>];
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Block<'src, 'arena>(&'arena [Loc<Stmt<'src, 'arena>>]);
+impl<'src: 'arena, 'arena> Block<'src, 'arena> {
+	pub fn to_owned_ast(self) -> ast::Block {
+		self.0.iter().map(|s| s.elt.to_owned_ast()).collect()
+	}
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum PolymorphMode{
 	Separated,
 	Erased
+}
+impl PolymorphMode {
+	pub fn to_owned_ast(self) -> ast::PolymorphMode {
+		use PolymorphMode::*;
+		match self {
+			Separated => ast::PolymorphMode::Separated,
+			Erased => ast::PolymorphMode::Erased
+		}
+	}
 }
 
 #[derive(Debug, PartialEq)]
@@ -338,6 +466,7 @@ pub enum Gdecl<'src, 'arena> where 'src: 'arena {
 		mode: Loc<PolymorphMode>
 	}
 }
+//not implementing to_owned_ast for Gdecl, I will sort the gdecls before converting them to old ast
 
 pub struct Func<'src: 'arena, 'arena> {
 	pub ret_type: Loc<Option<&'arena Ty<'src, 'arena>>>,
@@ -345,16 +474,43 @@ pub struct Func<'src: 'arena, 'arena> {
 	pub args: &'arena [(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)],
 	pub body: Block<'src, 'arena>,
 }
+impl<'src: 'arena, 'arena> Func<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::Func {
+		ast::Func{
+			ret_type: self.ret_type.elt.map(|t| t.to_owned_ast()),
+			name: self.name.elt.to_owned(),
+			args: self.args.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+			body: self.body.to_owned_ast()
+		}
+	}
+}
 
 pub struct Struct<'src: 'arena, 'arena> {
 	pub name: Loc<&'src str>,
 	pub fields: &'arena [(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)]
+}
+impl<'src: 'arena, 'arena> Struct<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::Struct {
+		ast::Struct{
+			name: self.name.elt.to_owned(),
+			fields: self.fields.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+		}
+	}
 }
 
 pub struct GenericStruct<'src: 'arena, 'arena> {
 	pub name: Loc<&'src str>,
 	pub var: Loc<&'src str>,
 	pub fields: &'arena [(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)]
+}
+impl<'src: 'arena, 'arena> GenericStruct<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::GenericStruct {
+		ast::GenericStruct{
+			name: self.name.elt.to_owned(),
+			var: self.var.elt.to_owned(),
+			fields: self.fields.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+		}
+	}
 }
 
 pub struct GenericFunc<'src: 'arena, 'arena> {
@@ -364,11 +520,31 @@ pub struct GenericFunc<'src: 'arena, 'arena> {
 	pub body: Block<'src, 'arena>,
 	pub var: Loc<&'src str>,
 }
+impl<'src: 'arena, 'arena> GenericFunc<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::GenericFunc {
+		ast::GenericFunc{
+			ret_type: self.ret_type.elt.map(|t| t.to_owned_ast()),
+			name: self.name.elt.to_owned(),
+			args: self.args.iter().map(|(t, name)| (t.elt.to_owned_ast(), name.elt.to_owned())).collect(),
+			body: self.body.to_owned_ast(),
+			var: self.var.elt.to_owned()
+		}
+	}
+}
 
 pub struct ExternalFunc<'src: 'arena, 'arena> {
 	pub name: Loc<&'src str>,
 	pub ret_type: Loc<Option<&'arena Ty<'src, 'arena>>>,
 	pub arg_types: &'arena [Loc<&'arena Ty<'src, 'arena>>]
+}
+impl<'src: 'arena, 'arena> ExternalFunc<'src, 'arena> {
+	pub fn to_owned_ast(&self) -> ast::ExternalFunc {
+		ast::ExternalFunc{
+			ret_type: self.ret_type.elt.map(|t| t.to_owned_ast()),
+			name: self.name.elt.to_owned(),
+			arg_types: self.arg_types.iter().map(|t| t.elt.to_owned_ast()).collect(),
+		}
+	}
 }
 
 //I don't need to know the location of an entire function, so not wrapping Func, Struct, etc. in Loc<> here
@@ -426,7 +602,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 
 		let mut just_funcs = gdecls.iter().filter_map(|g| {
 			if let GFuncDecl{ret_type, name, args, body} = g {
-				Some(Func{ret_type: *ret_type, name: *name, args, body})
+				Some(Func{ret_type: *ret_type, name: *name, args, body: *body})
 			} else { None }
 		});
 		let funcs: &'arena [Func<'src, 'arena>] =
@@ -462,7 +638,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 
 		let mut just_erased_funcs = gdecls.iter().filter_map(|g| {
 			if let GGenericFuncDecl{ret_type, name, args, body, var, mode: Loc{elt: PolymorphMode::Separated, ..}} = g {
-				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body, var: *var})
+				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body: *body, var: *var})
 			} else { None }
 		});
 		let erased_funcs: &'arena [GenericFunc<'src, 'arena>] =
@@ -471,7 +647,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 
 		let mut just_separated_funcs = gdecls.iter().filter_map(|g| {
 			if let GGenericFuncDecl{ret_type, name, args, body, var, mode: Loc{elt: PolymorphMode::Separated, ..}} = g {
-				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body, var: *var})
+				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body: *body, var: *var})
 			} else { None }
 		});
 		let separated_funcs: &'arena [GenericFunc<'src, 'arena>] =
@@ -489,5 +665,18 @@ impl<'src, 'arena> Program<'src, 'arena> {
 			separated_funcs
 		};
 		arena.alloc(result_prog)
+	}
+	
+	pub fn to_owned_ast(&self) -> ast::Program {
+		ast::Program{
+			external_funcs: self.external_funcs.iter().map(|e| e.to_owned_ast()).collect(),
+			global_vars: self.global_vars.iter().map(|(ty_loc, name_loc)| (ty_loc.elt.to_owned_ast(), name_loc.elt.to_owned())).collect(),
+			funcs: self.funcs.iter().map(|e| e.to_owned_ast()).collect(),
+			structs: self.structs.iter().map(|e| e.to_owned_ast()).collect(),
+			erased_structs: self.erased_structs.iter().map(|e| e.to_owned_ast()).collect(),
+			separated_structs: self.separated_structs.iter().map(|e| e.to_owned_ast()).collect(),
+			erased_funcs: self.erased_funcs.iter().map(|e| e.to_owned_ast()).collect(),
+			separated_funcs: self.separated_funcs.iter().map(|e| e.to_owned_ast()).collect(),
+		}
 	}
 }

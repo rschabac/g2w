@@ -903,7 +903,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 	value contains a 'T but is not a DST, then bitcast from Ptrchain...(i8) to Ptrchain...(expected type)
 	*/
 	#[allow(non_snake_case)]
-	fn depth_of_DST_in_ptr_chain<'a>(t: &'a ast::Ty, structs: &typechecker::StructContext, mode: Option<ast::PolymorphMode>) -> Option<usize> {
+	fn depth_of_DST_in_ptr_chain(t: &ast::Ty, structs: &typechecker::StructContext, mode: Option<ast::PolymorphMode>) -> Option<usize> {
 		match t {
 			ast::Ty::Ptr(Some(boxed)) => depth_of_DST_in_ptr_chain(boxed.as_ref(), structs, mode).map(|i| i+1),
 			other if other.is_DST(structs, mode) => Some(0),
