@@ -386,14 +386,30 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		cached: RwLock::new(HashMap::new())
 	};
 	let arena_arena = Herd::new();
-	let LexParseResult{ast, errors: lex_and_parse_errors} = lex_and_parse(src_inputs.as_slice(), &typecache, &arena_arena);
+	let LexParseResult{ast, mut errors} = lex_and_parse(src_inputs.as_slice(), &typecache, &arena_arena);
 	let ast: Vec<ast::Gdecl> = ast.iter().map(|&g| g.to_owned_ast()).collect();
 	timeinfo.parsing.1 = Instant::now();
 	timeinfo.typechecking.0 = timeinfo.parsing.1;
 	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
-		format!("Type Error: {}", err_msg)
-	})?;
+		//for now, only one type error will be generated
+		errors.push(Error{
+			err: err_msg,
+			byte_offset: 0,
+			approx_len: 0,
+			file_id: 0
+		});
+	});
 	timeinfo.typechecking.1 = Instant::now();
+	if !errors.is_empty() {
+		timeinfo.end_time = Instant::now();
+		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice());
+		if options.print_timings {
+			return Ok(Some(timeinfo));
+		} else {
+			return Ok(None);
+		}
+	}
+	let program_context = program_context.unwrap();
 	if last_phase == Phase::Check {
 		timeinfo.end_time = Instant::now();
 		if options.print_timings {
@@ -572,14 +588,6 @@ pub fn print_timings() -> Result<(), String> {
 	Ok(())
 }
 
-#[derive(Debug)]
-pub struct Error {
-	pub err: String,
-	pub byte_offset: usize,
-	pub approx_len: usize,
-	pub file_id: u16,
-}
-
 //contains the ast, vec of errors, and any other data that needs to outlive lex_and_parse() (which may not work???)
 struct LexParseResult<'src: 'arena, 'arena> {
 	ast: Vec<&'arena ast2::Gdecl<'src, 'arena>>,
@@ -611,3 +619,74 @@ fn lex_and_parse<'src: 'arena, 'arena>(input_srcs: &'src [String], typecache: &'
 	.partition_map(|result| result.into());
 	LexParseResult{ast: gdecls, errors}
 }
+
+#[derive(Debug)]
+pub struct Error {
+	pub err: String,
+	pub byte_offset: usize,
+	pub approx_len: usize,
+	pub file_id: u16,
+}
+
+fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [Error]) {
+	let stderr_is_term = console::user_attended_stderr();
+	let err_style = if stderr_is_term {
+		console::Style::new().fg(console::Color::Red)
+	} else {
+		console::Style::new()
+	};
+	//sort the errors by file_id, then byte_offset
+	errors.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id).then(a.byte_offset.cmp(&b.byte_offset)));
+	use std::collections::{HashMap, BTreeSet};
+	let mut byte_offsets: Vec<BTreeSet<usize>> = Vec::with_capacity(input_srcs.len());
+	byte_offsets.resize_with(input_srcs.len(), Default::default);
+	for Error{file_id, byte_offset, ..} in errors.iter() {
+		byte_offsets[*file_id as usize].insert(*byte_offset);
+	}
+	//for file_id x, byte_offsets[x][i] = (line_num, col_num) of byte offset of i in file x
+	let mut line_info: Vec<HashMap<usize, (usize, usize)>> = Vec::with_capacity(input_srcs.len());
+	line_info.resize_with(input_srcs.len(), Default::default);
+	line_info.par_iter_mut().enumerate().for_each(|(file_id, locs)| {
+		if byte_offsets[file_id as usize].is_empty() {
+			return;
+		}
+		let src = input_srcs[file_id as usize].as_str();
+		let mut byte_offsets_in_this_file_iter = byte_offsets[file_id as usize].iter().copied();
+		let mut current_line = 1;
+		let mut current_col = 1;
+		let mut current_target = byte_offsets_in_this_file_iter.next().unwrap();
+		use unicode_segmentation::UnicodeSegmentation;
+		for (byte_offset, grapheme) in src.grapheme_indices(true) {
+			if byte_offset == current_target {
+				locs.insert(byte_offset, (current_line, current_col));
+				match byte_offsets_in_this_file_iter.next() {
+					None => break,
+					Some(t) => {current_target = t;}
+				};
+			}
+			if grapheme.contains('\n') {
+				current_line += 1;
+				current_col = 1;
+			} else {
+				current_col += 1;
+			}
+		}
+	});
+	for (i, Error{err: message, byte_offset, approx_len, file_id}) in errors.iter().enumerate() {
+		let (line, col) = line_info[*file_id as usize].get(byte_offset).cloned().unwrap();
+		let src = input_srcs[*file_id as usize].as_str();
+		eprintln!("Error at {}:{}:{}: {}", input_file_names[*file_id as usize], line, col, message);
+		let line_begin_offset: usize = src[..*byte_offset].rfind('\n').unwrap_or(0);
+		let line_end_offset: Option<usize> = src[(byte_offset + approx_len)..].find('\n').map(|x| x + byte_offset + approx_len + 1);
+		let to_line_end: &str = match line_end_offset {
+			None => &src[(byte_offset+approx_len)..],
+			Some(t) => &src[(byte_offset+approx_len)..t],
+		};
+		eprintln!("{}{}{}", &src[line_begin_offset..*byte_offset], err_style.apply_to(&src[*byte_offset..(byte_offset + approx_len)]), to_line_end);
+		if i != errors.len() - 1 {
+			eprintln!();
+		}
+	}
+}
+
+

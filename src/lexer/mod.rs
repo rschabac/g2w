@@ -133,7 +133,7 @@ pub struct Lexer<'src> {
 
 //determines if a char is something that can be in an identifier
 fn valid_in_ident(c: char) -> bool {
-	!c.is_whitespace() && !c.is_ascii_punctuation() && !c.is_control()
+	!c.is_whitespace() && (c == '_' || !c.is_ascii_punctuation()) && !c.is_control()
 }
 
 impl<'src> Lexer<'src> {

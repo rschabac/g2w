@@ -83,14 +83,24 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			typecache
 		}
 	}
-	pub fn parse_gdecls(self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
-		//let first_token_byte_offset = self.peeker.next().unwrap().byte_offset;
-		let first_token_byte_offset = self.arena as *const _ as usize;
-		let ty: &'arena Ty<'src, 'arena> = &*self.arena.alloc(Ty::Bool);
-		let ty = ty.getref(self.typecache);
-		let ty_loc = Loc{elt: ty, byte_offset: 0, byte_len: 0};
-		let name = &*Box::leak(format!("file_{}_{}", self.file_id, first_token_byte_offset).into_boxed_str());
-		let name_loc = Loc{elt: name, byte_offset: 0, byte_len: 0};
+	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
+		let first_3_tokens: Vec<_> = self.peeker.take(3).collect();
+		self.errors.push(Error{
+			err: "first bad token".to_owned(),
+			byte_offset: first_3_tokens[0].byte_offset,
+			approx_len: first_3_tokens[0].byte_len,
+			file_id: self.file_id
+		});
+		self.errors.push(Error{
+			err: "second bad token".to_owned(),
+			byte_offset: first_3_tokens[1].byte_offset,
+			approx_len: first_3_tokens[1].byte_len,
+			file_id: self.file_id
+		});
+		let ty = Ty::Bool.getref(self.typecache);
+		let ty_loc = Loc{elt: ty, byte_offset: first_3_tokens[2].byte_offset, byte_len: 0, file_id: self.file_id};
+		let name = &*Box::leak(format!("file_{}", self.file_id).into_boxed_str());
+		let name_loc = Loc{elt: name, byte_offset: 0, byte_len: 0, file_id: self.file_id};
 		let temp = &*self.arena.alloc(Gdecl::GVarDecl(ty_loc, name_loc));
 		(vec![temp], self.errors)
 	}

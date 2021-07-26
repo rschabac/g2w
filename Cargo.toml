@@ -23,6 +23,8 @@ tempfile = "3.2.0"
 guess_host_triple = "0.1.2"
 bumpalo = "3.7.0"
 bumpalo-herd = "0.1.1"
+unicode-segmentation = "1.8.0"
+console = "0.14"
 
 # Add a build-time dependency on the lalrpop library:
 [build-dependencies]

@@ -3,7 +3,8 @@ use crate::ast;
 pub struct Loc<T> {
 	pub elt: T,
 	pub byte_offset: usize,
-	pub byte_len: usize
+	pub byte_len: usize,
+	pub file_id: u16
 }
 
 impl<T: Copy> Copy for Loc<T> {}
@@ -155,12 +156,10 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 	//if it is, this method will return a reference to the place in the arena where it already exists
 	//if it is not, this method will allocate it in the arena, and return a reference to it
 	pub fn getref(&self, cache: &'arena TypeCache<'src, 'arena>) -> &'arena Self {
-		println!("thread {:?} called getref on {}", rayon::current_thread_index(), self);
 		let read_access = cache.cached.read().unwrap();
 		let cached_result: Option<&'arena Ty<'src, 'arena>> = read_access.get(self).cloned();
 		drop(read_access);
 		if let Some(cached) = cached_result {
-			println!("thread {:?} sees that {} was cached", rayon::current_thread_index(), self);
 			cached
 		} else {
 			/*
@@ -171,9 +170,7 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 			is much more common, and multiple threads should be able to do that at the same time.
 			*/
 			let mut write_access = cache.cached.write().unwrap();
-			println!("thread {:?} got write access", rayon::current_thread_index());
 			if let Some(cached) = cached_result {
-				println!("thread {:?} sees that {} was already allocated, dropped write access", rayon::current_thread_index(), self);
 				return cached;
 			}
 			/*
@@ -181,7 +178,6 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 			the &'arena mut bump while I still have the &'arena Bump
 			*/
 			let lock_guard = cache.arena.lock().unwrap();
-			println!("thread {:?} locked arena mutex", rayon::current_thread_index());
 			let arenaref: & &'arena mut bumpalo::Bump = &lock_guard;
 			let arenaref: &'arena bumpalo::Bump = unsafe {
 				*(arenaref as *const &'arena mut bumpalo::Bump) as &'arena bumpalo::Bump
@@ -189,9 +185,7 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 			let new_alloc: &'arena Ty<'src, 'arena> = arenaref.alloc(self.clone());
 			drop(lock_guard);
 			drop(arenaref);
-			println!("thread {:?} unlocked arena mutex", rayon::current_thread_index());
 			write_access.insert(self.clone(), new_alloc);
-			println!("thread {:?} dropped write access", rayon::current_thread_index());
 			new_alloc
 			//todo!()
 		}
