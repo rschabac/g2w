@@ -184,7 +184,6 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 			};
 			let new_alloc: &'arena Ty<'src, 'arena> = arenaref.alloc(self.clone());
 			drop(lock_guard);
-			drop(arenaref);
 			write_access.insert(self.clone(), new_alloc);
 			new_alloc
 			//todo!()

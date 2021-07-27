@@ -80,21 +80,22 @@ fn string_literal_with_hex_escapes() {
 #[test]
 fn numeric_literals() {
 	use Token::*;
-	use crate::ast::IntSize::*;
-	use crate::ast::FloatSize::*;
-	let source = "123 123u32 123.0 123. 123.5f32 0 0.f64 0xA 0X123aBcu64";
+	use crate::ast2::IntSize::*;
+	use crate::ast2::FloatSize::*;
+	let source = "123 123u32 123.0 123. 123.5f32 0 0.f64 0xA 0X123aBcu64 0i8";
 	let token_locs = lex_str(source);
-	assert_eq!(9, token_locs.len());
+	assert_eq!(10, token_locs.len());
 	let expected = &[
-		TokenLoc{token: INT{val: 123, bits: Size64}, byte_offset: 0, byte_len: 3},
-		TokenLoc{token: UINT{val: 123, bits: Size32}, byte_offset: 4, byte_len: 6},
+		TokenLoc{token: INT{val: 123, bits: Size64, signed: true}, byte_offset: 0, byte_len: 3},
+		TokenLoc{token: INT{val: 123, bits: Size32, signed: false}, byte_offset: 4, byte_len: 6},
 		TokenLoc{token: FLOAT{val: 123.0, bits: FSize64}, byte_offset: 11, byte_len: 5},
 		TokenLoc{token: FLOAT{val: 123.0, bits: FSize64}, byte_offset: 17, byte_len: 4},
 		TokenLoc{token: FLOAT{val: 123.5, bits: FSize32}, byte_offset: 22, byte_len: 8},
-		TokenLoc{token: INT{val: 0, bits: Size64}, byte_offset: 31, byte_len: 1},
+		TokenLoc{token: INT{val: 0, bits: Size64, signed: true}, byte_offset: 31, byte_len: 1},
 		TokenLoc{token: FLOAT{val: 0.0, bits: FSize64}, byte_offset: 33, byte_len: 5},
-		TokenLoc{token: INT{val: 0xA, bits: Size64}, byte_offset: 39, byte_len: 3},
-		TokenLoc{token: UINT{val: 0x123abc, bits: Size64}, byte_offset: 43, byte_len: 11}
+		TokenLoc{token: INT{val: 0xA, bits: Size64, signed: true}, byte_offset: 39, byte_len: 3},
+		TokenLoc{token: INT{val: 0x123abc, bits: Size64, signed: false}, byte_offset: 43, byte_len: 11},
+		TokenLoc{token: INT{val: 0, bits: Size8, signed: true}, byte_offset: 55, byte_len: 3}
 	];
 	for (expected, given) in expected.iter().zip(token_locs.iter()) {
 		assert_eq!(expected, given);
@@ -110,8 +111,8 @@ fn keywords() {
 		TokenLoc{token: BOOL, byte_offset: 0, byte_len: 4},
 		TokenLoc{token: F32, byte_offset: 5, byte_len: 3},
 		TokenLoc{token: F64, byte_offset: 9, byte_len: 3},
-		TokenLoc{token: INTTYPE{bits: crate::ast::IntSize::Size8, signed: true}, byte_offset: 13, byte_len: 2},
-		TokenLoc{token: INTTYPE{bits: crate::ast::IntSize::Size16, signed: false}, byte_offset: 16, byte_len: 3},
+		TokenLoc{token: INTTYPE{bits: crate::ast2::IntSize::Size8, signed: true}, byte_offset: 13, byte_len: 2},
+		TokenLoc{token: INTTYPE{bits: crate::ast2::IntSize::Size16, signed: false}, byte_offset: 16, byte_len: 3},
 		TokenLoc{token: COMMA, byte_offset: 19, byte_len: 1},
 		TokenLoc{token: VOID, byte_offset: 20, byte_len: 4},
 		TokenLoc{token: DOT, byte_offset: 24, byte_len: 1},

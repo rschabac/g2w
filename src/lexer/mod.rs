@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::ast;
+use crate::ast2;
 use crate::driver::Error;
 
 use std::borrow::Cow;
@@ -76,13 +76,14 @@ pub enum Token<'src> {
 	IDENT(&'src str),
 	//types
 	BOOL,
-	INTTYPE{bits: ast::IntSize, signed: bool},
+	INTTYPE{bits: ast2::IntSize, signed: bool},
 	F32, F64, VOID, STAR,
 	STRUCT, AT, SEPARATED, ERASED,
 	//literals
-	INT{val: i64, bits: ast::IntSize},
-	UINT{val: u64, bits: ast::IntSize},
-	FLOAT{val: f64, bits: ast::FloatSize},
+	INT{val: u64, bits: ast2::IntSize, signed: bool},
+	//all int literals will be non-negative, so they can be represented as u64
+	//UINT{val: u64, bits: ast::IntSize},
+	FLOAT{val: f64, bits: ast2::FloatSize},
 	NULL, TRUE, FALSE,
 	STR(Cow<'src, str>),
 	//Comparisons
@@ -98,6 +99,40 @@ pub enum Token<'src> {
 	EQ, SEMI, IF, ELSE, WHILE, RETURN,
 	EXTERN
 }
+impl<'src> Token<'src> {
+	pub fn same_kind(&self, other: &Self) -> bool {
+		std::mem::discriminant(self) == std::mem::discriminant(other)
+	}
+}
+impl<'src> std::fmt::Display for Token<'src> {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		use Token::*;
+		match self {
+			LPAREN => write!(f, "("), RPAREN => write!(f, ")"),
+			LBRACKET => write!(f, "["), RBRACKET => write!(f, "]"),
+			LBRACE => write!(f, "{{"), RBRACE => write!(f, "}}"),
+			COMMA => write!(f, ","), DOT => write!(f, "."), APOSTROPHE => write!(f, "'"),
+			BOOL => write!(f, "bool"), F32 => write!(f, "f32"), F64 => write!(f, "f64"),
+			VOID => write!(f, "void"), STAR => write!(f, "*"), STRUCT => write!(f, "struct"),
+			AT => write!(f, "@"), SEPARATED => write!(f, "separated"), ERASED => write!(f, "erased"),
+			NULL => write!(f, "null"), TRUE => write!(f, "true"), FALSE => write!(f, "false"),
+			LT => write!(f, "<"), LTE => write!(f, "<="), GT => write!(f, ">"), GTE => write!(f, ">="),
+			EQEQ => write!(f, "=="), NOTEQ => write!(f, "!="),
+			OR => write!(f, "|"), OROR => write!(f, "||"),
+			AND => write!(f, "&"), ANDAND => write!(f, "&&"),
+			XOR => write!(f, "^"), SHL => write!(f, "<<"), SHR => write!(f, ">>"), SAR => write!(f, ">>>"),
+			PLUS => write!(f, "+"), MINUS => write!(f, "-"), SLASH => write!(f, "/"), PERCENT => write!(f, "%"),
+			TILDE => write!(f, "~"), NOT => write!(f, "!"), EQ => write!(f, "="), SEMI => write!(f, ";"),
+			SIZEOF => write!(f, "sizeof"), CAST => write!(f, "cast"), IF => write!(f, "if"), ELSE => write!(f, "else"),
+			WHILE => write!(f, "while"), RETURN => write!(f, "return"), EXTERN => write!(f, "extern"),
+			IDENT(id) => write!(f, "{}", id),
+			INTTYPE{bits, signed} => write!(f, "{}{}", if *signed {'i'} else {'u'}, bits),
+			INT{val, bits, signed} => write!(f, "{}{}{}", val, if *signed {'i'} else {'u'}, bits),
+			FLOAT{val, bits} => write!(f, "{}{}{}", val, if val.fract() == 0.0 {".0"} else {""}, bits),
+			STR(s) => write!(f, "\"{}\"", s.escape_default()),
+		}
+	}
+}
 impl<'src> Default for Token<'src> {
 	fn default() -> Self {
 		//this string will never be a valid identifier
@@ -112,6 +147,11 @@ pub struct TokenLoc<'src> {
 	//Tokens need to store their length because of string literals:
 	//"a" and "\x61" are represented the same way, but have different byte lens
 	pub byte_len: usize
+}
+impl<'src> TokenLoc<'src> {
+	pub fn same_kind(&self, other: &Self) -> bool {
+		self.token.same_kind(&other.token)
+	}
 }
 impl<'src> Default for TokenLoc<'src> {
 	fn default() -> Self {
@@ -316,7 +356,7 @@ impl<'src> Lexer<'src> {
 							},
 							Some(c) => {
 								if c == '"' {
-									self.peeker.next();
+									self.poll();
 									//found the ending ", no escape characters, so represent the string as a &'src str
 									let str_literal: &'src str = self.src.get((initial_offset+1)..(initial_offset+1+len)).expect("could not get substr for string lit");
 									emit(STR(Cow::Borrowed(str_literal)), len + 2 * '"'.len_utf8(), initial_offset);
@@ -326,7 +366,7 @@ impl<'src> Lexer<'src> {
 									//escape sequence
 									break
 								} else {
-									self.peeker.next();
+									self.poll();
 									len += c.len_utf8();
 								}
 							}
@@ -337,7 +377,7 @@ impl<'src> Lexer<'src> {
 						//first, copy the chars that were already scanned
 						let mut acc: String = self.src.get((initial_offset+1)..(initial_offset+1+len)).expect("could not get substr to copy to String").to_owned();
 						loop {
-							match self.peeker.peek(0) {
+							match self.poll() {
 								None => {
 									//string literal runs until EOF
 									let error = Error {
@@ -351,12 +391,10 @@ impl<'src> Lexer<'src> {
 								},
 								Some(c) => {
 									if c == '"' {
-										self.peeker.next();
 										//found the ending "
 										emit(STR(Cow::Owned(acc)), len + 2 * '"'.len_utf8(), initial_offset);
 										break
 									} else if c == '\\' {
-										self.poll();
 										len += '\\'.len_utf8();
 										//escape sequence
 										match self.poll() {
@@ -439,7 +477,6 @@ impl<'src> Lexer<'src> {
 											}
 										}
 									} else {
-										self.poll();
 										len += c.len_utf8();
 										acc.push(c);
 									}
@@ -459,7 +496,7 @@ impl<'src> Lexer<'src> {
 						match self.peeker.peek(0) {
 							None => {
 								//just "0", and hit EOF
-								emit(INT{val: 0, bits: ast::IntSize::Size64}, 1, initial_offset);
+								emit(INT{val: 0, bits: ast2::IntSize::Size64, signed: true}, 1, initial_offset);
 								break
 							},
 							Some(d) if d.is_ascii_digit() => {
@@ -526,20 +563,20 @@ impl<'src> Lexer<'src> {
 							acc_string.push(c)
 						});
 						let float_val: f64 = acc_string.parse::<f64>().expect("could not parse accumulated string as f64") + acc as f64;
-						let size: ast::FloatSize = if self.next_is('f') {
+						let size: ast2::FloatSize = if self.next_is('f') {
 							approx_len += 1;
 							match (self.peeker.peek(0), self.peeker.peek(1)) {
 								(Some('3'), Some('2')) => {
 									self.poll();
 									self.poll();
 									approx_len += 2;
-									ast::FloatSize::FSize32
+									ast2::FloatSize::FSize32
 								},
 								(Some('6'), Some('4')) => {
 									self.poll();
 									self.poll();
 									approx_len += 2;
-									ast::FloatSize::FSize64
+									ast2::FloatSize::FSize64
 								},
 								(first, second) => {
 									approx_len += first.map(char::len_utf8).unwrap_or(0) + second.map(char::len_utf8).unwrap_or(0);
@@ -554,7 +591,7 @@ impl<'src> Lexer<'src> {
 								}
 							}
 						} else {
-							ast::FloatSize::FSize64
+							ast2::FloatSize::FSize64
 						};
 						emit(FLOAT{val: float_val, bits: size}, approx_len, initial_offset);
 					} else {
@@ -572,31 +609,31 @@ impl<'src> Lexer<'src> {
 						} else {
 							signed = true;
 						}
-						let size: ast::IntSize;
+						let size: ast2::IntSize;
 						if has_suffix {
 							match (self.peeker.peek(0), self.peeker.peek(1)) {
 								(Some('8'), _) => {
 									self.poll();
 									approx_len += 1;
-									size = ast::IntSize::Size8;
+									size = ast2::IntSize::Size8;
 								},
 								(Some('1'), Some('6')) => {
 									self.poll();
 									self.poll();
 									approx_len += 2;
-									size = ast::IntSize::Size16;
+									size = ast2::IntSize::Size16;
 								},
 								(Some('3'), Some('2')) => {
 									self.poll();
 									self.poll();
 									approx_len += 2;
-									size = ast::IntSize::Size32;
+									size = ast2::IntSize::Size32;
 								},
 								(Some('6'), Some('4')) => {
 									self.poll();
 									self.poll();
 									approx_len += 2;
-									size = ast::IntSize::Size64;
+									size = ast2::IntSize::Size64;
 								},
 								(first, second) => {
 									approx_len += first.is_some() as usize + second.is_some() as usize;
@@ -611,13 +648,9 @@ impl<'src> Lexer<'src> {
 								}
 							};
 						} else {
-							size = ast::IntSize::Size64;
+							size = ast2::IntSize::Size64;
 						}
-						if signed {
-							emit(INT{val: acc as i64, bits: size}, approx_len, initial_offset);
-						} else {
-							emit(UINT{val: acc, bits: size}, approx_len, initial_offset);
-						}
+						emit(INT{val: acc, bits: size, signed}, approx_len, initial_offset);
 					}
 				},
 				_ if c.is_alphabetic() => {
@@ -627,14 +660,14 @@ impl<'src> Lexer<'src> {
 					debug_assert!(self.src.is_char_boundary(initial_offset + len), "end of ident is not code point boundary");
 					let ident: &'src str = self.src.get(initial_offset..(initial_offset + len)).expect("could not get substr for ident");
 					const KEYWORDS: &[(&str, Token<'static>)] = &[("bool", BOOL), ("f32", F32), ("f64", F64),
-						("i8", INTTYPE{bits: ast::IntSize::Size8, signed: true}),
-						("i16", INTTYPE{bits: ast::IntSize::Size16, signed: true}),
-						("i32", INTTYPE{bits: ast::IntSize::Size32, signed: true}),
-						("i64", INTTYPE{bits: ast::IntSize::Size64, signed: true}),
-						("u8", INTTYPE{bits: ast::IntSize::Size8, signed: false}),
-						("u16", INTTYPE{bits: ast::IntSize::Size16, signed: false}),
-						("u32", INTTYPE{bits: ast::IntSize::Size32, signed: false}),
-						("u64", INTTYPE{bits: ast::IntSize::Size64, signed: false}),
+						("i8", INTTYPE{bits: ast2::IntSize::Size8, signed: true}),
+						("i16", INTTYPE{bits: ast2::IntSize::Size16, signed: true}),
+						("i32", INTTYPE{bits: ast2::IntSize::Size32, signed: true}),
+						("i64", INTTYPE{bits: ast2::IntSize::Size64, signed: true}),
+						("u8", INTTYPE{bits: ast2::IntSize::Size8, signed: false}),
+						("u16", INTTYPE{bits: ast2::IntSize::Size16, signed: false}),
+						("u32", INTTYPE{bits: ast2::IntSize::Size32, signed: false}),
+						("u64", INTTYPE{bits: ast2::IntSize::Size64, signed: false}),
 						("void", VOID), ("struct", STRUCT), ("separated", SEPARATED), ("erased", ERASED), ("null", NULL), ("true", TRUE), ("false", FALSE), ("sizeof", SIZEOF), ("cast", CAST), ("if", IF), ("else", ELSE), ("while", WHILE), ("return", RETURN), ("extern", EXTERN)];
 					let mut found_in_keywords = false;
 					for (string, tok) in KEYWORDS.iter() {

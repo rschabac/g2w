@@ -403,11 +403,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	if !errors.is_empty() {
 		timeinfo.end_time = Instant::now();
 		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice());
-		if options.print_timings {
-			return Ok(Some(timeinfo));
-		} else {
-			return Ok(None);
-		}
+		return Err("Compilation failed".to_owned());
 	}
 	let program_context = program_context.unwrap();
 	if last_phase == Phase::Check {
@@ -631,7 +627,7 @@ pub struct Error {
 fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [Error]) {
 	let stderr_is_term = console::user_attended_stderr();
 	let err_style = if stderr_is_term {
-		console::Style::new().fg(console::Color::Red)
+		console::Style::new().fg(console::Color::Red).bright()
 	} else {
 		console::Style::new()
 	};
@@ -673,6 +669,7 @@ fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [
 		}
 	});
 	for (i, Error{err: message, byte_offset, approx_len, file_id}) in errors.iter().enumerate() {
+		//TODO: clamp string slice indices to length of string
 		let (line, col) = line_info[*file_id as usize].get(byte_offset).cloned().unwrap();
 		let src = input_srcs[*file_id as usize].as_str();
 		eprintln!("Error at {}:{}:{}: {}", input_file_names[*file_id as usize], line, col, message);
