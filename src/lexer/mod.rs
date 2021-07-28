@@ -103,6 +103,32 @@ impl<'src> Token<'src> {
 	pub fn same_kind(&self, other: &Self) -> bool {
 		std::mem::discriminant(self) == std::mem::discriminant(other)
 	}
+	pub fn precedence(&self) -> (i32, ast2::BinaryOp) {
+		use Token::*;
+		use ast2::BinaryOp::*;
+		match self {
+			OROR => (10, Or),
+			ANDAND => (20, And),
+			OR => (30, Bitor),
+			XOR => (40, Bitxor),
+			AND => (50, Bitand),
+			EQEQ => (60, Equ),
+			NOTEQ => (60, Neq),
+			LT => (70, Lt),
+			LTE => (70, Lte),
+			GT => (70, Gt),
+			GTE => (70, Gte),
+			SHL => (80, Shl),
+			SHR => (80, Shr),
+			SAR => (80, Sar),
+			PLUS => (90, Add),
+			MINUS => (90, Sub),
+			STAR => (100, Mul),
+			SLASH => (100, Div),
+			PERCENT => (100, Mod),
+			_ => panic!("{} is not a binary operator", self)
+		}
+	}
 }
 impl<'src> std::fmt::Display for Token<'src> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -540,7 +566,7 @@ impl<'src> Lexer<'src> {
 					//consume (0-9) chars, adjusting the running total
 					self.do_while(|c| c.is_ascii_digit(), |c| {
 						approx_len += 1;
-						//TODO: detect overflow here, give error about literal too big
+						//TODO: detect overflow here and in parser, give error about literal too big
 						acc = 10 * acc + c as u64 - '0' as u64;
 					});
 					if self.next_is('.') {

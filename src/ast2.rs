@@ -6,6 +6,16 @@ pub struct Loc<T> {
 	pub byte_len: usize,
 	pub file_id: u16
 }
+impl<'arena, T> Loc<T> {
+	pub fn alloc(self, arena: &'arena bumpalo::Bump) -> Loc<&'arena T> {
+		Loc{
+			elt: arena.alloc(self.elt),
+			byte_offset: self.byte_offset,
+			byte_len: self.byte_len,
+			file_id: self.file_id
+		}
+	}
+}
 
 impl<T: Copy> Copy for Loc<T> {}
 
@@ -364,7 +374,7 @@ pub enum Expr<'src, 'arena> where 'src: 'arena {
 	LitBool(bool),
 	LitSignedInt(i64, IntSize),
 	LitUnsignedInt(u64, IntSize),
-	LitFloat(f64),
+	LitFloat(f64, FloatSize),
 	LitString(Cow<'src, str>),
 	Id(&'src str),
 	Index(Loc<&'arena Expr<'src, 'arena>>, Loc<&'arena Expr<'src, 'arena>>),
@@ -388,7 +398,8 @@ impl<'src: 'arena, 'arena> Expr<'src, 'arena> {
 			LitBool(b) => ast::Expr::LitBool(*b),
 			LitSignedInt(val, size) => ast::Expr::Cast(ast::Ty::Int{signed: true, size: size.to_owned_ast()}, Box::new(ast::Expr::LitSignedInt(*val))),
 			LitUnsignedInt(val, size) => ast::Expr::Cast(ast::Ty::Int{signed: false, size: size.to_owned_ast()}, Box::new(ast::Expr::LitUnsignedInt(*val))),
-			LitFloat(f) => ast::Expr::LitFloat(*f),
+			LitFloat(f, FloatSize::FSize64) => ast::Expr::LitFloat(*f),
+			LitFloat(f, FloatSize::FSize32) => ast::Expr::Cast(ast::Ty::Float(ast::FloatSize::FSize32), Box::new(ast::Expr::LitFloat(*f))),
 			LitString(s) => ast::Expr::LitString(s.clone().into_owned()),
 			Id(s) => ast::Expr::Id((*s).to_owned()),
 			Index(base_loc, index_loc) => ast::Expr::Index(Box::new(base_loc.elt.to_owned_ast()), Box::new(index_loc.elt.to_owned_ast())),

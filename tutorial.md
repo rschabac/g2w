@@ -174,6 +174,7 @@ Erased:
 Because G2W was intended as a proof of concept, certain convenience features that are not necessary for a working prototype are not included. These include:
 * `for` loops
 * `break` and `continue` in loops
+* `switch` statements
 * Increment and operator-assignment ¹
 * Declaring and assigning to a variable in one statement ¹
 * Syntax/Type error messages are not very helpful ¹
