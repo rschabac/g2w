@@ -4,10 +4,8 @@ use crate::ast2::*;
 use crate::lexer::{Token, TokenLoc};
 use crate::driver::Error;
 
-/*uncomment this once there are parse tests
 #[cfg(test)]
 mod tests;
-*/
 
 //when parser is done, find largest argument to peek
 const PARSE_MAX_PEEK: usize = 5;
@@ -133,7 +131,7 @@ Ty = <base Ty or void> (STAR | (LBRACKET INT RBRACKET))*
 
 //what to do to the parser's internal state when an error is encountered
 #[derive(Debug, Clone)]
-enum ErrorHandler<'src> {
+pub enum ErrorHandler<'src> {
 	ConsumeIncluding(Token<'src>),
 	Nothing,
 }
@@ -153,47 +151,6 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 	//if the next token is of the same variant as any of the candidates, returns it
 	fn next_in(&mut self, candidates: &[Token<'src>]) -> Option<TokenLoc<'src>> {
 		self.expect::<&str>(candidates, &ErrorHandler::Nothing, None)
-	}
-	fn poll(&mut self) -> Option<TokenLoc<'src>> {
-		match self.peeker.next() {
-			None => None,
-			Some(t) => {
-				self.latest_byte_offset = t.byte_offset;
-				Some(t)
-			}
-		}
-	}
-	fn located<EltType>(&self, elt: EltType, data: &TokenLoc<'src>) -> Loc<EltType> {
-		Loc{
-			elt,
-			byte_offset: data.byte_offset,
-			byte_len: data.byte_len,
-			file_id: self.file_id
-		}
-	}
-	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
-		use Token::*;
-		let mut result = Vec::new();
-		if let Some(expr_loc) = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI)) {
-			dbg!(expr_loc);
-		}
-		(result, self.errors)
-	}
-	//executes the given error recovery method
-	fn handle_error(&mut self, method: &ErrorHandler<'src>) -> bool {
-		use ErrorHandler::*;
-		match method {
-			ConsumeIncluding(token) => {
-				loop {
-					match self.poll() {
-						None => return false,
-						Some(t) if t.token.same_kind(token) => return true,
-						Some(_) => ()
-					}
-				}
-			},
-			Nothing => true
-		}
 	}
 	//if the next token has the same kind as the provided kind, consume it. otherwise, report an error. Can be called with &[]
 	//as the token_kind if no token kinds are acceptable. if expected is Some(_), emit an error message.
@@ -225,6 +182,39 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				self.handle_error(error_handler);
 				None
 			}
+		}
+	}
+	fn poll(&mut self) -> Option<TokenLoc<'src>> {
+		match self.peeker.next() {
+			None => None,
+			Some(t) => {
+				self.latest_byte_offset = t.byte_offset;
+				Some(t)
+			}
+		}
+	}
+	fn located<EltType>(&self, elt: EltType, data: &TokenLoc<'src>) -> Loc<EltType> {
+		Loc{
+			elt,
+			byte_offset: data.byte_offset,
+			byte_len: data.byte_len,
+			file_id: self.file_id
+		}
+	}
+	//executes the given error recovery method
+	fn handle_error(&mut self, method: &ErrorHandler<'src>) -> bool {
+		use ErrorHandler::*;
+		match method {
+			ConsumeIncluding(token) => {
+				loop {
+					match self.poll() {
+						None => return false,
+						Some(t) if t.token.same_kind(token) => return true,
+						Some(_) => ()
+					}
+				}
+			},
+			Nothing => true
 		}
 	}
 	fn parse_base_ty_or_void(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Option<&'arena Ty<'src, 'arena>>>> {
@@ -330,7 +320,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			}
 		}
 	}
-	fn parse_ty(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<&'arena Ty<'src, 'arena>>> {
+	pub fn parse_ty(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<&'arena Ty<'src, 'arena>>> {
 		//call parse_ty_or_void, report an error if it is void
 		match self.parse_ty_or_void(error_handler)? {
 			Loc{elt: None, byte_offset, byte_len, ..} => {
@@ -502,7 +492,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			}
 
 			let (this_op_prec, binop) = next_tok_loc.token.precedence();
-			if this_op_prec < prec_level {
+			if this_op_prec <= prec_level {
 				break;
 			}
 			self.poll(); //only consume the operator once I've checked it's precedence
@@ -516,7 +506,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 		Some(lhs)
 	}
-	fn parse_expr(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Expr<'src, 'arena>>> {
+	pub fn parse_expr(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Expr<'src, 'arena>>> {
 		let expr_opt = self.parse_expr_without_handling_error(i32::MIN);
 		if expr_opt.is_none() {
 			self.handle_error(error_handler);
@@ -576,5 +566,13 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			file_id: self.file_id,
 			elt: result
 		}))
+	}
+	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
+		use Token::*;
+		let mut result = Vec::new();
+		if let Some(expr_loc) = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI)) {
+			dbg!(expr_loc);
+		}
+		(result, self.errors)
 	}
 }
