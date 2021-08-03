@@ -2,6 +2,7 @@
 use crate::ast2::*;
 
 use crate::lexer::{Token, TokenLoc};
+use Token::*;
 use crate::driver::Error;
 
 #[cfg(test)]
@@ -86,7 +87,6 @@ Block = LBRACE (<Stmt>)* RBRACE
 
 Stmt = <Expr> EQ <Expr> SEMI
 	 | <Ty> ID SEMI
-	 | <Ty> ID EQ <Expr> SEMI //not in oldparser but shouldn't be that difficult to implement
 	 | RETURN <Expr>? SEMI
 	 | ID LPAREN Comma<Expr> RPAREN SEMI
 	 | ID AT LT <Ty> GT LPAREN Comma<Expr> RPAREN SEMI
@@ -96,6 +96,8 @@ Stmt = <Expr> EQ <Expr> SEMI
 	 | <Expr> PLUSPLUS
 	 | <Expr> MINUSMINUS
 	 | <Expr> OPEQ <Expr>
+	 //would be easiest to do this by changing the Stmt enum in ast2
+	 | <Ty> ID EQ <Expr> SEMI //not in oldparser but shouldn't be that difficult to implement
 
 IfStmt = IF <Expr> <Block> <ElseStmt>
 ElseStmt =
@@ -128,12 +130,17 @@ base Ty or void= BOOL
 Ty = <base Ty or void> (STAR | (LBRACKET INT RBRACKET))*
 */
 
+const CAN_START_TY: &[Token<'static>] = &[BOOL, INTTYPE{bits: IntSize::Size8, signed: false}, F32, F64, VOID, STRUCT, APOSTROPHE];
+const CAN_START_BASE_EXPR: &[Token<'static>] = &[NULL, TRUE, FALSE, INT{val: 0, bits: IntSize::Size8, signed: false}, FLOAT{val: 0.0, bits: FloatSize::FSize32}, STR(std::borrow::Cow::Borrowed("")), IDENT(""), SIZEOF, CAST, LPAREN, AND, STAR, TILDE, NOT, MINUS];
+const OPERATORS: &[Token<'static>] = &[LBRACKET, DOT, LT, LTE, GT, GTE, EQEQ, NOTEQ, OR, OROR, AND, ANDAND, XOR, SHL, SHR, SAR, PLUS, MINUS, STAR, SLASH, PERCENT];
 
 //what to do to the parser's internal state when an error is encountered
 #[derive(Debug, Clone)]
 pub enum ErrorHandler<'src> {
 	ConsumeIncluding(Token<'src>),
 	Nothing,
+	UntilBalanced,
+	UntilEndOfChainedIf,
 }
 impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'arena, T> {
 	pub fn new(chunk_of_tokens: T, file_id: u16, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Self {
@@ -214,12 +221,40 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 					}
 				}
 			},
-			Nothing => true
+			Nothing => true,
+			UntilBalanced => {
+				let mut balance = 0;
+				let mut result = false;
+				while let Some(tokenloc) = self.poll() {
+					if tokenloc.token == LBRACE {
+						balance += 1;
+					} else if tokenloc.token == RBRACE {
+						balance -= 1;
+						if balance == 0 {
+							result = true;
+							break;
+						}
+					}
+				}
+				result
+			},
+			//if there is an error parsing the condition of an if stmt, skip until balanced, then check if the next token is ELSE,
+			//if it is, then consume the whole else branch. repeat as many times as necessary.
+			UntilEndOfChainedIf => {
+				if !self.handle_error(&UntilBalanced) {
+					return false;
+				}
+				while self.peeker.peek(0).map(|t| t.token) == Some(ELSE) {
+					if !self.handle_error(&UntilBalanced) {
+						return false;
+					}
+				}
+				true
+			}
 		}
 	}
 	fn parse_base_ty_or_void(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Option<&'arena Ty<'src, 'arena>>>> {
-		use Token::*;
-		let next_loc_if_base_ty = self.next_in(&[BOOL, INTTYPE{bits: IntSize::Size8, signed: false}, F32, F64, VOID, STRUCT, APOSTROPHE]);
+		let next_loc_if_base_ty = self.next_in(CAN_START_TY);
 		match next_loc_if_base_ty.as_ref().map(|x| &x.token) {
 			Some(BOOL) => return Some(self.located(Some(Ty::Bool.getref(self.typecache)), &next_loc_if_base_ty.unwrap())),
 			Some(INTTYPE{bits, signed}) => return Some(self.located(Some(Ty::Int{signed: *signed, size: *bits}.getref(self.typecache)), &next_loc_if_base_ty.unwrap())),
@@ -278,7 +313,6 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		None
 	}
 	fn parse_ty_or_void(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Option<&'arena Ty<'src, 'arena>>>> {
-		use Token::*;
 		let Loc{elt: mut base_ty, byte_offset: initial_offset, byte_len: mut last_len, ..} = self.parse_base_ty_or_void(error_handler)?;
 		let mut last_offset = initial_offset;
 		loop {
@@ -343,9 +377,6 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 	}
 	//doesn't call self.handle_error, but does report the error
 	fn parse_expr_without_handling_error(&mut self, prec_level: i32) -> Option<Loc<Expr<'src, 'arena>>> {
-		use Token::*;
-		use std::borrow::Cow;
-		const CAN_START_BASE_EXPR: &[Token<'static>] = &[NULL, TRUE, FALSE, INT{val: 0, bits: IntSize::Size8, signed: false}, FLOAT{val: 0.0, bits: FloatSize::FSize32}, STR(Cow::Borrowed("")), IDENT(""), SIZEOF, CAST, LPAREN, AND, STAR, TILDE, NOT, MINUS];
 		let first_expr_loc = match self.peeker.peek(0) {
 			None => {
 				self.errors.push(Error{
@@ -451,7 +482,6 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		};
 		loop {
 			let next_tok_loc = self.peeker.peek(0);
-			const OPERATORS: &[Token<'static>] = &[LBRACKET, DOT, LT, LTE, GT, GTE, EQEQ, NOTEQ, OR, OROR, AND, ANDAND, XOR, SHL, SHR, SAR, PLUS, MINUS, STAR, SLASH, PERCENT];
 			//if the next token is not one of these, return the current lhs
 			let next_tok_loc = match next_tok_loc {
 				None => break,
@@ -515,7 +545,6 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 	}
 	//returns None if there was an error, Some(None) if there was no function call, just an expr, Some(Some(Call)) if there was a call
 	fn parse_call(&mut self, name_loc: &TokenLoc<'src>, error_handler: &ErrorHandler<'src>) -> Option<Option<Loc<Expr<'src, 'arena>>>> {
-		use Token::*;
 		let mut type_param: Option<Loc<&'arena Ty<'src, 'arena>>> = None;
 		let name_loc: Loc<_> = Loc{
 			byte_offset: name_loc.byte_offset,
@@ -567,11 +596,167 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			elt: result
 		}))
 	}
+	pub fn parse_stmt(&mut self) -> Option<Loc<Stmt<'src, 'arena>>> {
+		let next_token_can_start_ty = match self.peeker.peek(0) {
+			None => false,
+			Some(next) => CAN_START_TY.iter().any(|t| next.token.same_kind(t))
+		};
+		if next_token_can_start_ty {
+			//must be a Decl
+			let base_ty: Loc<_> = self.parse_ty(&ErrorHandler::ConsumeIncluding(SEMI))?;
+			let varname = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(SEMI), Some("a variable name"))?;
+			let var_loc = Loc{
+				elt: match varname.token {
+					IDENT(s) => s,
+					_ => unreachable!()
+				},
+				byte_offset: varname.byte_offset, byte_len: varname.byte_len, file_id: self.file_id
+			};
+			let semi_loc_opt = self.expect(&[SEMI], &ErrorHandler::Nothing, Some(format_args!("a ';' after declaration of '{}'", var_loc.elt)));
+			let semi_loc = match semi_loc_opt {
+				None => {
+					if self.next_in(&[EQ]).is_some() {
+						self.errors.last_mut().unwrap().err.push_str("\nAssigning to a variable when declaring it is not yet implemented");
+						self.handle_error(&ErrorHandler::ConsumeIncluding(SEMI));
+					}
+					return None;
+				},
+				Some(l) => l
+			};
+			return Some(Loc{
+				byte_offset: base_ty.byte_offset,
+				byte_len: semi_loc.byte_offset - base_ty.byte_offset + semi_loc.byte_len,
+				file_id: self.file_id,
+				elt: Stmt::Decl(base_ty, var_loc)
+			});
+		}
+		if let Some(return_loc) = self.next_in(&[RETURN]) {
+			if let Some(semi_loc) = self.next_in(&[SEMI]) {
+				//returning nothing
+				return Some(Loc{
+					byte_offset: return_loc.byte_offset,
+					byte_len: semi_loc.byte_offset - return_loc.byte_offset + semi_loc.byte_len,
+					file_id: self.file_id,
+					elt: Stmt::Return(None)
+				});
+			}
+			//there should be an expr after this
+			let retval_loc: Loc<_> = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
+			let semi_loc = self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after return value"))?;
+			return Some(Loc{
+				byte_offset: return_loc.byte_offset,
+				byte_len: semi_loc.byte_offset - return_loc.byte_offset + semi_loc.byte_len,
+				file_id: self.file_id,
+				elt: Stmt::Return(Some(retval_loc))
+			});
+		}
+		if let Some(while_loc) = self.next_in(&[WHILE]) {
+			let cond_loc = self.parse_expr(&ErrorHandler::UntilBalanced)?;
+			let block: Loc<_> = self.parse_block(&ErrorHandler::UntilBalanced)?;
+			return Some(Loc{
+				byte_offset: while_loc.byte_offset,
+				byte_len: block.byte_offset - while_loc.byte_offset + block.byte_len,
+				file_id: self.file_id,
+				elt: Stmt::While(cond_loc, block.elt)
+			});
+		}
+		if let Some(if_loc) = self.next_in(&[IF]) {
+			return self.parse_if_stmt(if_loc.byte_offset);
+		}
+		//must be either an assignment or a function call
+		let lhs_or_call = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
+		if matches!(&lhs_or_call.elt, Expr::Call(_,_) | Expr::GenericCall{..}) {
+			//this could still be an assignment. assigning to a function call should be caught in the typechecker, not here.
+			if self.next_in(&[EQ]).is_some() {
+				let rhs_loc = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
+				let semi_loc = self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after assignment"))?;
+				return Some(Loc{
+					byte_offset: lhs_or_call.byte_offset,
+					byte_len: semi_loc.byte_offset - lhs_or_call.byte_offset + semi_loc.byte_len,
+					file_id: self.file_id,
+					elt: Stmt::Assign(lhs_or_call, rhs_loc)
+				});
+			}
+			//not an assignment, just a call
+			let call = match lhs_or_call.elt {
+				Expr::Call(name, args) => Stmt::SCall(name, args),
+				Expr::GenericCall{name, type_param, args} => Stmt::GenericSCall{name, type_param, args},
+				_ => unreachable!()
+			};
+			let semi_loc = self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after assignment"))?;
+			return Some(Loc{
+				byte_offset: lhs_or_call.byte_offset,
+				byte_len: semi_loc.byte_offset - lhs_or_call.byte_offset + semi_loc.byte_len,
+				file_id: self.file_id,
+				elt: call
+			});
+		}
+		//lhs is not a call, this stmt must be an assignment
+		self.expect(&[EQ], &ErrorHandler::ConsumeIncluding(SEMI), Some("a '=' after left-hand-side of assignment"))?;
+		let rhs_loc = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
+		let semi_loc = self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after assignment"))?;
+		return Some(Loc{
+			byte_offset: lhs_or_call.byte_offset,
+			byte_len: semi_loc.byte_offset - lhs_or_call.byte_offset + semi_loc.byte_len,
+			file_id: self.file_id,
+			elt: Stmt::Assign(lhs_or_call, rhs_loc)
+		});
+	}
+	//this method assumes that the IF token has already been consumed.
+	fn parse_if_stmt(&mut self, if_offset: usize) -> Option<Loc<Stmt<'src, 'arena>>> {
+		let cond_loc = self.parse_expr(&ErrorHandler::UntilEndOfChainedIf)?;
+		let if_block = self.parse_block(&ErrorHandler::UntilEndOfChainedIf)?;
+		let else_block = self.parse_else_stmt()?;
+		Some(Loc{
+			byte_offset: if_offset,
+			byte_len: else_block.byte_offset - if_offset + else_block.byte_len,
+			file_id: self.file_id,
+			elt: Stmt::If(cond_loc, if_block.elt, else_block.elt)
+		})
+	}
+	fn parse_else_stmt(&mut self) -> Option<Loc<Block<'src, 'arena>>> {
+		if self.next_in(&[ELSE]).is_some() {
+			if let Some(if_loc) = self.next_in(&[IF]) {
+				let if_stmt = self.parse_if_stmt(if_loc.byte_offset)?;
+				Some(Loc{
+					byte_offset: if_loc.byte_offset,
+					byte_len: if_stmt.byte_offset - if_loc.byte_offset + if_stmt.byte_len,
+					file_id: self.file_id,
+					elt: Block(std::slice::from_ref(&*self.arena.alloc(if_stmt)))
+				})
+			} else {
+				self.parse_block(&ErrorHandler::UntilBalanced)
+			}
+		} else {
+			Some(Loc{
+				elt: Block(&[]),
+				byte_offset: self.latest_byte_offset,
+				byte_len: 1, //TODO: does this work?
+				file_id: self.file_id
+			})
+		}
+	}
+	//if an error is encountered, skips ahead to the closing brace
+	fn parse_block(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Block<'src, 'arena>>> {
+		let lbrace_loc = self.expect(&[LBRACE], error_handler, Some("a '{' to begin a block"))?;
+		let mut stmts: Vec<Loc<Stmt<'src, 'arena>>> = Vec::new();
+		while self.peeker.peek(0).map(|t| t.token) != Some(RBRACE) {
+			if let Some(stmt_loc) = self.parse_stmt() {
+				stmts.push(stmt_loc);
+			}
+		}
+		let rbrace_loc = self.expect(&[RBRACE], error_handler, Some("a '}' to close a block"))?;
+		Some(Loc{
+			elt: Block(&*self.arena.alloc_slice_fill_iter(stmts.into_iter())),
+			byte_offset: lbrace_loc.byte_offset,
+			byte_len: rbrace_loc.byte_offset - lbrace_loc.byte_offset + rbrace_loc.byte_len,
+			file_id: self.file_id
+		})
+	}
 	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
-		use Token::*;
-		let mut result = Vec::new();
-		if let Some(expr_loc) = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI)) {
-			dbg!(expr_loc);
+		let result = Vec::new();
+		if let Some(block_loc) = self.parse_block(&ErrorHandler::Nothing) {
+			dbg!(block_loc);
 		}
 		(result, self.errors)
 	}

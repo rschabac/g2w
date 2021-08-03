@@ -338,11 +338,11 @@ impl Default for Block {
 	}
 }
 
-pub struct CFG{
+pub struct Cfg{
 	pub entry: Block,
 	pub other_blocks: Vec<(String, Block)>,
 }
-impl std::fmt::Display for CFG{
+impl std::fmt::Display for Cfg{
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "{}", self.entry)?;
 		for (label, block) in self.other_blocks.iter() {
@@ -355,7 +355,7 @@ impl std::fmt::Display for CFG{
 pub struct Func{
 	pub ret_ty: Ty,
 	pub params: Vec<(Ty, String)>,
-	pub cfg: CFG,
+	pub cfg: Cfg,
 	pub name: String
 }
 impl std::fmt::Display for Func{

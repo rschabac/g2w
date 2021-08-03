@@ -350,7 +350,7 @@ match e {
 				.enumerate(){
 			//not doing array-to-pointer decay like c, do &arr[0] instead
 			let given_type = given_type?;
-			if given_type.ne(&correct_type) {
+			if given_type.ne(correct_type) {
 				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		}
@@ -358,7 +358,7 @@ match e {
 	},
 	GenericCall{name: func_name, type_param, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_param, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(type_param, &ctxt.structs, &ctxt.type_var)?;
 		let return_type;
 		let arg_type_list;
 		let callee_mode;
@@ -426,7 +426,7 @@ match e {
 		Ok(replaced_type_var)
 	},
 	Cast(dest_type, source) => {
-		all_struct_names_valid(&dest_type, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(dest_type, &ctxt.structs, &ctxt.type_var)?;
 		let type_var_str_in_dest_type = dest_type.recursively_find_type_var();
 		match (type_var_str_in_dest_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -535,7 +535,7 @@ match e {
 		}
 	},
 	Sizeof(t) => {
-		all_struct_names_valid(&t, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(t, &ctxt.structs, &ctxt.type_var)?;
 		//Not sure how to handle sizeof a type var
 		//current idea: size of a separated type var gets resolved after instatiation,
 		//size of an erased type var is computed at runtime
@@ -562,10 +562,10 @@ match s {
 		match lhs {
 			Id(_) | Index(_,_) | Proj(_,_) | Deref(_) => {
 				ctxt.is_lhs = true;
-				let lhs_type = typecheck_expr(ctxt, funcs, &lhs)?;
+				let lhs_type = typecheck_expr(ctxt, funcs, lhs)?;
 				ctxt.is_lhs = false;
 				ctxt.type_for_lit_nulls = Some(lhs_type.clone());
-				let rhs_type = typecheck_expr(ctxt, funcs, &rhs)?;
+				let rhs_type = typecheck_expr(ctxt, funcs, rhs)?;
 				if lhs_type != rhs_type {
 					Err(format!("Cannot assign value of type {} to something of type {}", rhs_type, lhs_type))
 				} else {
@@ -576,7 +576,7 @@ match s {
 		}
 	},
 	Decl(typ, name) => {
-		all_struct_names_valid(&typ, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(typ, &ctxt.structs, &ctxt.type_var)?;
 		let type_var_str_in_decl_type = typ.recursively_find_type_var();
 		match (type_var_str_in_decl_type, &ctxt.type_var) {
 			(Some(s), None) => return Err(format!("Cannot use type var '{} in non-generic function", s)),
@@ -604,7 +604,7 @@ match s {
 			None => Err("Cannot return a value from a void function".to_owned()),
 			Some(t) => {
 				ctxt.type_for_lit_nulls = Some(t.clone());
-				let return_expr_type = typecheck_expr(ctxt, funcs, &e)?;
+				let return_expr_type = typecheck_expr(ctxt, funcs, e)?;
 				if return_expr_type.ne(t) {
 					Err(format!("Cannot return a value of type {} in a function that returns {}", return_expr_type, t))
 				} else {
@@ -642,7 +642,7 @@ match s {
 				})
 				.enumerate(){
 			let given_type = given_type?;
-			if given_type.ne(&correct_type) {
+			if given_type.ne(correct_type) {
 				return Err(format!("argument {} to {} has type {}, expected {}", index, func_name, given_type, correct_type));
 			}
 		}
@@ -650,7 +650,7 @@ match s {
 	},
 	GenericSCall{name: func_name, type_param, args} => {
 		use FuncType::*;
-		all_struct_names_valid(&type_param, &ctxt.structs, &ctxt.type_var)?;
+		all_struct_names_valid(type_param, &ctxt.structs, &ctxt.type_var)?;
 		let arg_type_list;
 		let callee_mode;
 		let type_var_string;
@@ -708,7 +708,7 @@ match s {
 	},
 	If(cond, then_block, else_block) => {
 		ctxt.type_for_lit_nulls = Some(Bool);
-		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
+		let cond_type = typecheck_expr(ctxt, funcs, cond)?;
 		if cond_type != Bool {
 			return Err(format!("condition of if statement must have type bool, not {}", cond_type));
 		}
@@ -718,7 +718,7 @@ match s {
 	},
 	While(cond, body) => {
 		ctxt.type_for_lit_nulls = Some(Bool);
-		let cond_type = typecheck_expr(ctxt, funcs, &cond)?;
+		let cond_type = typecheck_expr(ctxt, funcs, cond)?;
 		if cond_type != Bool {
 			return Err(format!("condition of while statement must have type bool, not {}", cond_type));
 		}
@@ -818,7 +818,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 					use ast::Ty::*;
 					match field_type {
 						Struct(s) => queue.push_back((s.as_str(), None)),
-						GenericStruct{type_param: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((&fully_concrete_type as &ast::Ty).clone()))),
+						GenericStruct{type_param: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((fully_concrete_type as &ast::Ty).clone()))),
 						_ => ()
 					}
 				}
@@ -871,7 +871,7 @@ fn traverse_struct_context(struct_context: &StructContext) -> Result<(), String>
 								&& !field_type_param_is_concrete {
 								return Err(format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name));
 							}
-							let substituted1 = replace_type_var_with((type_param as &ast::Ty).clone(), type_param_string_of_current_struct, &type_param);
+							let substituted1 = replace_type_var_with((type_param as &ast::Ty).clone(), type_param_string_of_current_struct, type_param);
 							let type_param_string_of_field_struct: &str = match struct_context.get(name).unwrap_or_else(|| panic!("why is struct {} not in the context?", name)) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
 								Generic{type_var, ..} => type_var.as_str()
@@ -1079,7 +1079,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type{
-				all_struct_names_valid(&ret, &struct_context, &None)?;
+				all_struct_names_valid(ret, &struct_context, &None)?;
 				if let Some(s) = ret.recursively_find_type_var() {
 					return Err(format!("found type variable '{} in return type of non-generic function {}", s, func_name));
 				}
@@ -1090,7 +1090,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				all_struct_names_valid(&arg_type, &struct_context, &None)?;
+				all_struct_names_valid(arg_type, &struct_context, &None)?;
 				if let Some(s) = arg_type.recursively_find_type_var() {
 					return Err(format!("found type variable '{} in type signature of non-generic function {}", s, func_name));
 				}
@@ -1108,7 +1108,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 				return Err(format!("cannot declare a function named '{}', a global variable of that name already exists", func_name));
 			}
 			if let Some(ret) = ret_type {
-				all_struct_names_valid(&ret, &struct_context, &Some((var.clone(), *mode)))?;
+				all_struct_names_valid(ret, &struct_context, &Some((var.clone(), *mode)))?;
 				match ret.recursively_find_type_var() {
 					Some(s) if s != var => return Err(format!("found unknown type variable '{} in return type of function {}", s, func_name)),
 					_ => ()
@@ -1120,7 +1120,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 					return Err(format!("function '{}' contains two arguments both named '{}'", func_name, arg_name));
 				}
 				names.insert(arg_name.clone());
-				all_struct_names_valid(&arg_type, &struct_context, &Some((var.clone(), *mode)))?;
+				all_struct_names_valid(arg_type, &struct_context, &Some((var.clone(), *mode)))?;
 				match arg_type.recursively_find_type_var() {
 					Some(s) if s != var => return Err(format!("found unknown type variable '{} in type signature of function {}", s, func_name)),
 					_ => ()
@@ -1135,7 +1135,7 @@ pub fn typecheck_program(gdecls: &[ast::Gdecl]) -> Result<ProgramContext, String
 		},
 		//need to make sure there are no name collisions between global vars and functions
 		GVarDecl(t, name) => {
-			all_struct_names_valid(&t, &struct_context, &None)?;
+			all_struct_names_valid(t, &struct_context, &None)?;
 			if let Some(s) = t.recursively_find_type_var() {
 				return Err(format!("found type variable '{} in type of global variable", s));
 			}

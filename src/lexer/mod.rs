@@ -65,6 +65,7 @@ impl<'src> Iterator for Peeker<'src> {
 }
 
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum Token<'src> {
 	LPAREN, RPAREN,
@@ -274,7 +275,10 @@ impl<'src> Lexer<'src> {
 					emit(LBRACE, 1, initial_offset);
 				},
 				'}' => {
-					self.brace_count -= 1;
+					//if there is an extra '}', just keep the brace_count 0
+					if self.brace_count > 0 {
+						self.brace_count -= 1;
+					}
 					emit(RBRACE, 1, initial_offset);
 					if self.brace_count == 0 {
 						break

@@ -449,7 +449,7 @@ impl<'src: 'arena, 'arena> Stmt<'src, 'arena> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Block<'src, 'arena>(&'arena [Loc<Stmt<'src, 'arena>>]);
+pub struct Block<'src, 'arena>(pub &'arena [Loc<Stmt<'src, 'arena>>]);
 impl<'src: 'arena, 'arena> Block<'src, 'arena> {
 	pub fn to_owned_ast(self) -> ast::Block {
 		self.0.iter().map(|s| s.elt.to_owned_ast()).collect()

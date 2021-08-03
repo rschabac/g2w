@@ -292,20 +292,20 @@ mod typechecking_tests {
 	use super::oldparser;
 	fn setup_expr(expr: &str) -> Result<Ty, String>{
 		let (mut ctxt, func_context) = get_empty_localtypecontext();
-		return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context);
+		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context)
 	}
 	fn setup_expr_with_localtypecontext(expr: &str, ctxt: &mut LocalTypeContext) -> Result<Ty, String>{
 		let (_, funcs) = get_empty_localtypecontext();
-		return setup_expr_with_localtypecontext_and_funcs(expr, ctxt, &funcs);
+		setup_expr_with_localtypecontext_and_funcs(expr, ctxt, &funcs)
 	}
 	fn setup_expr_with_funcs(expr: &str, funcs: &FuncContext) -> Result<Ty, String>{
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		return setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs);
+		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs)
 	}
 	fn setup_expr_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
 		let expr_parser = oldparser::ExprParser::new();
 		let expr = expr_parser.parse(expr).expect("parse error");
-		return typecheck_expr(ctxt, funcs, &expr);
+		typecheck_expr(ctxt, funcs, &expr)
 	}
 	#[test]
 	fn typecheck_expr_test(){
@@ -357,31 +357,31 @@ mod typechecking_tests {
 	}
 	fn setup_stmt(stmt: &str, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
 		let (mut ctxt, func_context) = get_empty_localtypecontext();
-		return setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, &func_context, expected_ret_ty);
+		setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, &func_context, expected_ret_ty)
 	}
 	fn setup_stmt_with_localtypecontext(stmt: &str, ctxt: &mut LocalTypeContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
 		let (_, funcs) = get_empty_localtypecontext();
-		return setup_stmt_with_localtypecontext_and_funcs(stmt, ctxt, &funcs, expected_ret_ty);
+		setup_stmt_with_localtypecontext_and_funcs(stmt, ctxt, &funcs, expected_ret_ty)
 	}
 	fn setup_stmt_with_funcs(stmt: &str, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		return setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, funcs, expected_ret_ty);
+		setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, funcs, expected_ret_ty)
 	}
 	fn setup_stmt_with_localtypecontext_and_funcs(stmt: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
 		let stmt_parser = oldparser::StmtParser::new();
 		let stmt = stmt_parser.parse(stmt).expect("parse error");
-		return typecheck_stmt(ctxt, funcs, &stmt, &expected_ret_ty);
+		typecheck_stmt(ctxt, funcs, &stmt, &expected_ret_ty)
 	}
 	#[test]
 	fn typecheck_stmt_test(){
 		use std::collections::HashMap;
-		assert_eq!(setup_stmt("u8 x;", None).unwrap(), false);
+		assert!(!setup_stmt("u8 x;", None).unwrap());
 		let (mut ctxt, _) = get_empty_localtypecontext();
 		let _ = ctxt.locals.insert("x".to_owned(), Bool);
-		assert_eq!(setup_stmt_with_localtypecontext("x = true;", &mut ctxt, None).unwrap(), false);
+		assert!(!setup_stmt_with_localtypecontext("x = true;", &mut ctxt, None).unwrap());
 		assert!(setup_stmt_with_localtypecontext("bool x;", &mut ctxt, None).is_err());
-		assert_eq!(setup_stmt("return;", None).unwrap(), true);
-		assert_eq!(setup_stmt("return 3.0;", Some(Float(FloatSize::FSize64))).unwrap(), true);
+		assert!(setup_stmt("return;", None).unwrap());
+		assert!(setup_stmt("return 3.0;", Some(Float(FloatSize::FSize64))).unwrap());
 		assert!(setup_stmt("return;", Some(Bool)).is_err());
 		assert!(setup_stmt("return 3;", None).is_err());
 		assert!(setup_stmt("return 3;", Some(Bool)).is_err());
@@ -390,7 +390,7 @@ mod typechecking_tests {
 			args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
 			return_type: Some(Struct("abc".to_owned()))
 		});
-		assert_eq!(setup_stmt_with_funcs("f(true, 7);", &funcs, None).unwrap(), false);
+		assert!(!setup_stmt_with_funcs("f(true, 7);", &funcs, None).unwrap());
 		let mut funcs = HashMap::new();
 		let _ = funcs.insert("f".to_owned(), FuncType::Generic{
 			args: vec![Bool, TypeVar("T".to_owned())],
@@ -398,13 +398,13 @@ mod typechecking_tests {
 			type_var: "T".to_owned(),
 			return_type: Some(Struct("abc".to_owned()))
 		});
-		assert_eq!(setup_stmt_with_funcs("f@<i64>(true, 5);", &funcs, None).unwrap(), false);
-		assert_eq!(setup_stmt("if true {return true;} else {return false;}", Some(Bool)).unwrap(), true);
-		assert_eq!(setup_stmt("if true {return true;}", Some(Bool)).unwrap(), false);
+		assert!(!setup_stmt_with_funcs("f@<i64>(true, 5);", &funcs, None).unwrap());
+		assert!(setup_stmt("if true {return true;} else {return false;}", Some(Bool)).unwrap());
+		assert!(!setup_stmt("if true {return true;}", Some(Bool)).unwrap());
 		assert!(setup_stmt("if 3 {return true;}", Some(Bool)).is_err());
 		assert!(setup_stmt("if true {x = 4;}", None).is_err());
-		assert_eq!(setup_stmt("while true {return;}", None).unwrap(), false);
-		assert_eq!(setup_stmt("while true {}", None).unwrap(), false);
+		assert!(!setup_stmt("while true {return;}", None).unwrap());
+		assert!(!setup_stmt("while true {}", None).unwrap());
 		assert!(setup_stmt("while 3 {}", None).is_err());
 	}
 	#[test]

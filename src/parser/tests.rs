@@ -9,10 +9,11 @@ fn get_typecache<'src, 'arena>(arena: &'arena mut bumpalo::Bump) -> TypeCache<'s
 		cached: std::sync::RwLock::new(std::collections::HashMap::new())
 	}
 }
+#[allow(clippy::needless_collect)]
 fn get_parser<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Parser<'src, 'arena, std::vec::IntoIter<TokenLoc<'src>>> {
 	let lexer = Lexer::new(s, 0);
-	let all_tokens_iter: Vec<_> = lexer.map(|e| e.unwrap()).flatten().collect();
-	Parser::new(all_tokens_iter.into_iter(), 0, arena, typecache)
+	let tokens: Vec<_> = lexer.map(|e| e.unwrap()).flatten().collect();
+	Parser::new(tokens.into_iter(), 0, arena, typecache)
 }
 
 fn parse_as_ty<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
@@ -28,6 +29,15 @@ fn parse_as_expr<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typec
 	-> Result<Loc<Expr<'src, 'arena>>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_expr(&ErrorHandler::Nothing) {
+		Some(loc) => Ok(loc),
+		None => Err(parser.errors)
+	}
+}
+
+fn parse_as_block<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
+	-> Result<Loc<Block<'src, 'arena>>, Vec<Error>> {
+	let mut parser = get_parser(s, arena, typecache);
+	match parser.parse_block(&ErrorHandler::Nothing) {
 		Some(loc) => Ok(loc),
 		None => Err(parser.errors)
 	}
@@ -173,4 +183,129 @@ fn parse_expr_tests() {
 	for (test_str, expected_parse) in tests {
 		assert_eq!(expected_parse, parse_as_expr(test_str, &arena, &typecache).unwrap());
 	}
+}
+
+#[test]
+fn parse_block_test() {
+	let arena = bumpalo::Bump::new();
+	let mut typearena = bumpalo::Bump::new();
+	let typecache = get_typecache(&mut typearena);
+	let test_src =
+r##"{
+	if null{
+		x = f@<i32>(true);
+		if false {
+		} else if 0 {
+			return;
+		} else {
+
+		}
+	}
+	return 0;
+	f(3);
+	g@<'T>();
+	g = 5;
+	bool b;
+	while null {
+		return;
+	}
+}"##;
+	let parsed = parse_as_block(test_src, &arena, &typecache).unwrap();
+	use IntSize::*;
+	use Stmt::*;
+	use Expr::*;
+	use Ty::*;
+	let expected = 
+		Loc { elt: Block( &[
+			Loc {
+				elt: If( Loc { elt: LitNull, byte_offset: 6, byte_len: 4, file_id: 0, },
+					Block( &[
+						Loc {
+							elt: Assign(
+								Loc { elt: Id( "x",), byte_offset: 14, byte_len: 1, file_id: 0, },
+								Loc {
+									elt: GenericCall {
+										name: Loc { elt: "f", byte_offset: 18, byte_len: 1, file_id: 0, },
+										type_param: Loc {
+											elt: &Int { signed: true, size: Size32, },
+											byte_offset: 21, byte_len: 3, file_id: 0,
+										},
+										args: &[
+											Loc { elt: LitBool( true,), byte_offset: 26, byte_len: 4, file_id: 0, },
+										],
+									}, byte_offset: 18, byte_len: 13, file_id: 0,
+								},
+							), byte_offset: 14, byte_len: 18, file_id: 0,
+						},
+						Loc {
+							elt: If(
+								Loc { elt: LitBool( false,), byte_offset: 38, byte_len: 5, file_id: 0, },
+								Block( &[],),
+								Block( &[
+										Loc {
+											elt: If(
+												Loc { elt: LitSignedInt( 0, Size64,), byte_offset: 58, byte_len: 1, file_id: 0, },
+												Block( &[
+														Loc { elt: Return( None,), byte_offset: 65, byte_len: 7, file_id: 0, },
+													],
+												),
+												Block( &[],),
+											), byte_offset: 55, byte_len: 33, file_id: 0,
+										},
+									],
+								),
+							), byte_offset: 35, byte_len: 53, file_id: 0,
+						},
+					],),
+					Block( &[],),
+				), byte_offset: 3, byte_len: 88, file_id: 0,
+			},
+			Loc {
+				elt: Return(
+					Some( Loc { elt: LitSignedInt( 0, Size64,), byte_offset: 100, byte_len: 1, file_id: 0, },),
+				),
+				byte_offset: 93, byte_len: 9, file_id: 0,
+			},
+			Loc {
+				elt: SCall(
+					Loc { elt: "f", byte_offset: 104, byte_len: 1, file_id: 0, },
+					&[ Loc { elt: LitSignedInt( 3, Size64,), byte_offset: 106, byte_len: 1, file_id: 0, }, ],
+				),
+				byte_offset: 104, byte_len: 5, file_id: 0,
+			},
+			Loc {
+				elt: GenericSCall {
+					name: Loc { elt: "g", byte_offset: 111, byte_len: 1, file_id: 0, },
+					type_param: Loc { elt: &TypeVar( "T",), byte_offset: 114, byte_len: 2, file_id: 0, },
+					args: &[],
+				},
+				byte_offset: 111, byte_len: 9, file_id: 0,
+			},
+			Loc {
+				elt: Assign(
+					Loc { elt: Id( "g",), byte_offset: 122, byte_len: 1, file_id: 0, },
+					Loc { elt: LitSignedInt( 5, Size64,), byte_offset: 126, byte_len: 1, file_id: 0, },
+				),
+				byte_offset: 122, byte_len: 6, file_id: 0,
+			},
+			Loc {
+				elt: Decl(
+					Loc { elt: &Bool, byte_offset: 130, byte_len: 4, file_id: 0, },
+					Loc { elt: "b", byte_offset: 135, byte_len: 1, file_id: 0, },
+				),
+				byte_offset: 130, byte_len: 7, file_id: 0,
+			},
+			Loc {
+				elt: While(
+					Loc { elt: LitNull, byte_offset: 145, byte_len: 4, file_id: 0, },
+					Block( &[ Loc { elt: Return( None,), byte_offset: 154, byte_len: 7, file_id: 0, }, ],
+					),
+				),
+				byte_offset: 139, byte_len: 25, file_id: 0,
+			},
+			],
+			),
+			byte_offset: 0, byte_len: 166, file_id: 0,
+		};
+	assert_eq!(expected, parsed);
 }

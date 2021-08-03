@@ -258,15 +258,15 @@ fn cmp_exp(e: &ast::Expr, ctxt: &mut Context, type_for_lit_nulls: Option<&llvm::
 				offsets: vec![(llvm::Ty::Int{bits: 64, signed: false}, offset_op)]
 			}));
 			let field_typ: ast::Ty = fields[field_index].1.clone().replace_type_var_with(&base_type_param);
-			if !field_typ.is_DST(&ctxt.structs, ctxt.mode) {
+			if !field_typ.is_DST(ctxt.structs, ctxt.mode) {
 				//only load from it if it is not a dynamic type
 				//first, bitcast the i8* to the right type
-				let llvm_field_typ = cmp_ty(&field_typ, &ctxt.structs, 
+				let llvm_field_typ = cmp_ty(&field_typ, ctxt.structs, 
 					//if the base type is a regular struct that is dynamic, then don't need to pass
 					//a replacement type here, otherwise the type parameter must be cmped
 					Some(&base_type_param),
 					ctxt.mode,
-					&ctxt.struct_inst_queue
+					ctxt.struct_inst_queue
 				);
 				let bitcasted_uid = gensym("proj_bitcast");
 				ctxt.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
@@ -291,7 +291,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &mut Context, type_for_lit_nulls: Option<&llvm::
 			}
 		}
 		use std::convert::TryFrom;
-		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, (&base_type_param).as_ref(), ctxt.mode, &ctxt.struct_inst_queue);
+		let result_ty = cmp_ty(&fields[field_index].1, ctxt.structs, (&base_type_param).as_ref(), ctxt.mode, ctxt.struct_inst_queue);
 		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
 		let base_loaded_op: llvm::Operand;
 		if base_is_ptr {
@@ -318,7 +318,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &mut Context, type_for_lit_nulls: Option<&llvm::
 	},
 	ast::Expr::Cast(new_type, src) => {
 		let mut src_result = cmp_exp(src as &ast::Expr, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let new_llvm_typ = cmp_ty(new_type, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue);
+		let new_llvm_typ = cmp_ty(new_type, ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
 		use llvm::Ty::*;
 		match (&new_llvm_typ, &src_result.llvm_typ) {
 			(Int{bits: new_bits, signed: _new_signed}, Int{bits: old_bits, signed: old_signed}) => {
@@ -778,7 +778,7 @@ fn cmp_exp(e: &ast::Expr, ctxt: &mut Context, type_for_lit_nulls: Option<&llvm::
 		};
 		let size_uid = gensym("sizeof");
 		let size_int_uid = gensym("sizeof_int");
-		let llvm_typ = cmp_ty(t, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue);
+		let llvm_typ = cmp_ty(t, ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
 		let llvm_ptr_typ = llvm::Ty::Ptr(Box::new(llvm_typ.clone()));
 		ctxt.stream.push(Component::Instr(size_uid.clone(), llvm::Instruction::Gep{
 			typ: llvm_typ.clone(),
@@ -916,7 +916,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 			//if cmp_ty returns a Dynamic(_) here, then llvm could try to make a null literal have type i8.
 			//however, this will not happen because if the arg is LitNull, then the type must be a pointer,
 			//which will never be a DST.
-			ast::Expr::LitNull => Some(cmp_ty(expected_ty, &ctxt.structs, concretized_type_param.as_ref(), callee_mode, &ctxt.struct_inst_queue)),
+			ast::Expr::LitNull => Some(cmp_ty(expected_ty, ctxt.structs, concretized_type_param.as_ref(), callee_mode, ctxt.struct_inst_queue)),
 			_ => None
 		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
@@ -924,7 +924,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 		let arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
 		if matches!(arg_result.llvm_typ, llvm::Ty::Dynamic(_)) {
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(arg_result.llvm_typ)), arg_result.llvm_op) );
-		} else if expected_ty.is_DST(&ctxt.structs, callee_mode) {
+		} else if expected_ty.is_DST(ctxt.structs, callee_mode) {
 			//if arg is statically sized in the caller, but dynamically sized in the callee, alloca enough space for it
 			//store it, then pass the address to the function
 			let alloca_uid = gensym("callee_DST");
@@ -949,7 +949,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 			//however, the arg could be a ptr to something that is a DST in the callee, so the caller and callee
 			//could disagree on its type (i.e. caller sees an i32**, callee sees a 'T**, thus a i8**). In this case,
 			//bitcast the arg to a i8*...*
-			if let Some(ptr_chain_len) = depth_of_DST_in_ptr_chain(expected_ty, &ctxt.structs, callee_mode) {
+			if let Some(ptr_chain_len) = depth_of_DST_in_ptr_chain(expected_ty, ctxt.structs, callee_mode) {
 				let mut ptr_chain = llvm::Ty::Int{bits: 8, signed: false};
 				for _ in 0..ptr_chain_len {
 					ptr_chain = llvm::Ty::Ptr(Box::new(ptr_chain));
@@ -971,7 +971,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 	let mut dst_result_uid: Option<String> = None;
 	let (result_is_dst, llvm_ret_ty, result_needs_ptr_chain_bitcast) = match return_type {
 		None => (false, llvm::Ty::Void, false),
-		Some(t) if t.is_DST(&ctxt.structs, callee_mode) => {
+		Some(t) if t.is_DST(ctxt.structs, callee_mode) => {
 			//compute the size of this type, alloca this much space, pass the pointer as an extra arg
 			//if the func context claims that `func_name` returns a 'T, but the type param for this call is i16, then replace
 			let replaced_return_type: ast::Ty = t.clone().replace_type_var_with(concretized_type_param.as_ref().unwrap_or(&ast::Ty::TypeVar("_should_not_happen".to_owned())));
@@ -1003,8 +1003,8 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 			(
 				false,
 				//NOTE: was using ctxt.mode here, now trying out callee_mode. This seems to work
-				cmp_ty(t, &ctxt.structs, concretized_type_param.as_ref(), callee_mode, &ctxt.struct_inst_queue),
-				depth_of_DST_in_ptr_chain(t, &ctxt.structs, callee_mode).is_some()
+				cmp_ty(t, ctxt.structs, concretized_type_param.as_ref(), callee_mode, ctxt.struct_inst_queue),
+				depth_of_DST_in_ptr_chain(t, ctxt.structs, callee_mode).is_some()
 			)
 		}
 	};
@@ -1042,9 +1042,9 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 		if callee_mode == Some(ast::PolymorphMode::Erased) {
 			let call_type_param = concretized_type_param.as_ref().unwrap();
 			let replaced_result_ty = return_type.as_ref().unwrap().clone().replace_type_var_with(call_type_param);
-			if !replaced_result_ty.is_DST(&ctxt.structs, Some(ast::PolymorphMode::Erased)) {
+			if !replaced_result_ty.is_DST(ctxt.structs, Some(ast::PolymorphMode::Erased)) {
 				//replacing the type var in the return type makes it no longer a DST
-				let static_llvm_ty = cmp_ty(&replaced_result_ty, &ctxt.structs, ctxt.current_src_type_param(), Some(ast::PolymorphMode::Erased), &ctxt.struct_inst_queue);
+				let static_llvm_ty = cmp_ty(&replaced_result_ty, ctxt.structs, ctxt.current_src_type_param(), Some(ast::PolymorphMode::Erased), ctxt.struct_inst_queue);
 				let cast_op = gensym("bitcast");
 				ctxt.stream.push(Component::Instr(cast_op.clone(), llvm::Instruction::Bitcast{
 					original_typ: llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false})),
@@ -1070,7 +1070,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 	} else if result_needs_ptr_chain_bitcast {
 		//llvm_ret_ty will be i8*...* callee's src return type could be {any DST}*..*
 		let caller_src_ret_ty = return_type.as_ref().unwrap().clone().concretized(type_param);
-		if caller_src_ret_ty.is_DST(&ctxt.structs, ctxt.mode) {
+		if caller_src_ret_ty.is_DST(ctxt.structs, ctxt.mode) {
 			//if the base of the ptr chain in the caller is still a dst, don't do anything
 			ExpResult{
 				llvm_typ: llvm_ret_ty,
@@ -1078,7 +1078,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 			}
 		} else {
 			//the caller is not expecting a DST, so bitcast
-			let caller_llvm_ret_ty = cmp_ty(&caller_src_ret_ty, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
+			let caller_llvm_ret_ty = cmp_ty(&caller_src_ret_ty, ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
 			let bitcasted_chain_uid = gensym("ptr_chain_ret");
 			ctxt.stream.push(Component::Instr(bitcasted_chain_uid.clone(), llvm::Instruction::Bitcast{
 				original_typ: llvm_ret_ty,
@@ -1318,7 +1318,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &mut Context) -> ExpResult { match e {
 				//replacement type here, otherwise the type parameter must be cmped
 				Some(&base_type_param),
 				ctxt.mode,
-				&ctxt.struct_inst_queue
+				ctxt.struct_inst_queue
 			);
 			let bitcasted_uid = gensym("DST_proj_bitcast");
 			ctxt.stream.push(Component::Instr(bitcasted_uid.clone(), llvm::Instruction::Bitcast{
@@ -1334,7 +1334,7 @@ fn cmp_lvalue(e: &ast::Expr, ctxt: &mut Context) -> ExpResult { match e {
 			return base_lvalue_result;
 		}
 		use std::convert::TryFrom;
-		let result_ty = cmp_ty(&fields[field_index].1, &ctxt.structs, (&base_type_param).as_ref(), ctxt.mode, &ctxt.struct_inst_queue);
+		let result_ty = cmp_ty(&fields[field_index].1, ctxt.structs, (&base_type_param).as_ref(), ctxt.mode, ctxt.struct_inst_queue);
 		let field_index: u64 = u64::try_from(field_index).expect("could not convert from usize to u64");
 		let field_addr_uid = gensym("field");
 		let possibly_mangled_name = match &base_type_param {
@@ -1474,7 +1474,7 @@ fn cmp_stmt(stmt: &ast::Stmt, ctxt: &mut Context, expected_ret_ty: &llvm::Ty) { 
 			//and cmp_ty will yield a Ptr(llvm::Ty::Dynamic). It is OK to have Dynamic(_) llvm types in the stream, because
 			//when the llvm code is emitted, Dynamic(_) will be printed as i8, so there is no need to recurse over `llvm_typ` and
 			//replace any Dynamic(_) with i8
-			let llvm_typ = cmp_ty(typ, &ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, &ctxt.struct_inst_queue);
+			let llvm_typ = cmp_ty(typ, ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue);
 			ctxt.locals.insert(var_name.clone(), (llvm_typ.clone(), llvm::Operand::Local(uid.clone())));
 			//replace_dynamic_with_i8(&mut llvm_typ);
 			ctxt.stream.push(Component::Instr(uid, llvm::Instruction::Alloca(llvm_typ, llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)))
@@ -1630,7 +1630,7 @@ fn cmp_func(f: &FuncInst,
 		FuncInst::Erased(f) => {context.mode = Some(ast::PolymorphMode::Erased); (&f.args, &f.ret_type, &f.name as &str, &f.body)},
 		FuncInst::Separated(f,type_param, depth) => {
 			context.mode = Some(ast::PolymorphMode::Separated);
-			context.current_separated_type_param = Some((type_param, cmp_ty(type_param, &prog_context.structs, None, context.mode, &context.struct_inst_queue)));
+			context.current_separated_type_param = Some((type_param, cmp_ty(type_param, &prog_context.structs, None, context.mode, context.struct_inst_queue)));
 			context.current_separated_func_depth = *depth;
 			(&f.args, &f.ret_type, &f.name as &str, &f.body)
 		}
@@ -1640,7 +1640,7 @@ fn cmp_func(f: &FuncInst,
 	let (ret_is_dst, ll_ret_ty) = match ret_ty {
 		None => (false, llvm::Ty::Void),
 		Some(t) if t.is_DST(&prog_context.structs, context.mode) => (true, llvm::Ty::Void),
-		Some(t) => (false, cmp_ty(t, &prog_context.structs, context.current_src_type_param(), context.mode, &context.struct_inst_queue))
+		Some(t) => (false, cmp_ty(t, &prog_context.structs, context.current_src_type_param(), context.mode, context.struct_inst_queue))
 	};
 	for (arg_ty, arg_name) in args.iter() {
 		if arg_ty.is_DST(&prog_context.structs, context.mode) {
@@ -1669,7 +1669,7 @@ fn cmp_func(f: &FuncInst,
 			params.push( (i8_ptr, ll_arg_id) )
 		} else {
 			let alloca_slot_id = gensym("arg_slot");
-			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, context.current_src_type_param(), context.mode, &context.struct_inst_queue);
+			let ll_ty = cmp_ty(arg_ty, &prog_context.structs, context.current_src_type_param(), context.mode, context.struct_inst_queue);
 			let ll_arg_id = gensym("arg");
 			context.stream.push(Component::Instr(alloca_slot_id.clone(), llvm::Instruction::Alloca(ll_ty.clone(), llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None)));
 			context.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
@@ -1705,8 +1705,8 @@ fn cmp_func(f: &FuncInst,
 		debug_assert!(ret_ty.as_ref() == None, "last component of stream is not a terminator in function that does not return void");
 		context.stream.push(Component::Term(llvm::Terminator::Ret(None)));
 	}
-	//convert stream + body_stream to CFG
-	let mut cfg = llvm::CFG{
+	//convert stream + body_stream to Cfg
+	let mut cfg = llvm::Cfg{
 		entry: Default::default(),
 		other_blocks: Vec::new()
 	};
@@ -1937,7 +1937,7 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext,
 			}
 			//I only know the name of the function, so I have to iterate over the all the separated functions to find the one with this name
 			let func: &ast::GenericFunc = prog.separated_funcs.iter().find(|gfunc: &&ast::GenericFunc| gfunc.name.as_str() == name).unwrap();
-			cmp_func(&FuncInst::Separated(&func, &type_param, *depth), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue, errno_func_name)
+			cmp_func(&FuncInst::Separated(func, type_param, *depth), prog_context, &global_locs, &struct_inst_queue, &func_inst_queue, errno_func_name)
 		}).collect();
 		for (cmped_func, extra_globals) in cmped_funcs_and_global_decls.into_iter() {
 			cmped_funcs.push(cmped_func);
@@ -1956,7 +1956,7 @@ pub fn cmp_prog(prog: &ast::Program, prog_context: &typechecker::ProgramContext,
 				typechecker::StructType::Generic{mode: ast::PolymorphMode::Separated, fields, ..} => fields,
 				_ => panic!("found non-separated struct when looking up '{}' in struct context", name)
 			};
-			let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, Some(&type_param), Some(ast::PolymorphMode::Separated), &struct_inst_queue)).collect();
+			let cmped_tys = fields.iter().map(|(_, t)| cmp_ty(t, &prog_context.structs, Some(type_param), Some(ast::PolymorphMode::Separated), &struct_inst_queue)).collect();
 			let mangled_name = mangle(name.as_str(), type_param);
 			(mangled_name, cmped_tys)
 			//type_decls.insert(mangle(name.as_str(), &type_param), cmped_tys);
