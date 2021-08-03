@@ -468,7 +468,24 @@ fn run_file_tests() {
 			should_print.push('\n');
 		}
 		let should_print: Vec<u8> = should_print.into();
-		let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).map_err(|parse_err| format!("parse error in file {}: {}", test_file_name.display(), parse_err))?;
+		//let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).map_err(|parse_err| format!("parse error in file {}: {}", test_file_name.display(), parse_err))?;
+		let ast: Vec<ast::Gdecl> = {
+			use bumpalo::Bump;
+			use bumpalo_herd::Herd;
+			use crate::ast2;
+			let mut type_arena = Bump::new();
+			use std::sync::{Mutex, RwLock};
+			use std::collections::HashMap;
+			let typecache = ast2::TypeCache{
+				arena: Mutex::new(&mut type_arena),
+				cached: RwLock::new(HashMap::new())
+			};
+			let arena_arena = Herd::new();
+			let slice = &[program_source];
+			let driver::LexParseResult{ast, errors} = driver::lex_and_parse(slice, &typecache, &arena_arena);
+			assert!(errors.is_empty());
+			ast.iter().map(|&g| g.to_owned_ast()).collect()
+		};
 		let program_context = typechecker::typecheck_program(&ast).map_err(|type_err_msg| format!("type error in file {}: {}", test_file_name.display(), type_err_msg))?;
 		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, native_target_triple, "__errno_location");
 		let mut output_file_name: std::path::PathBuf = test_file_name;

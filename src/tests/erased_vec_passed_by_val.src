@@ -17,45 +17,45 @@ struct vec@<erased 'T>{
 
 struct vec@<i32> with_capacity(u64 capacity) {
 	struct vec@<i32> result;
-	if capacity != 0u {
+	if capacity != cast(u64, 0) {
 		result.data = cast(i32*, malloc(capacity * sizeof(i32)));
 	} else {
 		result.data = cast(i32*, null);
 	}
-	result.size = 0u;
+	result.size = cast(u64, 0);
 	result.capacity = capacity;
 	return result;
 }
 
 struct vec@<i32> consume_append_return(struct vec@<i32> this, i32 e){
-	if this.capacity == 0u {
+	if this.capacity == cast(u64, 0) {
 		if this.data != cast(i32*, null) {
 			printf("error, data is nto null when capacity is 0%c", 10);
 		}
-		this.data = cast(i32*, malloc(4u * sizeof(i32)));
+		this.data = cast(i32*, malloc(cast(u64, 4) * sizeof(i32)));
 		this.data[0] = e;
-		this.capacity = 4u;
-		this.size = 1u;
+		this.capacity = cast(u64, 4);
+		this.size = cast(u64, 1);
 		return this;
 	}
 	if this.size == this.capacity {
 		//reallocate
 		i32* new_alloc;
-		new_alloc = cast(i32*, malloc(2u * this.capacity));
+		new_alloc = cast(i32*, malloc(cast(u64, 2) * this.capacity));
 		u64 temp;
-		temp = 0u;
+		temp = cast(u64, 0);
 		while temp < this.size {
 			new_alloc[temp] = this.data[temp];
 		}
 
 		free(cast(void*, this.data));
 		this.data = new_alloc;
-		this.size = this.size + 1u;
-		this.capacity = 2u * this.capacity;
+		this.size = this.size + cast(u64, 1);
+		this.capacity = cast(u64, 2) * this.capacity;
 		return this;
 	}
 	this.data[this.size] = e;
-	this.size = this.size + 1u;
+	this.size = this.size + cast(u64, 1);
 	return this;
 }
 
@@ -65,7 +65,7 @@ void destroy(struct vec@<i32> this) {
 
 i32 main(){
 	struct vec@<i32> v;
-	v = with_capacity(5u);
+	v = with_capacity(cast(u64, 5));
 	v = consume_append_return(v, cast(i32, 10));
 	v = consume_append_return(v, cast(i32, 11));
 	v = consume_append_return(v, cast(i32, 12));
@@ -73,10 +73,10 @@ i32 main(){
 	v = consume_append_return(v, cast(i32, 14));
 	
 	u64 index;
-	index = 0u;
+	index = cast(u64, 0);
 	while index < v.size {
 		printf("%ld%c", v.data[index], 10);
-		index = index + 1u;
+		index = index + cast(u64, 1);
 	}
 
 	destroy(v);

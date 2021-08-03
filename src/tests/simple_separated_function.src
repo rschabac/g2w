@@ -9,7 +9,7 @@ struct vec@<separated 'T>{
 
 struct vec@<'T> vec_new@<separated 'T>(u64 capacity) {
 	struct vec@<'T> result;
-	result.size = 0u;
+	result.size = cast(u64, 0);
 	result.capacity = capacity;
 	result.data = null;
 	return result;
@@ -17,7 +17,7 @@ struct vec@<'T> vec_new@<separated 'T>(u64 capacity) {
 
 i32 main(){
 	struct vec@<i64> v;
-	v = vec_new@<i64>(0u);
+	v = vec_new@<i64>(cast(u64, 0));
 	printf("size = %lu, capacity = %lu%c", v.size, v.capacity, 10);
 	return cast(i32, 0);
 }

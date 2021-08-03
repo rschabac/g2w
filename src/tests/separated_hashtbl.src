@@ -58,20 +58,20 @@ struct Entry@<separated 'T>{
 
 struct Hashtbl@<'T> Hashtbl_new@<separated 'T>() {
 	struct Hashtbl@<'T> result;
-	result.entries = cast(struct Entry@<'T>*, calloc(16u, sizeof(struct Entry@<'T>)));
-	result.capacity = 16u;
-	result.size = 0u;
+	result.entries = cast(struct Entry@<'T>*, calloc(cast(u64, 16), sizeof(struct Entry@<'T>)));
+	result.capacity = cast(u64, 16);
+	result.size = cast(u64, 0);
 	return result;
 }
 
 void Hashtbl_destroy@<separated 'T>(struct Hashtbl@<'T> tbl) {
 	u64 i;
-	i = 0u;
+	i = cast(u64, 0);
 	while i < tbl.capacity {
 		if tbl.entries[i].key != cast(u8*, null) {
 			free(cast(void*, tbl.entries[i].key));
 		}
-		i = i + 1u;
+		i = i + cast(u64, 1);
 	}
 	free(cast(void*, tbl.entries));
 }
@@ -79,10 +79,13 @@ void Hashtbl_destroy@<separated 'T>(struct Hashtbl@<'T> tbl) {
 //https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
 u64 hash(u8* s){
 	u64 hash;
-	hash = 0xcbf29ce484222325u;
-	while *s != 0u {
-		hash = (hash ^ cast(u64, *s)) * 0x100000001b3u;
-		s = s + 1u;
+	//hash = 0xcbf29ce484222325u;
+	hash = (cast(u64, 0xcbf29ce48422232) << 4) + cast(u64, 5);
+	//too big to fit in an i64
+	//hash = cast(u64, 0xcbf29ce484222325);
+	while *s != cast(u64, 0) {
+		hash = (hash ^ cast(u64, *s)) * cast(u64, 0x100000001b3);
+		s = s + cast(u64, 1);
 	}
 	return hash;
 }
@@ -92,14 +95,14 @@ u64 hash(u8* s){
 	hash = hash(key);
 	u64 index;
 	//capacity must always be a power of 2
-	index = hash & (this.capacity - 1u);
+	index = hash & (this.capacity - cast(u64, 1));
 
 	while this.entries[index].key != cast(u8*, null) {
 		if strcmp(key, this.entries[index].key) == 0 {
 			//found key, return the value associated with it
 			return &this.entries[index].value;
 		}
-		index = (index + 1u) & (this.capacity - 1u);
+		index = (index + cast(u64, 1)) & (this.capacity - cast(u64, 1));
 	}
 
 	return cast('T*, null);
@@ -109,19 +112,19 @@ void Hashtbl_set_entry@<separated 'T>(struct Entry@<'T>* entries, u64 capacity, 
 	u64 hash;
 	hash = hash(key);
 	u64 index;
-	index = hash & (capacity - 1u);
+	index = hash & (capacity - cast(u64, 1));
 
 	while entries[index].key != cast(u8*, null) {
 		if strcmp(key, entries[index].key) == 0 {
 			entries[index].value = value;
 		}
 
-		index = (index + 1u) & (capacity - 1u);
+		index = (index + cast(u64, 1)) & (capacity - cast(u64, 1));
 	}
 
 	if plength != cast(u64*, null) {
 		key = strdup(key);
-		*plength = *plength + 1u;
+		*plength = *plength + cast(u64, 1);
 	}
 	entries[index].key = key;
 	entries[index].value = value;
@@ -129,17 +132,17 @@ void Hashtbl_set_entry@<separated 'T>(struct Entry@<'T>* entries, u64 capacity, 
 
 void Hashtbl_expand@<separated 'T>(struct Hashtbl@<'T>* this) {
 	u64 new_capacity;
-	new_capacity = this.capacity * 2u;
+	new_capacity = this.capacity * cast(u64, 2);
 	struct Entry@<'T>* new_entries;
 	new_entries = cast(struct Entry@<'T>*, calloc(new_capacity, sizeof(struct Entry@<'T>)));
 
 	u64 i;
-	i = 0u;
+	i = cast(u64, 0);
 	while i < this.capacity {
 		if this.entries[i].key != cast(u8*, null) {
 			Hashtbl_set_entry@<'T>(new_entries, new_capacity, this.entries[i].key, this.entries[i].value, cast(u64*, null));
 		}
-		i = i + 1u;
+		i = i + cast(u64, 1);
 	}
 
 	free(cast(void*, this.entries));
@@ -149,7 +152,7 @@ void Hashtbl_expand@<separated 'T>(struct Hashtbl@<'T>* this) {
 
 void Hashtbl_put@<separated 'T>(struct Hashtbl@<'T>* this, u8* key, 'T value) {
 	f@<'T>();
-	if this.size >= this.capacity / 2u {
+	if this.size >= this.capacity / cast(u64, 2) {
 		Hashtbl_expand@<'T>(this);
 	}
 	Hashtbl_set_entry@<'T>(this.entries, this.capacity, key, value, &this.size);
@@ -171,12 +174,12 @@ i32 main() {
 	values = Hashtbl_new@<u64>();
 	u8[10] buf;
 	u64 i;
-	i = 0u;
-	while i <= 10u {
+	i = cast(u64, 0);
+	while i <= cast(u64, 10) {
 		sprintf(&buf[0], "%lu", i);
 		Hashtbl_put@<u64>(&values, &buf[0], i);
 		printf("after adding %lu to values, size = %lu, capacity = %lu%c", i, values.size, values.capacity, 10);
-		i = i + 1u;
+		i = i + cast(u64, 1);
 	}
 	//String escape sequences are not implemented yet, so in order to get quotes to appear in the string,
 	//you need to use the '%c' format and 34 (ASCII code for '\"')

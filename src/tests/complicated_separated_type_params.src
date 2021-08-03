@@ -17,10 +17,10 @@ void f@<separated 'F>(struct A@<'F**>* p){
 	struct A@<'F**> copy;
 	//manually memcpy
 	u64 i;
-	i = 0u;
+	i = cast(u64, 0);
 	while i < sizeof(struct A@<'F**>) {
 		*(cast(u8*, &copy) + i) = *(cast(u8*, p) + i);
-		i = i + 1u;
+		i = i + cast(u64, 1);
 	}
 	struct B@<'F**> b;
 	b.bf1 = copy;

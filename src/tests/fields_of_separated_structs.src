@@ -29,7 +29,7 @@ struct C@<separated 'T>{
 
 i32 main(){
 	struct normal[5] x;
-	x[3].a.c[2][3] = 6u;
+	x[3].a.c[2][3] = cast(u64, 6);
 	printf("%lu%c", x[3].a.c[2][3], 10);
 	return cast(i32, 0);
 }

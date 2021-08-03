@@ -635,7 +635,7 @@ pub struct Program<'src: 'arena, 'arena> {
 }
 
 impl<'src, 'arena> Program<'src, 'arena> {
-	fn from_gdecls(gdecls: &[&'arena Gdecl<'src, 'arena>], arena: &'arena bumpalo::Bump) -> &'arena Self {
+	pub fn from_gdecls(gdecls: &[&'arena Gdecl<'src, 'arena>], arena: &'arena bumpalo::Bump) -> &'arena Self {
 		//count how many of each type of gdecl there are
 		let mut num_externs = 0;
 		let mut num_globals = 0;

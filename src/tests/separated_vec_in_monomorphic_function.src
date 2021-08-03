@@ -18,49 +18,49 @@ struct vec@<separated 'T>{
 }
 
 void init_vec_i32(struct vec@<i32>* this, u64 capacity) {
-	if capacity != 0u {
+	if capacity != cast(u64, 0) {
 		this.data = cast(i32*, malloc(capacity * sizeof(i32)));
 	} else {
 		this.data = cast(i32*, null);
 	}
-	this.size = 0u;
+	this.size = cast(u64, 0);
 	this.capacity = capacity;
 }
 
 void push_i32(struct vec@<i32>* this, i32 e){
-	if this.capacity == 0u {
+	if this.capacity == cast(u64, 0) {
 		if this.data != cast(i32*, null) {
 			printf("error, data is not null when capacity is 0%c", 10);
 		}
-		this.data = cast(i32*, malloc(4u * sizeof(i32)));
+		this.data = cast(i32*, malloc(cast(u64, 4) * sizeof(i32)));
 		this.data[0] = e;
-		this.capacity = 4u;
-		this.size = 1u;
+		this.capacity = cast(u64, 4);
+		this.size = cast(u64, 1);
 		return;
 	}
 	if this.size == this.capacity {
 		//reallocate
 		i32* new_alloc;
-		new_alloc = cast(i32*, malloc(2u * this.capacity));
+		new_alloc = cast(i32*, malloc(cast(u64, 2) * this.capacity));
 		u64 temp;
-		temp = 0u;
+		temp = cast(u64, 0);
 		while temp < this.size {
 			new_alloc[temp] = this.data[temp];
 		}
 
 		free(cast(void*, this.data));
 		this.data = new_alloc;
-		this.size = this.size + 1u;
-		this.capacity = 2u * this.capacity;
+		this.size = this.size + cast(u64, 1);
+		this.capacity = cast(u64, 2) * this.capacity;
 		return;
 	}
 	this.data[this.size] = e;
-	this.size = this.size + 1u;
+	this.size = this.size + cast(u64, 1);
 }
 
 i32 main(){
 	struct vec@<i32> v;
-	init_vec_i32(&v, 5u);
+	init_vec_i32(&v, cast(u64, 5));
 	push_i32(&v, cast(i32, 10));
 	push_i32(&v, cast(i32, 11));
 	push_i32(&v, cast(i32, 12));
@@ -68,15 +68,15 @@ i32 main(){
 	push_i32(&v, cast(i32, 14));
 
 	u64 index;
-	index = 0u;
+	index = cast(u64, 0);
 	while index < v.size {
 		printf("%ld%c", v.data[index], 10);
-		index = index + 1u;
+		index = index + cast(u64, 1);
 	}
 
 	struct vec@<i32>[2] pair;
-	init_vec_i32(&pair[0], 0u);
-	init_vec_i32(&pair[1], 0u);
+	init_vec_i32(&pair[0], cast(u64, 0));
+	init_vec_i32(&pair[1], cast(u64, 0));
 	push_i32(&pair[0], cast(i32, 5));
 	push_i32(&pair[1], cast(i32, 6));
 	printf("%ld%c", pair[0].data[0], 10);

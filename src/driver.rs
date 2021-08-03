@@ -585,12 +585,12 @@ pub fn print_timings() -> Result<(), String> {
 }
 
 //contains the ast, vec of errors, and any other data that needs to outlive lex_and_parse() (which may not work???)
-struct LexParseResult<'src: 'arena, 'arena> {
-	ast: Vec<&'arena ast2::Gdecl<'src, 'arena>>,
-	errors: Vec<Error>,
+pub struct LexParseResult<'src: 'arena, 'arena> {
+	pub ast: Vec<&'arena ast2::Gdecl<'src, 'arena>>,
+	pub errors: Vec<Error>,
 }
 
-fn lex_and_parse<'src: 'arena, 'arena>(input_srcs: &'src [String], typecache: &'arena ast2::TypeCache<'src, 'arena>, arena_arena: &'arena Herd) -> LexParseResult<'src, 'arena> {
+pub fn lex_and_parse<'src: 'arena, 'arena>(input_srcs: &'src [String], typecache: &'arena ast2::TypeCache<'src, 'arena>, arena_arena: &'arena Herd) -> LexParseResult<'src, 'arena> {
 	let (errors, gdecls) = input_srcs.par_iter().enumerate().map(|(file_id, src): (usize, &'src String)| {
 		let src = src.as_str();
 		let lexer = Lexer::new(src, file_id as u16);

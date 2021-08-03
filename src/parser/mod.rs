@@ -253,6 +253,15 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			}
 		}
 	}
+	fn id_token_loc_to_loc(&self, token_loc: &TokenLoc<'src>) -> Loc<&'src str> {
+		Loc{
+			elt: match token_loc.token {
+				IDENT(s) => s,
+				_ => unreachable!()
+			},
+			byte_offset: token_loc.byte_offset, byte_len: token_loc.byte_len, file_id: self.file_id
+		}
+	}
 	fn parse_base_ty_or_void(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Option<&'arena Ty<'src, 'arena>>>> {
 		let next_loc_if_base_ty = self.next_in(CAN_START_TY);
 		match next_loc_if_base_ty.as_ref().map(|x| &x.token) {
@@ -503,15 +512,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			if next_tok_loc.token == DOT {
 				self.poll();
 				let field_loc: TokenLoc<'_> = self.expect(&[IDENT("")], &ErrorHandler::Nothing, Some("a struct field name"))?;
-				let field_loc: Loc<_> = Loc {
-					byte_offset: field_loc.byte_offset,
-					byte_len: field_loc.byte_len,
-					file_id: self.file_id,
-					elt: match field_loc.token {
-						IDENT(s) => s,
-						_ => unreachable!()
-					}
-				};
+				let field_loc: Loc<_> = self.id_token_loc_to_loc(&field_loc);
 				lhs = Loc{
 					byte_offset: lhs.byte_offset,
 					byte_len: field_loc.byte_offset - lhs.byte_offset + field_loc.byte_len,
@@ -546,15 +547,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 	//returns None if there was an error, Some(None) if there was no function call, just an expr, Some(Some(Call)) if there was a call
 	fn parse_call(&mut self, name_loc: &TokenLoc<'src>, error_handler: &ErrorHandler<'src>) -> Option<Option<Loc<Expr<'src, 'arena>>>> {
 		let mut type_param: Option<Loc<&'arena Ty<'src, 'arena>>> = None;
-		let name_loc: Loc<_> = Loc{
-			byte_offset: name_loc.byte_offset,
-			byte_len: name_loc.byte_len,
-			file_id: self.file_id,
-			elt: match name_loc.token{
-				IDENT(s) => s,
-				_ => unreachable!()
-			}
-		};
+		let name_loc = self.id_token_loc_to_loc(name_loc);
 		if self.next_in(&[AT]).is_some() {
 			self.expect(&[LT], error_handler, Some("'<'"))?;
 			let ty_loc = self.parse_ty(error_handler)?;
@@ -605,13 +598,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			//must be a Decl
 			let base_ty: Loc<_> = self.parse_ty(&ErrorHandler::ConsumeIncluding(SEMI))?;
 			let varname = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(SEMI), Some("a variable name"))?;
-			let var_loc = Loc{
-				elt: match varname.token {
-					IDENT(s) => s,
-					_ => unreachable!()
-				},
-				byte_offset: varname.byte_offset, byte_len: varname.byte_len, file_id: self.file_id
-			};
+			let var_loc = self.id_token_loc_to_loc(&varname);
 			let semi_loc_opt = self.expect(&[SEMI], &ErrorHandler::Nothing, Some(format_args!("a ';' after declaration of '{}'", var_loc.elt)));
 			let semi_loc = match semi_loc_opt {
 				None => {
@@ -731,7 +718,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			Some(Loc{
 				elt: Block(&[]),
 				byte_offset: self.latest_byte_offset,
-				byte_len: 1, //TODO: does this work?
+				byte_len: 1,
 				file_id: self.file_id
 			})
 		}
@@ -753,11 +740,240 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			file_id: self.file_id
 		})
 	}
-	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
-		let result = Vec::new();
-		if let Some(block_loc) = self.parse_block(&ErrorHandler::Nothing) {
-			dbg!(block_loc);
+	pub fn parse_gdecl(&mut self) -> Option<&'arena Gdecl<'src, 'arena>> {
+		if self.next_in(&[EXTERN]).is_some() {
+			let ret_ty_loc = self.parse_ty_or_void(&ErrorHandler::ConsumeIncluding(SEMI))?;
+			let name_token_loc = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(SEMI), Some("a name for this extern declaration"))?;
+			let name_loc = self.id_token_loc_to_loc(&name_token_loc);
+			self.expect(&[LPAREN], &ErrorHandler::ConsumeIncluding(SEMI), Some("'('"))?;
+			let mut types = Vec::new();
+			let _rparen_loc = match self.next_in(&[RPAREN]) {
+				Some(l) => l,
+				None => loop {
+					types.push(self.parse_ty(&ErrorHandler::ConsumeIncluding(SEMI))?);
+					//if there is a comma, consume it, otherwise expect a ')'
+					if self.next_in(&[COMMA]).is_none() {
+						break self.expect(&[RPAREN], &ErrorHandler::ConsumeIncluding(SEMI), Some("')'"))?
+					}
+				}
+			};
+			self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after extern declaration"))?;
+			let types = if types.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(types.into_iter())};
+			return Some(&*self.arena.alloc(Gdecl::Extern{
+				ret_type: ret_ty_loc,
+				name: name_loc,
+				arg_types: types
+			}));
 		}
-		(result, self.errors)
+		let first_type_loc = if let Some(struct_loc) = self.next_in(&[STRUCT]) {
+			//could be a struct declaration, or the return type of a function
+			//try to parse it as a return type, but return early if it turns out to be a struct declaration
+			let name_token_loc = self.expect(&[IDENT("")], &ErrorHandler::UntilBalanced, Some("a struct name"))?;
+			let name_loc = self.id_token_loc_to_loc(&name_token_loc);
+			let mut mode_and_var = None;
+			let mut param = None;
+			let loc_of_last_token_in_ty: (usize, usize) = if self.next_in(&[AT]).is_some() {
+				self.expect(&[LT], &ErrorHandler::UntilBalanced, Some("'<'"))?;
+				if let Some(mode_token_loc) = self.next_in(&[SEPARATED, ERASED]) {
+					self.expect(&[APOSTROPHE], &ErrorHandler::UntilBalanced, Some("a \"'\" before a type variable"))?;
+					let type_var_token_loc = self.expect(&[IDENT("")], &ErrorHandler::UntilBalanced, Some("a type variable for thie generic struct"))?;
+					let type_var_loc = self.id_token_loc_to_loc(&type_var_token_loc);
+					let mode_loc = Loc {
+						elt: match mode_token_loc.token {
+							SEPARATED => PolymorphMode::Separated,
+							ERASED => PolymorphMode::Erased,
+							_ => unreachable!()
+						},
+						byte_offset: mode_token_loc.byte_offset, byte_len: mode_token_loc.byte_len, file_id: self.file_id
+					};
+					mode_and_var = Some((mode_loc, type_var_loc));
+				} else {
+					let type_param_loc = self.parse_ty(&ErrorHandler::UntilBalanced)?;
+					param = Some(type_param_loc);
+				}
+				let gt_loc = self.expect(&[GT], &ErrorHandler::UntilBalanced, Some("'>'"))?;
+				(gt_loc.byte_offset, gt_loc.byte_len)
+			} else {
+				(name_loc.byte_offset, name_loc.byte_len)
+			};
+			if self.next_in(&[LBRACE]).is_some() {
+				if let Some(type_param) = param {
+					//something like `struct A@<i32> { ... }`, not allowed
+					self.errors.push(Error{
+						err: "Generic struct declarations must be marked as either 'separated' or 'erased'".to_owned(),
+						byte_offset: type_param.byte_offset, approx_len: type_param.byte_len, file_id: self.file_id
+					});
+					self.handle_error(&ErrorHandler::ConsumeIncluding(RBRACE));
+					return None;
+				}
+				//already seen `struct A@<separated 'T>{`
+				let mut fields: Vec<(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)> = Vec::new();
+				let _rbrace_loc = loop {
+					if let Some(loc) = self.next_in(&[RBRACE]) {
+						break loc
+					}
+					let field_ty_loc = self.parse_ty(&ErrorHandler::ConsumeIncluding(RBRACE))?;
+					let	name_loc = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(RBRACE), Some("a name for this field"))?;
+					let name_loc = self.id_token_loc_to_loc(&name_loc);
+					self.expect(&[SEMI], &ErrorHandler::ConsumeIncluding(RBRACE), Some("';'"))?;
+					fields.push((field_ty_loc, name_loc));
+				};
+				let fields = if fields.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(fields.into_iter())};
+				let gdecl = match mode_and_var {
+					None => Gdecl::GStructDecl{
+						name: name_loc,
+						fields
+					},
+					Some((mode, var)) => Gdecl::GGenericStructDecl{
+						name: name_loc,
+						var,
+						mode,
+						fields
+					}
+				};
+				return Some(&*self.arena.alloc(gdecl));
+			}
+			//not a struct declaration, must be a function return type
+			if let Some((mode_loc, var_loc)) = mode_and_var {
+				let mode_str = match mode_loc.elt {
+					PolymorphMode::Separated => "separated",
+					PolymorphMode::Erased => "erased"
+				};
+				self.errors.push(Error{
+					err: format!("Expected a type here, not \"{} '{}\"", mode_str, var_loc.elt),
+					byte_offset: mode_loc.byte_offset,
+					approx_len: var_loc.byte_offset - mode_loc.byte_offset + var_loc.byte_len,
+					file_id: self.file_id
+				});
+				self.handle_error(&ErrorHandler::UntilBalanced);
+				return None;
+			}
+			let base_return_type = if let Some(type_param) = param {
+				Ty::GenericStruct{
+					type_param: type_param.getref(self.typecache),
+					name: name_loc.elt
+				}
+			} else {
+				Ty::Struct(name_loc.elt)
+			};
+			let mut base_ty = base_return_type.getref(self.typecache);
+			let (mut last_offset, mut last_len) = loc_of_last_token_in_ty;
+			loop {
+				match self.next_in(&[STAR, LBRACKET]) {
+					None => break Loc{
+						elt: Some(base_ty),
+						byte_offset: struct_loc.byte_offset,
+						byte_len: last_offset - struct_loc.byte_offset + last_len,
+						file_id: self.file_id
+					},
+					Some(TokenLoc{token: STAR, byte_offset: star_offset, byte_len: star_len, ..}) => {
+						base_ty = Ty::Ptr(Some(base_ty)).getref(self.typecache);
+						last_offset = star_offset;
+						last_len = star_len;
+					},
+					Some(TokenLoc{token: LBRACKET, ..}) => {
+						let array_len_tok = self.expect(&[INT{val: 0, bits: IntSize::Size8, signed: true}], &ErrorHandler::UntilBalanced, Some("an array length"))?;
+						let array_len = match array_len_tok.token {
+							INT{val, ..} => val,
+							_ => unreachable!()
+						};
+						let rbracket_loc = self.expect(&[RBRACKET], &ErrorHandler::UntilBalanced, Some("']'"))?;
+						last_offset = rbracket_loc.byte_offset;
+						last_len = rbracket_loc.byte_len;
+						base_ty = Ty::Array{typ: base_ty, length: array_len}.getref(self.typecache);
+					},
+					Some(_) => unreachable!()
+				}
+			}
+		} else {
+			self.parse_ty_or_void(&ErrorHandler::UntilBalanced)?
+		};
+		//this gdecl is either a function or a global var, either way it will start with a type (or void)
+		let name_token_loc = self.expect(&[IDENT("")], &ErrorHandler::UntilBalanced, Some("an identifier"))?;
+		let name_loc = self.id_token_loc_to_loc(&name_token_loc);
+		if self.next_in(&[SEMI]).is_some() {
+			//make sure type is not void
+			if let Loc{elt: Some(ty), byte_offset, byte_len, ..} = first_type_loc {
+				return Some(&*self.arena.alloc(Gdecl::GVarDecl(
+					Loc{
+						elt: ty, byte_offset, byte_len, file_id: self.file_id
+					},
+					name_loc
+				)));
+			} else {
+				//cannot declare a global variable of type void
+				self.errors.push(Error{
+					err: "Global variables cannot have type void".to_owned(),
+					byte_offset: first_type_loc.byte_offset,
+					approx_len: first_type_loc.byte_len,
+					file_id: self.file_id
+				});
+				return None;
+			}
+		}
+		//no semicolon, it must be a function declaration
+		let mut mode_and_var = None;
+		if self.next_in(&[AT]).is_some() {
+			self.expect(&[LT], &ErrorHandler::ConsumeIncluding(RBRACE), Some("'<'"))?;
+			let mode_token_loc = self.expect(&[SEPARATED, ERASED], &ErrorHandler::ConsumeIncluding(RBRACE), Some("'separated' or 'erased'"))?;
+			self.expect(&[APOSTROPHE], &ErrorHandler::ConsumeIncluding(RBRACE), Some("a \"'\" before a type variable"))?;
+			let type_var_token_loc = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(RBRACE), Some("a type variable for this generic function"))?;
+			self.expect(&[GT], &ErrorHandler::ConsumeIncluding(RBRACE), Some("'>'"))?;
+			let mode_loc = Loc{
+				elt: match mode_token_loc.token {
+					SEPARATED => PolymorphMode::Separated,
+					ERASED => PolymorphMode::Erased,
+					_ => unreachable!()
+				},
+				byte_offset: mode_token_loc.byte_offset,
+				byte_len: mode_token_loc.byte_len,
+				file_id: self.file_id
+			};
+			let var_loc = self.id_token_loc_to_loc(&type_var_token_loc);
+			mode_and_var = Some((mode_loc, var_loc));
+		}
+		self.expect(&[LPAREN], &ErrorHandler::UntilBalanced, Some("'('"))?;
+		let mut args = Vec::new();
+		let _rparen_loc = match self.next_in(&[RPAREN]) {
+			Some(l) => l,
+			None => loop {
+				let arg_ty_loc = self.parse_ty(&ErrorHandler::UntilBalanced)?;
+				let name_token_loc = self.expect(&[IDENT("")], &ErrorHandler::UntilBalanced, Some("a name for this function parameter"))?;
+				let name_loc = self.id_token_loc_to_loc(&name_token_loc);
+				args.push((arg_ty_loc, name_loc));
+				if self.next_in(&[COMMA]).is_none() {
+					break self.expect(&[RPAREN], &ErrorHandler::UntilBalanced, Some("')'"))?
+				}
+			}
+		};
+		let args = if args.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(args.into_iter())};
+		let body = self.parse_block(&ErrorHandler::UntilBalanced)?;
+		let result = if let Some((mode, var)) = mode_and_var {
+			Gdecl::GGenericFuncDecl{
+				name: name_loc,
+				ret_type: first_type_loc,
+				args,
+				body: body.elt,
+				var,
+				mode
+			}
+		} else {
+			Gdecl::GFuncDecl{
+				name: name_loc,
+				ret_type: first_type_loc,
+				args,
+				body: body.elt
+			}
+		};
+		Some(&*self.arena.alloc(result))
+	}
+	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
+		let mut gdecls = Vec::new();
+		while self.peeker.peek(0).is_some() {
+			if let Some(gdecl) = self.parse_gdecl() {
+				gdecls.push(gdecl);
+			}
+		}
+		(gdecls, self.errors)
 	}
 }
