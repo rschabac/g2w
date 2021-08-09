@@ -431,11 +431,9 @@ mod typechecking_tests {
 #[test]
 fn run_file_tests() {
 	use crate::{typechecker, driver, frontend};
-	use super::oldparser;
 	use std::fs;
 	use rayon::prelude::*;
 	let native_target_triple = driver::get_native_target_triple().unwrap();
-	let program_parser = oldparser::ProgramParser::new();
 	let test_file_names: Vec<std::path::PathBuf> = fs::read_dir("src/tests").unwrap()
 		.filter_map(|entry| {
 			let path: std::path::PathBuf = entry.unwrap().path();
@@ -484,7 +482,7 @@ fn run_file_tests() {
 			let slice = &[program_source];
 			let driver::LexParseResult{ast, errors} = driver::lex_and_parse(slice, &typecache, &arena_arena);
 			assert!(errors.is_empty());
-			ast.iter().map(|&g| g.to_owned_ast()).collect()
+			ast.iter().map(|g| g.to_owned_ast()).collect()
 		};
 		let program_context = typechecker::typecheck_program(&ast).map_err(|type_err_msg| format!("type error in file {}: {}", test_file_name.display(), type_err_msg))?;
 		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, native_target_triple, "__errno_location");

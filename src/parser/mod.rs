@@ -9,7 +9,7 @@ use crate::driver::Error;
 mod tests;
 
 //when parser is done, find largest argument to peek
-const PARSE_MAX_PEEK: usize = 5;
+const PARSE_MAX_PEEK: usize = 1;
 
 //very similar Peeker in the lexer, but with a different constant for the size of the array, and iterates over tokens
 struct Peeker<'src, T: Iterator<Item = TokenLoc<'src>>> {
@@ -18,6 +18,7 @@ struct Peeker<'src, T: Iterator<Item = TokenLoc<'src>>> {
 	next_read: u8,
 	amount_buffered: u8
 }
+#[allow(clippy::modulo_one)]
 impl<'src, T: Iterator<Item = TokenLoc<'src>>> Peeker<'src, T> {
 	fn new(tokens: T) -> Self {
 		Peeker{
@@ -385,7 +386,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 	}
 	//doesn't call self.handle_error, but does report the error
-	fn parse_expr_without_handling_error(&mut self, prec_level: i32) -> Option<Loc<Expr<'src, 'arena>>> {
+	fn parse_expr_without_handling_error(&mut self, prec_level: i32) -> Option<Loc<TypedExpr<'src, 'arena>>> {
 		let first_expr_loc = match self.peeker.peek(0) {
 			None => {
 				self.errors.push(Error{
@@ -418,20 +419,20 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				result
 			}
 		}?;
-		let mut lhs: Loc<Expr<'src, 'arena>> = match &first_expr_loc.token {
-			NULL => self.located(Expr::LitNull, &first_expr_loc),
-			TRUE | FALSE => self.located(Expr::LitBool(first_expr_loc.token == TRUE), &first_expr_loc),
-			INT{val, bits, signed: true} => self.located(Expr::LitSignedInt(*val as i64, *bits), &first_expr_loc),
-			INT{val, bits, signed: false} => self.located(Expr::LitUnsignedInt(*val, *bits), &first_expr_loc),
-			FLOAT{val, bits} => self.located(Expr::LitFloat(*val, *bits), &first_expr_loc),
-			STR(s) => self.located(Expr::LitString(s.clone()), &first_expr_loc),
+		let mut lhs: Loc<TypedExpr<'src, 'arena>> = match &first_expr_loc.token {
+			NULL => self.located(Expr::LitNull.into(), &first_expr_loc),
+			TRUE | FALSE => self.located(Expr::LitBool(first_expr_loc.token == TRUE).into(), &first_expr_loc),
+			INT{val, bits, signed: true} => self.located(Expr::LitSignedInt(*val as i64, *bits).into(), &first_expr_loc),
+			INT{val, bits, signed: false} => self.located(Expr::LitUnsignedInt(*val, *bits).into(), &first_expr_loc),
+			FLOAT{val, bits} => self.located(Expr::LitFloat(*val, *bits).into(), &first_expr_loc),
+			STR(s) => self.located(Expr::LitString(s.clone()).into(), &first_expr_loc),
 			IDENT(id) => {
 				//try to parse a function call
-				let call_result = self.parse_call(&first_expr_loc, &ErrorHandler::Nothing);
-				if let Some(call_expr) = call_result? {
+				let call_result = self.parse_call(&first_expr_loc, &ErrorHandler::Nothing)?;
+				if let Some(call_expr) = call_result {
 					call_expr
 				} else {
-					self.located(Expr::Id(id), &first_expr_loc)
+					self.located(Expr::Id(id).into(), &first_expr_loc)
 				}
 			},
 			SIZEOF => {
@@ -441,7 +442,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				Loc{
 					byte_offset: first_expr_loc.byte_offset,
 					byte_len: rparen_loc.byte_offset - first_expr_loc.byte_offset + rparen_loc.byte_len,
-					elt: Expr::Sizeof(ty_loc),
+					elt: Expr::Sizeof(ty_loc).into(),
 					file_id: self.file_id
 				}
 			},
@@ -454,7 +455,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				Loc{
 					byte_offset: first_expr_loc.byte_offset,
 					byte_len: rparen_loc.byte_offset - first_expr_loc.byte_offset + rparen_loc.byte_len,
-					elt: Expr::Cast(ty_loc, nested_loc.alloc(self.arena)),
+					elt: Expr::Cast(ty_loc, nested_loc.alloc(self.arena)).into(),
 					file_id: self.file_id
 				}
 			},
@@ -462,6 +463,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				let unop = &first_expr_loc.token;
 				//recurse with prec_level = 110, greater than any binop precedence
 				let operand_loc = self.parse_expr_without_handling_error(110)?.alloc(self.arena);
+				let (operand_offset, operand_len) = (operand_loc.byte_offset, operand_loc.byte_len);
 				let result_expr = match unop {
 					AND => Expr::GetRef(operand_loc),
 					STAR => Expr::Deref(operand_loc),
@@ -472,8 +474,8 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				};
 				Loc{
 					byte_offset: first_expr_loc.byte_offset,
-					byte_len: operand_loc.byte_offset - first_expr_loc.byte_offset + operand_loc.byte_len,
-					elt: result_expr,
+					byte_len: operand_offset - first_expr_loc.byte_offset + operand_len,
+					elt: result_expr.into(),
 					file_id: self.file_id
 				}
 			},
@@ -504,7 +506,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				lhs = Loc{
 					byte_offset: lhs.byte_offset,
 					byte_len: rbracket_loc.byte_offset - lhs.byte_offset + rbracket_loc.byte_len,
-					elt: Expr::Index(lhs.alloc(self.arena), index_loc.alloc(self.arena)),
+					elt: Expr::Index(lhs.alloc(self.arena), index_loc.alloc(self.arena)).into(),
 					file_id: self.file_id
 				};
 				continue;
@@ -516,7 +518,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				lhs = Loc{
 					byte_offset: lhs.byte_offset,
 					byte_len: field_loc.byte_offset - lhs.byte_offset + field_loc.byte_len,
-					elt: Expr::Proj(lhs.alloc(self.arena), field_loc),
+					elt: Expr::Proj(lhs.alloc(self.arena), field_loc).into(),
 					file_id: self.file_id
 				};
 				continue;
@@ -531,13 +533,13 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			lhs = Loc{
 				byte_offset: lhs.byte_offset,
 				byte_len: rhs.byte_offset - lhs.byte_offset + rhs.byte_len,
-				elt: Expr::Binop(lhs.alloc(self.arena), binop, rhs.alloc(self.arena)),
+				elt: Expr::Binop(lhs.alloc(self.arena), binop, rhs.alloc(self.arena)).into(),
 				file_id: self.file_id
 			};
 		}
 		Some(lhs)
 	}
-	pub fn parse_expr(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Expr<'src, 'arena>>> {
+	pub fn parse_expr(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<TypedExpr<'src, 'arena>>> {
 		let expr_opt = self.parse_expr_without_handling_error(i32::MIN);
 		if expr_opt.is_none() {
 			self.handle_error(error_handler);
@@ -545,7 +547,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		expr_opt
 	}
 	//returns None if there was an error, Some(None) if there was no function call, just an expr, Some(Some(Call)) if there was a call
-	fn parse_call(&mut self, name_loc: &TokenLoc<'src>, error_handler: &ErrorHandler<'src>) -> Option<Option<Loc<Expr<'src, 'arena>>>> {
+	fn parse_call(&mut self, name_loc: &TokenLoc<'src>, error_handler: &ErrorHandler<'src>) -> Option<Option<Loc<TypedExpr<'src, 'arena>>>> {
 		let mut type_param: Option<Loc<&'arena Ty<'src, 'arena>>> = None;
 		let name_loc = self.id_token_loc_to_loc(name_loc);
 		if self.next_in(&[AT]).is_some() {
@@ -561,7 +563,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			//no lparen, the ident seen must just be an Id
 			return Some(None);
 		}
-		let mut args: Vec<Loc<Expr<'_, '_>>> = Vec::new();
+		let mut args: Vec<Loc<TypedExpr<'_, '_>>> = Vec::new();
 		let rparen_loc = match self.next_in(&[RPAREN]) {
 			Some(l) => l,
 			None => loop {
@@ -572,7 +574,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				}
 			}
 		};
-		let args = if args.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(args.into_iter())};
+		let args = if args.is_empty() {&mut []} else {self.arena.alloc_slice_fill_iter(args.into_iter())};
 		let result = if let Some(type_param_loc) = type_param {
 			Expr::GenericCall{
 				name: name_loc,
@@ -586,7 +588,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			byte_offset: name_loc.byte_offset,
 			byte_len: rparen_loc.byte_offset - name_loc.byte_offset + rparen_loc.byte_len,
 			file_id: self.file_id,
-			elt: result
+			elt: result.into()
 		}))
 	}
 	pub fn parse_stmt(&mut self) -> Option<Loc<Stmt<'src, 'arena>>> {
@@ -652,7 +654,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 		//must be either an assignment or a function call
 		let lhs_or_call = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
-		if matches!(&lhs_or_call.elt, Expr::Call(_,_) | Expr::GenericCall{..}) {
+		if matches!(&lhs_or_call.elt.expr, Expr::Call(_,_) | Expr::GenericCall{..}) {
 			//this could still be an assignment. assigning to a function call should be caught in the typechecker, not here.
 			if self.next_in(&[EQ]).is_some() {
 				let rhs_loc = self.parse_expr(&ErrorHandler::ConsumeIncluding(SEMI))?;
@@ -665,7 +667,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				});
 			}
 			//not an assignment, just a call
-			let call = match lhs_or_call.elt {
+			let call = match lhs_or_call.elt.expr {
 				Expr::Call(name, args) => Stmt::SCall(name, args),
 				Expr::GenericCall{name, type_param, args} => Stmt::GenericSCall{name, type_param, args},
 				_ => unreachable!()
@@ -709,14 +711,14 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 					byte_offset: if_loc.byte_offset,
 					byte_len: if_stmt.byte_offset - if_loc.byte_offset + if_stmt.byte_len,
 					file_id: self.file_id,
-					elt: Block(std::slice::from_ref(&*self.arena.alloc(if_stmt)))
+					elt: Block(std::slice::from_mut(self.arena.alloc(if_stmt)))
 				})
 			} else {
 				self.parse_block(&ErrorHandler::UntilBalanced)
 			}
 		} else {
 			Some(Loc{
-				elt: Block(&[]),
+				elt: Block(&mut []),
 				byte_offset: self.latest_byte_offset,
 				byte_len: 1,
 				file_id: self.file_id
@@ -734,13 +736,13 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 		let rbrace_loc = self.expect(&[RBRACE], error_handler, Some("a '}' to close a block"))?;
 		Some(Loc{
-			elt: Block(&*self.arena.alloc_slice_fill_iter(stmts.into_iter())),
+			elt: Block(self.arena.alloc_slice_fill_iter(stmts.into_iter())),
 			byte_offset: lbrace_loc.byte_offset,
 			byte_len: rbrace_loc.byte_offset - lbrace_loc.byte_offset + rbrace_loc.byte_len,
 			file_id: self.file_id
 		})
 	}
-	pub fn parse_gdecl(&mut self) -> Option<&'arena Gdecl<'src, 'arena>> {
+	pub fn parse_gdecl(&mut self) -> Option<Gdecl<'src, 'arena>> {
 		if self.next_in(&[EXTERN]).is_some() {
 			let ret_ty_loc = self.parse_ty_or_void(&ErrorHandler::ConsumeIncluding(SEMI))?;
 			let name_token_loc = self.expect(&[IDENT("")], &ErrorHandler::ConsumeIncluding(SEMI), Some("a name for this extern declaration"))?;
@@ -758,12 +760,12 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				}
 			};
 			self.expect(&[SEMI], &ErrorHandler::Nothing, Some("a ';' after extern declaration"))?;
-			let types = if types.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(types.into_iter())};
-			return Some(&*self.arena.alloc(Gdecl::Extern{
+			let types = if types.is_empty() {&mut []} else {self.arena.alloc_slice_fill_iter(types.into_iter())};
+			return Some(Gdecl::Extern{
 				ret_type: ret_ty_loc,
 				name: name_loc,
 				arg_types: types
-			}));
+			});
 		}
 		let first_type_loc = if let Some(struct_loc) = self.next_in(&[STRUCT]) {
 			//could be a struct declaration, or the return type of a function
@@ -818,7 +820,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 					self.expect(&[SEMI], &ErrorHandler::ConsumeIncluding(RBRACE), Some("';'"))?;
 					fields.push((field_ty_loc, name_loc));
 				};
-				let fields = if fields.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(fields.into_iter())};
+				let fields = if fields.is_empty() {&mut []} else {self.arena.alloc_slice_fill_iter(fields.into_iter())};
 				let gdecl = match mode_and_var {
 					None => Gdecl::GStructDecl{
 						name: name_loc,
@@ -831,7 +833,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 						fields
 					}
 				};
-				return Some(&*self.arena.alloc(gdecl));
+				return Some(gdecl);
 			}
 			//not a struct declaration, must be a function return type
 			if let Some((mode_loc, var_loc)) = mode_and_var {
@@ -894,12 +896,12 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		if self.next_in(&[SEMI]).is_some() {
 			//make sure type is not void
 			if let Loc{elt: Some(ty), byte_offset, byte_len, ..} = first_type_loc {
-				return Some(&*self.arena.alloc(Gdecl::GVarDecl(
+				return Some(Gdecl::GVarDecl(
 					Loc{
 						elt: ty, byte_offset, byte_len, file_id: self.file_id
 					},
 					name_loc
-				)));
+				));
 			} else {
 				//cannot declare a global variable of type void
 				self.errors.push(Error{
@@ -946,7 +948,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				}
 			}
 		};
-		let args = if args.is_empty() {&[]} else {&*self.arena.alloc_slice_fill_iter(args.into_iter())};
+		let args = if args.is_empty() {&mut []} else {self.arena.alloc_slice_fill_iter(args.into_iter())};
 		let body = self.parse_block(&ErrorHandler::UntilBalanced)?;
 		let result = if let Some((mode, var)) = mode_and_var {
 			Gdecl::GGenericFuncDecl{
@@ -965,9 +967,9 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				body: body.elt
 			}
 		};
-		Some(&*self.arena.alloc(result))
+		Some(result)
 	}
-	pub fn parse_gdecls(mut self) -> (Vec<&'arena Gdecl<'src, 'arena>>, Vec<Error>) {
+	pub fn parse_gdecls(mut self) -> (Vec<Gdecl<'src, 'arena>>, Vec<Error>) {
 		let mut gdecls = Vec::new();
 		while self.peeker.peek(0).is_some() {
 			if let Some(gdecl) = self.parse_gdecl() {

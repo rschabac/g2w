@@ -7,7 +7,7 @@ pub struct Loc<T> {
 	pub file_id: u16
 }
 impl<'arena, T> Loc<T> {
-	pub fn alloc(self, arena: &'arena bumpalo::Bump) -> Loc<&'arena T> {
+	pub fn alloc(self, arena: &'arena bumpalo::Bump) -> Loc<&'arena mut T> {
 		Loc{
 			elt: arena.alloc(self.elt),
 			byte_offset: self.byte_offset,
@@ -377,17 +377,17 @@ pub enum Expr<'src, 'arena> where 'src: 'arena {
 	LitFloat(f64, FloatSize),
 	LitString(Cow<'src, str>),
 	Id(&'src str),
-	Index(Loc<&'arena Expr<'src, 'arena>>, Loc<&'arena Expr<'src, 'arena>>),
-	Proj(Loc<&'arena Expr<'src, 'arena>>, Loc<&'src str>),
+	Index(Loc<&'arena mut TypedExpr<'src, 'arena>>, Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	Proj(Loc<&'arena mut TypedExpr<'src, 'arena>>, Loc<&'src str>),
 	//when dealing with a slice of ast items, should I wrap the slice in a Loc? I think it's ok to just use the loc of
 	//the containing item (e.g. wrong number of args to function)
-	Call(Loc<&'src str>, &'arena [Loc<Expr<'src, 'arena>>]),
-	GenericCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena [Loc<Expr<'src, 'arena>>]},
-	Cast(Loc<&'arena Ty<'src, 'arena>>, Loc<&'arena Expr<'src, 'arena>>),
-	Binop(Loc<&'arena Expr<'src, 'arena>>, BinaryOp, Loc<&'arena Expr<'src, 'arena>>),
-	Unop(UnaryOp, Loc<&'arena Expr<'src, 'arena>>),
-	GetRef(Loc<&'arena Expr<'src, 'arena>>),
-	Deref(Loc<&'arena Expr<'src, 'arena>>),
+	Call(Loc<&'src str>, &'arena mut [Loc<TypedExpr<'src, 'arena>>]),
+	GenericCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena mut [Loc<TypedExpr<'src, 'arena>>]},
+	Cast(Loc<&'arena Ty<'src, 'arena>>, Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	Binop(Loc<&'arena mut TypedExpr<'src, 'arena>>, BinaryOp, Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	Unop(UnaryOp, Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	GetRef(Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	Deref(Loc<&'arena mut TypedExpr<'src, 'arena>>),
 	Sizeof(Loc<&'arena Ty<'src, 'arena>>)
 }
 impl<'src: 'arena, 'arena> Expr<'src, 'arena> {
@@ -402,56 +402,70 @@ impl<'src: 'arena, 'arena> Expr<'src, 'arena> {
 			LitFloat(f, FloatSize::FSize32) => ast::Expr::Cast(ast::Ty::Float(ast::FloatSize::FSize32), Box::new(ast::Expr::LitFloat(*f))),
 			LitString(s) => ast::Expr::LitString(s.clone().into_owned()),
 			Id(s) => ast::Expr::Id((*s).to_owned()),
-			Index(base_loc, index_loc) => ast::Expr::Index(Box::new(base_loc.elt.to_owned_ast()), Box::new(index_loc.elt.to_owned_ast())),
-			Proj(base_loc, field) => ast::Expr::Proj(Box::new(base_loc.elt.to_owned_ast()), field.elt.to_owned()),
-			Call(name_loc, arg_locs) => ast::Expr::Call(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.to_owned_ast()).collect()),
+			Index(base_loc, index_loc) => ast::Expr::Index(Box::new(base_loc.elt.expr.to_owned_ast()), Box::new(index_loc.elt.expr.to_owned_ast())),
+			Proj(base_loc, field) => ast::Expr::Proj(Box::new(base_loc.elt.expr.to_owned_ast()), field.elt.to_owned()),
+			Call(name_loc, arg_locs) => ast::Expr::Call(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.expr.to_owned_ast()).collect()),
 			GenericCall{name, type_param, args} =>
-				ast::Expr::GenericCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.to_owned_ast()).collect()},
-			Cast(ty_loc, e_loc) => ast::Expr::Cast(ty_loc.elt.to_owned_ast(), Box::new(e_loc.elt.to_owned_ast())),
+				ast::Expr::GenericCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.expr.to_owned_ast()).collect()},
+			Cast(ty_loc, e_loc) => ast::Expr::Cast(ty_loc.elt.to_owned_ast(), Box::new(e_loc.elt.expr.to_owned_ast())),
 			Binop(lhs_loc, op, rhs_loc) => ast::Expr::Binop(
-				Box::new(lhs_loc.elt.to_owned_ast()),
+				Box::new(lhs_loc.elt.expr.to_owned_ast()),
 				op.to_owned_ast(),
-				Box::new(rhs_loc.elt.to_owned_ast()),
+				Box::new(rhs_loc.elt.expr.to_owned_ast()),
 			),
-			Unop(op, e_loc) => ast::Expr::Unop(op.to_owned_ast(), Box::new(e_loc.elt.to_owned_ast())),
-			GetRef(e_loc) => ast::Expr::GetRef(Box::new(e_loc.elt.to_owned_ast())),
-			Deref(e_loc) => ast::Expr::Deref(Box::new(e_loc.elt.to_owned_ast())),
+			Unop(op, e_loc) => ast::Expr::Unop(op.to_owned_ast(), Box::new(e_loc.elt.expr.to_owned_ast())),
+			GetRef(e_loc) => ast::Expr::GetRef(Box::new(e_loc.elt.expr.to_owned_ast())),
+			Deref(e_loc) => ast::Expr::Deref(Box::new(e_loc.elt.expr.to_owned_ast())),
 			Sizeof(ty_loc) => ast::Expr::Sizeof(ty_loc.elt.to_owned_ast())
 		}
 	}
 }
 
 #[derive(Debug, PartialEq)]
+pub struct TypedExpr<'src, 'arena> where 'src: 'arena {
+	pub expr: Expr<'src, 'arena>,
+	pub typ: Option<&'arena Ty<'src, 'arena>>
+}
+impl<'src: 'arena, 'arena> From<Expr<'src, 'arena>> for TypedExpr<'src, 'arena> {
+	fn from(e: Expr<'src, 'arena>) -> TypedExpr<'src, 'arena> {
+		TypedExpr{
+			expr: e,
+			typ: None
+		}
+	}
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Stmt<'src, 'arena> where 'src: 'arena {
-	Assign(Loc<Expr<'src, 'arena>>, Loc<Expr<'src, 'arena>>),
+	Assign(Loc<TypedExpr<'src, 'arena>>, Loc<TypedExpr<'src, 'arena>>),
 	Decl(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>),
-	Return(Option<Loc<Expr<'src, 'arena>>>),
-	SCall(Loc<&'src str>, &'arena [Loc<Expr<'src, 'arena>>]),
-	GenericSCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena [Loc<Expr<'src, 'arena>>]},
-	If(Loc<Expr<'src, 'arena>>, Block<'src, 'arena>, Block<'src, 'arena>),
-	While(Loc<Expr<'src, 'arena>>, Block<'src, 'arena>)
+	Return(Option<Loc<TypedExpr<'src, 'arena>>>),
+	SCall(Loc<&'src str>, &'arena mut [Loc<TypedExpr<'src, 'arena>>]),
+	GenericSCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena mut [Loc<TypedExpr<'src, 'arena>>]},
+	If(Loc<TypedExpr<'src, 'arena>>, Block<'src, 'arena>, Block<'src, 'arena>),
+	While(Loc<TypedExpr<'src, 'arena>>, Block<'src, 'arena>)
 }
 impl<'src: 'arena, 'arena> Stmt<'src, 'arena> {
 	pub fn to_owned_ast(&self) -> ast::Stmt {
 		use Stmt::*;
 		match self {
-			Assign(lhs_loc, rhs_loc) => ast::Stmt::Assign(lhs_loc.elt.to_owned_ast(), rhs_loc.elt.to_owned_ast()),
+			Assign(lhs_loc, rhs_loc) => ast::Stmt::Assign(lhs_loc.elt.expr.to_owned_ast(), rhs_loc.elt.expr.to_owned_ast()),
 			Decl(ty_loc, name_loc) => ast::Stmt::Decl(ty_loc.elt.to_owned_ast(), name_loc.elt.to_owned()),
 			Return(None) => ast::Stmt::Return(None),
-			Return(Some(e_loc)) => ast::Stmt::Return(Some(e_loc.elt.to_owned_ast())),
-			SCall(name_loc, arg_locs) => ast::Stmt::SCall(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.to_owned_ast()).collect()),
+			Return(Some(e_loc)) => ast::Stmt::Return(Some(e_loc.elt.expr.to_owned_ast())),
+			SCall(name_loc, arg_locs) => ast::Stmt::SCall(name_loc.elt.to_owned(), arg_locs.iter().map(|e| e.elt.expr.to_owned_ast()).collect()),
 			GenericSCall{name, type_param, args} =>
-				ast::Stmt::GenericSCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.to_owned_ast()).collect()},
-			If(cond_loc, then_block, else_block) => ast::Stmt::If(cond_loc.elt.to_owned_ast(), then_block.to_owned_ast(), else_block.to_owned_ast()),
-			While(cond_loc, block) => ast::Stmt::While(cond_loc.elt.to_owned_ast(), block.to_owned_ast())
+				ast::Stmt::GenericSCall{name: name.elt.to_owned(), type_param: type_param.elt.to_owned_ast(), args: args.iter().map(|e| e.elt.expr.to_owned_ast()).collect()},
+			If(cond_loc, then_block, else_block) => ast::Stmt::If(cond_loc.elt.expr.to_owned_ast(), then_block.to_owned_ast(), else_block.to_owned_ast()),
+			While(cond_loc, block) => ast::Stmt::While(cond_loc.elt.expr.to_owned_ast(), block.to_owned_ast())
 		}
 	}
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Block<'src, 'arena>(pub &'arena [Loc<Stmt<'src, 'arena>>]);
+#[derive(Debug, PartialEq)]
+pub struct Block<'src, 'arena>(pub &'arena mut [Loc<Stmt<'src, 'arena>>]);
 impl<'src: 'arena, 'arena> Block<'src, 'arena> {
-	pub fn to_owned_ast(self) -> ast::Block {
+	pub fn to_owned_ast(&self) -> ast::Block {
 		self.0.iter().map(|s| s.elt.to_owned_ast()).collect()
 	}
 }
@@ -635,7 +649,7 @@ pub struct Program<'src: 'arena, 'arena> {
 }
 
 impl<'src, 'arena> Program<'src, 'arena> {
-	pub fn from_gdecls(gdecls: &[&'arena Gdecl<'src, 'arena>], arena: &'arena bumpalo::Bump) -> &'arena Self {
+	pub fn from_gdecls(mut gdecls: Vec<Gdecl<'src, 'arena>>, arena: &'arena bumpalo::Bump) -> Self {
 		//count how many of each type of gdecl there are
 		let mut num_externs = 0;
 		let mut num_globals = 0;
@@ -656,9 +670,23 @@ impl<'src, 'arena> Program<'src, 'arena> {
 			GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Erased, ..}, ..} => num_erased_funcs += 1,
 			GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Separated, ..}, ..} => num_separated_funcs += 1,
 		}}
-		let mut just_externs = gdecls.iter().filter_map(|g| {
-			if let Extern{ret_type, name, arg_types} = g {
-				Some(ExternalFunc{ name: *name, ret_type: *ret_type, arg_types })
+		//I need to take the Gdecl out of gdecls, but in an arbitrary order, so into_iter won't work.
+		//mem::replace each one with a dummy gdecl
+		let get_dummy = || {
+			Gdecl::Extern{
+				ret_type: Loc{elt: None, byte_offset: 0, byte_len: 0, file_id: 0},
+				name: Loc{elt: "", byte_offset: 0, byte_len: 0, file_id: 0},
+				arg_types: &[]
+			}
+		};
+		//because the dummy is an Extern, must process the externs first
+		use std::mem::replace;
+		let mut just_externs = gdecls.iter_mut().filter_map(|g: &mut Gdecl<'src, 'arena>| {
+			if matches!(g, Extern{..}) {
+				match replace(g, get_dummy()) {
+					Extern{name, ret_type, arg_types} => Some(ExternalFunc{name, ret_type, arg_types}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		//just_externs isn't an ExactSizeIterator, so I can't use arena.alloc_slice_fill_iter()
@@ -666,70 +694,91 @@ impl<'src, 'arena> Program<'src, 'arena> {
 			arena.alloc_slice_fill_with(num_externs, |_| just_externs.next().unwrap());
 		debug_assert!(just_externs.next().is_none(), "More externs than expected, num_externs = {}", num_externs);
 
-		let mut just_globals = gdecls.iter().filter_map(|g| {
-			if let GVarDecl(ty, name) = g {
-				Some((*ty, *name))
+		let mut just_globals = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GVarDecl(_,_)) {
+				match replace(g, get_dummy()) {
+					GVarDecl(ty, name) => Some((ty, name)),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let global_vars: &'arena [(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)] =
 			arena.alloc_slice_fill_with(num_globals, |_| just_globals.next().unwrap());
 		debug_assert!(just_globals.next().is_none(), "More globals than expected, num_globals = {}", num_globals);
 
-		let mut just_funcs = gdecls.iter().filter_map(|g| {
-			if let GFuncDecl{ret_type, name, args, body} = g {
-				Some(Func{ret_type: *ret_type, name: *name, args, body: *body})
+		let mut just_funcs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GFuncDecl{..}) {
+				match replace(g, get_dummy()) {
+					GFuncDecl{ret_type, name, args, body} => Some(Func{ret_type, name, args, body}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let funcs: &'arena [Func<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_funcs, |_| just_funcs.next().unwrap());
 		debug_assert!(just_funcs.next().is_none(), "More funcs than expected, num_funcs = {}", num_funcs);
 
-		let mut just_structs = gdecls.iter().filter_map(|g| {
-			if let GStructDecl{name, fields} = g {
-				Some(Struct{name: *name, fields})
+		let mut just_structs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GStructDecl{..}) {
+				match replace(g, get_dummy()) {
+					GStructDecl{name, fields} => Some(Struct{name, fields}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let structs: &'arena [Struct<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_structs, |_| just_structs.next().unwrap());
 		debug_assert!(just_structs.next().is_none(), "More structs than expected, num_structs = {}", num_structs);
 
-		let mut just_erased_structs = gdecls.iter().filter_map(|g| {
-			if let GGenericStructDecl{name, fields, var, mode: Loc{elt: PolymorphMode::Erased, ..}} = g {
-				Some(GenericStruct{name: *name, var: *var, fields})
+		let mut just_erased_structs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GGenericStructDecl{mode: Loc{elt: PolymorphMode::Erased, ..}, ..}) {
+				match replace(g, get_dummy()) {
+					GGenericStructDecl{name, var, fields, ..} => Some(GenericStruct{name, var, fields}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let erased_structs: &'arena [GenericStruct<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_erased_structs, |_| just_erased_structs.next().unwrap());
 		debug_assert!(just_erased_structs.next().is_none(), "More erased structs than expected, num_erased_structs = {}", num_erased_structs);
 
-		let mut just_separated_structs = gdecls.iter().filter_map(|g| {
-			if let GGenericStructDecl{name, fields, var, mode: Loc{elt: PolymorphMode::Separated, ..}} = g {
-				Some(GenericStruct{name: *name, var: *var, fields})
+		let mut just_separated_structs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GGenericStructDecl{mode: Loc{elt: PolymorphMode::Separated, ..}, ..}) {
+				match replace(g, get_dummy()) {
+					GGenericStructDecl{name, var, fields, ..} => Some(GenericStruct{name, var, fields}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let separated_structs: &'arena [GenericStruct<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_separated_structs, |_| just_separated_structs.next().unwrap());
 		debug_assert!(just_separated_structs.next().is_none(), "More separated structs than expected, num_separated_structs = {}", num_separated_structs);
 
-		let mut just_erased_funcs = gdecls.iter().filter_map(|g| {
-			if let GGenericFuncDecl{ret_type, name, args, body, var, mode: Loc{elt: PolymorphMode::Separated, ..}} = g {
-				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body: *body, var: *var})
+		let mut just_erased_funcs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Separated, ..}, ..}) {
+				match replace(g, get_dummy()) {
+					GGenericFuncDecl{ret_type, name, args, body, var, ..} => Some(GenericFunc{ret_type, name, args, body, var}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let erased_funcs: &'arena [GenericFunc<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_erased_funcs, |_| just_erased_funcs.next().unwrap());
 		debug_assert!(just_erased_funcs.next().is_none(), "More erased funcs than expected, num_erased_funcs = {}", num_erased_funcs);
 
-		let mut just_separated_funcs = gdecls.iter().filter_map(|g| {
-			if let GGenericFuncDecl{ret_type, name, args, body, var, mode: Loc{elt: PolymorphMode::Separated, ..}} = g {
-				Some(GenericFunc{ret_type: *ret_type, name: *name, args, body: *body, var: *var})
+		let mut just_separated_funcs = gdecls.iter_mut().filter_map(|g| {
+			if matches!(g, GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Separated, ..}, ..}) {
+				match replace(g, get_dummy()) {
+					GGenericFuncDecl{ret_type, name, args, body, var, ..} => Some(GenericFunc{ret_type, name, args, body, var}),
+					_ => unreachable!()
+				}
 			} else { None }
 		});
 		let separated_funcs: &'arena [GenericFunc<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_separated_funcs, |_| just_separated_funcs.next().unwrap());
 		debug_assert!(just_separated_funcs.next().is_none(), "More separated funcs than expected, num_separated_funcs = {}", num_separated_funcs);
 
-		let result_prog = Program {
+		Program {
 			external_funcs,
 			global_vars,
 			funcs,
@@ -738,8 +787,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 			separated_structs,
 			erased_funcs,
 			separated_funcs
-		};
-		arena.alloc(result_prog)
+		}
 	}
 	
 	pub fn to_owned_ast(&self) -> ast::Program {

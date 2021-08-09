@@ -43,7 +43,7 @@ that this language introduces (see [here](#tutorial.md#limitations) for more det
 See the [Tutorial](tutorial.md) for an explanation of how the language works.
 
 ### Requirements
-- Clang\
+- Clang (version 4.0 or higher)\
 If you can\'t run `clang` from the same command line you run this project from, it will not work.
 - Unix-like system\
 I\'ve only tested this on Linux, but MacOS and BSD should be close enough.

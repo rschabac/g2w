@@ -26,7 +26,7 @@ fn parse_as_ty<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecac
 }
 
 fn parse_as_expr<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
-	-> Result<Loc<Expr<'src, 'arena>>, Vec<Error>> {
+	-> Result<Loc<TypedExpr<'src, 'arena>>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_expr(&ErrorHandler::Nothing) {
 		Some(loc) => Ok(loc),
@@ -44,7 +44,7 @@ fn parse_as_block<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, type
 }
 
 fn parse_as_gdecl<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
-	-> Result<&'arena Gdecl<'src, 'arena>, Vec<Error>> {
+	-> Result<Gdecl<'src, 'arena>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_gdecl() {
 		Some(loc) => Ok(loc),
@@ -83,40 +83,29 @@ fn parse_expr_tests() {
 	let arena = bumpalo::Bump::new();
 	let mut typearena = bumpalo::Bump::new();
 	let typecache = get_typecache(&mut typearena);
-	let tests = vec![
-		("true", Loc{elt: Expr::LitBool(true), byte_offset: 0, byte_len: 4, file_id: 0}),
-		("*array[(5)].data", Loc{
-			elt: Expr::Deref(Loc{
-				elt: &Expr::Proj(Loc{
-					elt: &Expr::Index(Loc{
-						elt: &Expr::Id("array"),
+	let mut temp0b = Expr::Id("array").into();
+	let mut temp0c = Expr::LitSignedInt(5, IntSize::Size64).into();
+	let mut temp0a = Expr::Index(Loc{
+						elt: &mut temp0b,
 						byte_offset: 1, byte_len: 5, file_id: 0
 					}, Loc{
-						elt: &Expr::LitSignedInt(5, IntSize::Size64),
+						elt: &mut temp0c,
 						byte_offset: 7, byte_len: 3, file_id: 0
-					}),
+					}).into();
+	let mut temp1 = Expr::Proj(Loc{
+					elt: &mut temp0a,
 					byte_offset: 1, byte_len: 10, file_id: 0
 				}, Loc{
 					elt: "data",
 					byte_offset: 12, byte_len: 4, file_id: 0
-				}),
-				byte_offset: 1, byte_len: 15, file_id: 0
-			}),
-			byte_offset: 0, byte_len: 16, file_id: 0
-		}),
-		("f@<i32>(g( ), sizeof(i32), cast(i8, 0))", Loc {
-			elt: Expr::GenericCall {
-				name: Loc { elt: "f", byte_offset: 0, byte_len: 1, file_id: 0},
-				type_param: Loc {
-					elt: &Ty::Int { signed: true, size: IntSize::Size32},
-					byte_offset: 3, byte_len: 3, file_id: 0
-				},
-				args: &[
+				}).into();
+	let mut temp3 = Expr::LitSignedInt( 0, IntSize::Size64,).into();
+	let mut temp2 = [
 					Loc {
 						elt: Expr::Call(
 							Loc { elt: "g", byte_offset: 8, byte_len: 1, file_id: 0},
-							&[],
-						),
+							&mut [],
+						).into(),
 						byte_offset: 8, byte_len: 4, file_id: 0
 					},
 					Loc {
@@ -125,7 +114,7 @@ fn parse_expr_tests() {
 								elt: &Ty::Int { signed: true, size: IntSize::Size32, },
 								byte_offset: 21, byte_len: 3, file_id: 0,
 							},
-						),
+						).into(),
 						byte_offset: 14, byte_len: 11, file_id: 0,
 					},
 					Loc {
@@ -135,57 +124,71 @@ fn parse_expr_tests() {
 								byte_offset: 32, byte_len: 2, file_id: 0,
 							},
 							Loc {
-								elt: &Expr::LitSignedInt( 0, IntSize::Size64,),
+								elt: &mut temp3,
 								byte_offset: 36, byte_len: 1, file_id: 0,
 							},
-						),
+						).into(),
 						byte_offset: 27, byte_len: 11, file_id: 0,
 					},
-				],
-			},
+				];
+	let mut temp4 = Expr::Id( "a",).into();
+	let mut temp5 = Expr::Id( "b",).into();
+	let mut temp6 = Expr::Binop(
+			Loc { elt: &mut temp4, byte_offset: 0, byte_len: 1, file_id: 0, },
+			BinaryOp::Sub,
+			Loc { elt: &mut temp5, byte_offset: 4, byte_len: 1, file_id: 0, },
+		).into();
+	let mut temp7 = Expr::Id( "c",).into();
+	let mut temp8 = Expr::Binop(
+			Loc { elt: &mut temp6, byte_offset: 0, byte_len: 5, file_id: 0, },
+			BinaryOp::Sub,
+			Loc { elt: &mut temp7, byte_offset: 8, byte_len: 1, file_id: 0, },
+		).into();
+	let mut temp9 = Expr::Id( "d",).into();
+	let mut temp10 = Expr::Binop(
+			Loc { elt: &mut temp8, byte_offset: 0, byte_len: 9, file_id: 0, },
+			BinaryOp::Equ,
+			Loc { elt: &mut temp9, byte_offset: 13, byte_len: 1, file_id: 0, },
+		).into();
+	let mut temp11 = Expr::Id("e").into();
+	let mut temp12 = Expr::Id("f").into();
+	let mut temp13 = Expr::Id("g").into();
+	let mut temp14 = Expr::Binop(
+			Loc { elt: &mut temp12, byte_offset: 23, byte_len: 1, file_id: 0, },
+			BinaryOp::Mod,
+			Loc { elt: &mut temp13, byte_offset: 27, byte_len: 1, file_id: 0, },
+		).into();
+	let mut temp15 = Expr::Binop(
+		Loc { elt: &mut temp11, byte_offset: 18, byte_len: 1, file_id: 0, },
+		BinaryOp::Shl,
+		Loc { elt: &mut temp14, byte_offset: 23, byte_len: 5, file_id: 0, },
+	).into();
+	let tests = vec![
+		("true", Loc{elt: Expr::LitBool(true).into(), byte_offset: 0, byte_len: 4, file_id: 0}),
+		("*array[(5)].data", Loc{
+			elt: Expr::Deref(Loc{
+				elt: &mut temp1,
+				byte_offset: 1, byte_len: 15, file_id: 0
+			}).into(),
+			byte_offset: 0, byte_len: 16, file_id: 0
+		}),
+		("f@<i32>(g( ), sizeof(i32), cast(i8, 0))", Loc {
+			elt: Expr::GenericCall {
+				name: Loc { elt: "f", byte_offset: 0, byte_len: 1, file_id: 0},
+				type_param: Loc {
+					elt: &Ty::Int { signed: true, size: IntSize::Size32},
+					byte_offset: 3, byte_len: 3, file_id: 0
+				},
+				args: temp2.as_mut(),
+			}.into(),
 			byte_offset: 0, byte_len: 39, file_id: 0,
 		}),
 		("a - b - c == d && e << f % g", Loc {
 			elt: Expr::Binop(
-				Loc {
-					elt: &Expr::Binop(
-						Loc {
-							elt: &Expr::Binop(
-								Loc {
-									elt: &Expr::Binop(
-										Loc { elt: &Expr::Id( "a",), byte_offset: 0, byte_len: 1, file_id: 0, },
-										BinaryOp::Sub,
-										Loc { elt: &Expr::Id( "b",), byte_offset: 4, byte_len: 1, file_id: 0, },
-									),
-									byte_offset: 0, byte_len: 5, file_id: 0,
-								},
-								BinaryOp::Sub,
-								Loc { elt: &Expr::Id( "c",), byte_offset: 8, byte_len: 1, file_id: 0, },
-							),
-							byte_offset: 0, byte_len: 9, file_id: 0,
-						},
-						BinaryOp::Equ,
-						Loc { elt: &Expr::Id( "d",), byte_offset: 13, byte_len: 1, file_id: 0, },
-					),
-					byte_offset: 0, byte_len: 14, file_id: 0,
-				},
+				Loc { elt: &mut temp10, byte_offset: 0, byte_len: 14, file_id: 0, },
 				BinaryOp::And,
-				Loc {
-					elt: &Expr::Binop(
-						Loc { elt: &Expr::Id( "e",), byte_offset: 18, byte_len: 1, file_id: 0, },
-						BinaryOp::Shl,
-						Loc {
-							elt: &Expr::Binop(
-								Loc { elt: &Expr::Id( "f",), byte_offset: 23, byte_len: 1, file_id: 0, },
-								BinaryOp::Mod,
-								Loc { elt: &Expr::Id( "g",), byte_offset: 27, byte_len: 1, file_id: 0, },
-							),
-							byte_offset: 23, byte_len: 5, file_id: 0,
-						},
-					),
-					byte_offset: 18, byte_len: 10, file_id: 0,
-				},
-			),
+				Loc { elt: &mut temp15, byte_offset: 18, byte_len: 10, file_id: 0, },
+			).into(),
 			byte_offset: 0, byte_len: 28, file_id: 0,
 		})
 	];
@@ -224,98 +227,84 @@ r##"{
 	use Stmt::*;
 	use Expr::*;
 	use Ty::*;
-	let expected = 
-		Loc { elt: Block( &[
-			Loc {
-				elt: If( Loc { elt: LitNull, byte_offset: 6, byte_len: 4, file_id: 0, },
-					Block( &[
-						Loc {
-							elt: Assign(
-								Loc { elt: Id( "x",), byte_offset: 14, byte_len: 1, file_id: 0, },
-								Loc {
-									elt: GenericCall {
-										name: Loc { elt: "f", byte_offset: 18, byte_len: 1, file_id: 0, },
-										type_param: Loc {
-											elt: &Int { signed: true, size: Size32, },
-											byte_offset: 21, byte_len: 3, file_id: 0,
-										},
-										args: &[
-											Loc { elt: LitBool( true,), byte_offset: 26, byte_len: 4, file_id: 0, },
-										],
-									}, byte_offset: 18, byte_len: 13, file_id: 0,
-								},
-							), byte_offset: 14, byte_len: 18, file_id: 0,
-						},
-						Loc {
-							elt: If(
-								Loc { elt: LitBool( false,), byte_offset: 38, byte_len: 5, file_id: 0, },
-								Block( &[],),
-								Block( &[
-										Loc {
-											elt: If(
-												Loc { elt: LitSignedInt( 0, Size64,), byte_offset: 58, byte_len: 1, file_id: 0, },
-												Block( &[
-														Loc { elt: Return( None,), byte_offset: 65, byte_len: 7, file_id: 0, },
-													],
-												),
-												Block( &[],),
-											), byte_offset: 55, byte_len: 33, file_id: 0,
-										},
-									],
-								),
-							), byte_offset: 35, byte_len: 53, file_id: 0,
-						},
-					],),
-					Block( &[],),
-				), byte_offset: 3, byte_len: 88, file_id: 0,
-			},
-			Loc {
-				elt: Return(
-					Some( Loc { elt: LitSignedInt( 0, Size64,), byte_offset: 100, byte_len: 1, file_id: 0, },),
-				),
-				byte_offset: 93, byte_len: 9, file_id: 0,
-			},
-			Loc {
-				elt: SCall(
-					Loc { elt: "f", byte_offset: 104, byte_len: 1, file_id: 0, },
-					&[ Loc { elt: LitSignedInt( 3, Size64,), byte_offset: 106, byte_len: 1, file_id: 0, }, ],
-				),
-				byte_offset: 104, byte_len: 5, file_id: 0,
-			},
-			Loc {
-				elt: GenericSCall {
-					name: Loc { elt: "g", byte_offset: 111, byte_len: 1, file_id: 0, },
-					type_param: Loc { elt: &TypeVar( "T",), byte_offset: 114, byte_len: 2, file_id: 0, },
-					args: &[],
-				},
-				byte_offset: 111, byte_len: 9, file_id: 0,
-			},
+	let mut temp1 = [ Loc { elt: LitBool( true,).into(), byte_offset: 26, byte_len: 4, file_id: 0, }, ];
+	let mut temp2 = [ Loc { elt: Return( None,), byte_offset: 65, byte_len: 7, file_id: 0, }, ];
+	let mut temp3 = [
+		Loc { elt: If(
+					Loc { elt: LitSignedInt( 0, Size64,).into(), byte_offset: 58, byte_len: 1, file_id: 0, },
+					Block( temp2.as_mut(),), Block( &mut [],),
+				), byte_offset: 55, byte_len: 33, file_id: 0,
+		}];
+	let mut temp4 = [
 			Loc {
 				elt: Assign(
-					Loc { elt: Id( "g",), byte_offset: 122, byte_len: 1, file_id: 0, },
-					Loc { elt: LitSignedInt( 5, Size64,), byte_offset: 126, byte_len: 1, file_id: 0, },
-				),
-				byte_offset: 122, byte_len: 6, file_id: 0,
+					Loc { elt: Id( "x",).into(), byte_offset: 14, byte_len: 1, file_id: 0, },
+					Loc {
+						elt: GenericCall {
+							name: Loc { elt: "f", byte_offset: 18, byte_len: 1, file_id: 0, },
+							type_param: Loc { elt: &Int { signed: true, size: Size32, }, byte_offset: 21, byte_len: 3, file_id: 0, },
+							args: temp1.as_mut(),
+						}.into(), byte_offset: 18, byte_len: 13, file_id: 0,
+					},
+				), byte_offset: 14, byte_len: 18, file_id: 0,
 			},
 			Loc {
-				elt: Decl(
-					Loc { elt: &Bool, byte_offset: 130, byte_len: 4, file_id: 0, },
-					Loc { elt: "b", byte_offset: 135, byte_len: 1, file_id: 0, },
-				),
-				byte_offset: 130, byte_len: 7, file_id: 0,
+				elt: If(
+					Loc { elt: LitBool( false,).into(), byte_offset: 38, byte_len: 5, file_id: 0, },
+					Block( &mut[],), Block( temp3.as_mut(),),
+				), byte_offset: 35, byte_len: 53, file_id: 0,
 			},
-			Loc {
-				elt: While(
-					Loc { elt: LitNull, byte_offset: 145, byte_len: 4, file_id: 0, },
-					Block( &[ Loc { elt: Return( None,), byte_offset: 154, byte_len: 7, file_id: 0, }, ],
-					),
-				),
-				byte_offset: 139, byte_len: 25, file_id: 0,
-			},
-			],
+		];
+	let mut temp5 = [ Loc { elt: LitSignedInt( 3, Size64,).into(), byte_offset: 106, byte_len: 1, file_id: 0, }, ];
+	let mut temp6 = [ Loc { elt: Return( None,), byte_offset: 154, byte_len: 7, file_id: 0, }, ];
+	let mut temp7 = [
+		Loc {
+			elt: If( Loc { elt: LitNull.into(), byte_offset: 6, byte_len: 4, file_id: 0, },
+				Block( temp4.as_mut(),), Block( &mut [],),
+			), byte_offset: 3, byte_len: 88, file_id: 0,
+		},
+		Loc {
+			elt: Return( Some( Loc { elt: LitSignedInt( 0, Size64,).into(), byte_offset: 100, byte_len: 1, file_id: 0, },),),
+			byte_offset: 93, byte_len: 9, file_id: 0,
+		},
+		Loc {
+			elt: SCall(
+				Loc { elt: "f", byte_offset: 104, byte_len: 1, file_id: 0, },
+				temp5.as_mut(),
 			),
-			byte_offset: 0, byte_len: 166, file_id: 0,
-		};
+			byte_offset: 104, byte_len: 5, file_id: 0,
+		},
+		Loc {
+			elt: GenericSCall {
+				name: Loc { elt: "g", byte_offset: 111, byte_len: 1, file_id: 0, },
+				type_param: Loc { elt: &TypeVar( "T",), byte_offset: 114, byte_len: 2, file_id: 0, },
+				args: &mut [],
+			},
+			byte_offset: 111, byte_len: 9, file_id: 0,
+		},
+		Loc {
+			elt: Assign(
+				Loc { elt: Id( "g",).into(), byte_offset: 122, byte_len: 1, file_id: 0, },
+				Loc { elt: LitSignedInt( 5, Size64,).into(), byte_offset: 126, byte_len: 1, file_id: 0, },
+			),
+			byte_offset: 122, byte_len: 6, file_id: 0,
+		},
+		Loc {
+			elt: Decl(
+				Loc { elt: &Bool, byte_offset: 130, byte_len: 4, file_id: 0, },
+				Loc { elt: "b", byte_offset: 135, byte_len: 1, file_id: 0, },
+			),
+			byte_offset: 130, byte_len: 7, file_id: 0,
+		},
+		Loc {
+			elt: While(
+				Loc { elt: LitNull.into(), byte_offset: 145, byte_len: 4, file_id: 0, },
+				Block( temp6.as_mut(),),
+			),
+			byte_offset: 139, byte_len: 25, file_id: 0,
+		},
+	]; 
+	let expected = Loc { elt: Block( temp7.as_mut(),), byte_offset: 0, byte_len: 166, file_id: 0, };
 	assert_eq!(expected, parsed);
 }
 
@@ -324,23 +313,24 @@ fn parse_gdecl_tests() {
 	let arena = bumpalo::Bump::new();
 	let mut typearena = bumpalo::Bump::new();
 	let typecache = get_typecache(&mut typearena);
+	let mut temp = [Loc{ elt: Stmt::Return(None), byte_offset: 36, byte_len: 7, file_id: 0 }];
 	let tests = vec![
-		("bool x;", &Gdecl::GVarDecl(
+		("bool x;", Gdecl::GVarDecl(
 			Loc{ elt: &Ty::Bool, byte_offset: 0, byte_len: 4, file_id: 0 },
 			Loc{ elt: "x", byte_offset: 5, byte_len: 1, file_id: 0 }
 		)),
-		("extern void f(bool);", &Gdecl::Extern{
+		("extern void f(bool);", Gdecl::Extern{
 			ret_type: Loc{ elt: None, byte_offset: 7, byte_len: 4, file_id: 0 },
 			name: Loc{elt: "f", byte_offset: 12, byte_len: 1, file_id: 0},
 			arg_types: &[Loc{elt: &Ty::Bool, byte_offset: 14, byte_len: 4, file_id: 0}]
 		}),
-		("void f(bool x){}", &Gdecl::GFuncDecl{
+		("void f(bool x){}", Gdecl::GFuncDecl{
 			ret_type: Loc{ elt: None, byte_offset: 0, byte_len: 4, file_id: 0 },
 			name: Loc{elt: "f", byte_offset: 5, byte_len: 1, file_id: 0},
 			args: &[(Loc{elt: &Ty::Bool, byte_offset: 7, byte_len: 4, file_id: 0}, Loc{elt: "x", byte_offset: 12, byte_len: 1, file_id: 0})],
-			body: Block(&[])
+			body: Block(&mut [])
 		}),
-		("'T g@<separated 'T>('T* x, void* y){return;}", &Gdecl::GGenericFuncDecl{
+		("'T g@<separated 'T>('T* x, void* y){return;}", Gdecl::GGenericFuncDecl{
 			ret_type: Loc{elt: Some(&Ty::TypeVar("T")), byte_offset: 0, byte_len: 2, file_id: 0},
 			name: Loc{elt: "g", byte_offset: 3, byte_len: 1, file_id: 0},
 			args: &[
@@ -353,15 +343,15 @@ fn parse_gdecl_tests() {
 					Loc{elt: "y", byte_offset: 33, byte_len: 1, file_id: 0}
 				)
 			],
-			body: Block(&[Loc{ elt: Stmt::Return(None), byte_offset: 36, byte_len: 7, file_id: 0 }]),
+			body: Block(temp.as_mut()),
 			mode: Loc{elt: PolymorphMode::Separated, byte_offset: 6, byte_len: 9, file_id: 0},
 			var: Loc{elt: "T", byte_offset: 17, byte_len: 1, file_id: 0}
 		}),
-		("struct A{}", &Gdecl::GStructDecl{
+		("struct A{}", Gdecl::GStructDecl{
 			name: Loc{elt: "A", byte_offset: 7, byte_len: 1, file_id: 0},
 			fields: &[]
 		}),
-		("struct B@<erased 'T>{'B x; void* y; struct A z;}", &Gdecl::GGenericStructDecl{
+		("struct B@<erased 'T>{'B x; void* y; struct A z;}", Gdecl::GGenericStructDecl{
 			name: Loc{elt: "B", byte_offset: 7, byte_len: 1, file_id: 0},
 			var: Loc{elt: "T", byte_offset: 18, byte_len: 1, file_id: 0},
 			mode: Loc{elt: PolymorphMode::Erased, byte_offset: 10, byte_len: 6, file_id: 0},

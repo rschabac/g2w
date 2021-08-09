@@ -387,7 +387,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	};
 	let arena_arena = Herd::new();
 	let LexParseResult{ast, mut errors} = lex_and_parse(src_inputs.as_slice(), &typecache, &arena_arena);
-	let ast: Vec<ast::Gdecl> = ast.iter().map(|&g| g.to_owned_ast()).collect();
+	let ast: Vec<ast::Gdecl> = ast.iter().map(|g| g.to_owned_ast()).collect();
 	timeinfo.parsing.1 = Instant::now();
 	timeinfo.typechecking.0 = timeinfo.parsing.1;
 	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
@@ -586,7 +586,7 @@ pub fn print_timings() -> Result<(), String> {
 
 //contains the ast, vec of errors, and any other data that needs to outlive lex_and_parse() (which may not work???)
 pub struct LexParseResult<'src: 'arena, 'arena> {
-	pub ast: Vec<&'arena ast2::Gdecl<'src, 'arena>>,
+	pub ast: Vec<ast2::Gdecl<'src, 'arena>>,
 	pub errors: Vec<Error>,
 }
 
