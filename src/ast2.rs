@@ -113,6 +113,7 @@ impl Display for FloatSize {
 ///and only use the more accurate error reporting when the type has a "depth" of < 2 (this is the common case,
 ///i32* is a lot more common than i32**). Whenever a Ty generates an error, check if the Ty's depth is >= 2, and use
 ///the base location if it is.
+//TODO: try removing Clone here, Tys should not be cloned, only &Ty
 #[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub enum Ty<'src, 'arena> where 'src: 'arena { //'src lives longer than 'arena
 	Bool,
@@ -180,7 +181,7 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 			is much more common, and multiple threads should be able to do that at the same time.
 			*/
 			let mut write_access = cache.cached.write().unwrap();
-			if let Some(cached) = cached_result {
+			if let Some(cached) = write_access.get(self).cloned() {
 				return cached;
 			}
 			/*
