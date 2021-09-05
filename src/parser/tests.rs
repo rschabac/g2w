@@ -3,7 +3,7 @@ use crate::lexer::{Lexer, TokenLoc};
 use crate::ast2::*;
 use crate::driver::Error;
 
-fn get_typecache<'src, 'arena>(arena: &'arena mut bumpalo::Bump) -> TypeCache<'src, 'arena> {
+pub fn get_typecache<'src, 'arena>(arena: &'arena mut bumpalo::Bump) -> TypeCache<'src, 'arena> {
 	TypeCache{
 		arena: std::sync::Mutex::new(arena),
 		cached: std::sync::RwLock::new(std::collections::HashMap::new())
@@ -16,7 +16,7 @@ fn get_parser<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecach
 	Parser::new(tokens.into_iter(), 0, arena, typecache)
 }
 
-fn parse_as_ty<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
+pub fn parse_as_ty<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
 	-> Result<Loc<&'arena Ty<'src, 'arena>>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_ty(&ErrorHandler::Nothing) {
@@ -25,7 +25,7 @@ fn parse_as_ty<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecac
 	}
 }
 
-fn parse_as_expr<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
+pub fn parse_as_expr<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
 	-> Result<Loc<TypedExpr<'src, 'arena>>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_expr(&ErrorHandler::Nothing) {
@@ -34,7 +34,7 @@ fn parse_as_expr<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typec
 	}
 }
 
-fn parse_as_block<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
+pub fn parse_as_block<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
 	-> Result<Loc<Block<'src, 'arena>>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_block(&ErrorHandler::Nothing) {
@@ -43,7 +43,7 @@ fn parse_as_block<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, type
 	}
 }
 
-fn parse_as_gdecl<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
+pub fn parse_as_gdecl<'src, 'arena>(s: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>)
 	-> Result<Gdecl<'src, 'arena>, Vec<Error>> {
 	let mut parser = get_parser(s, arena, typecache);
 	match parser.parse_gdecl() {
@@ -83,23 +83,17 @@ fn parse_expr_tests() {
 	let arena = bumpalo::Bump::new();
 	let mut typearena = bumpalo::Bump::new();
 	let typecache = get_typecache(&mut typearena);
-	let mut temp0b = Expr::Id("array").into();
-	let mut temp0c = Expr::LitSignedInt(5, IntSize::Size64).into();
-	let mut temp0a = Expr::Index(Loc{
-						elt: &mut temp0b,
-						byte_offset: 1, byte_len: 5, file_id: 0
-					}, Loc{
-						elt: &mut temp0c,
-						byte_offset: 7, byte_len: 3, file_id: 0
-					}).into();
-	let mut temp1 = Expr::Proj(Loc{
-					elt: &mut temp0a,
-					byte_offset: 1, byte_len: 10, file_id: 0
-				}, Loc{
+	let mut temp0b = Loc{elt: Expr::Id("array").into(), byte_offset: 1, byte_len: 5, file_id: 0};
+	let mut temp0c = Loc{elt: Expr::LitSignedInt(5, IntSize::Size64).into(), byte_offset: 7, byte_len: 3, file_id: 0};
+	let mut temp0a = Loc{elt: Expr::Index(&mut temp0b, &mut temp0c).into(), byte_offset: 1, byte_len: 10, file_id: 0};
+	let mut temp1 = Loc{
+				elt: Expr::Proj(&mut temp0a, Loc{
 					elt: "data",
 					byte_offset: 12, byte_len: 4, file_id: 0
-				}).into();
-	let mut temp3 = Expr::LitSignedInt( 0, IntSize::Size64,).into();
+					}).into(),
+				byte_offset: 1, byte_len: 15, file_id: 0
+			};
+	let mut temp3 = Loc {elt: Expr::LitSignedInt(0, IntSize::Size64).into(), byte_offset: 36, byte_len: 1, file_id: 0};
 	let mut temp2 = [
 					Loc {
 						elt: Expr::Call(
@@ -123,53 +117,39 @@ fn parse_expr_tests() {
 								elt: &Ty::Int { signed: true, size: IntSize::Size8, },
 								byte_offset: 32, byte_len: 2, file_id: 0,
 							},
-							Loc {
-								elt: &mut temp3,
-								byte_offset: 36, byte_len: 1, file_id: 0,
-							},
+							&mut temp3
 						).into(),
 						byte_offset: 27, byte_len: 11, file_id: 0,
 					},
 				];
-	let mut temp4 = Expr::Id( "a",).into();
-	let mut temp5 = Expr::Id( "b",).into();
-	let mut temp6 = Expr::Binop(
-			Loc { elt: &mut temp4, byte_offset: 0, byte_len: 1, file_id: 0, },
-			BinaryOp::Sub,
-			Loc { elt: &mut temp5, byte_offset: 4, byte_len: 1, file_id: 0, },
-		).into();
-	let mut temp7 = Expr::Id( "c",).into();
-	let mut temp8 = Expr::Binop(
-			Loc { elt: &mut temp6, byte_offset: 0, byte_len: 5, file_id: 0, },
-			BinaryOp::Sub,
-			Loc { elt: &mut temp7, byte_offset: 8, byte_len: 1, file_id: 0, },
-		).into();
-	let mut temp9 = Expr::Id( "d",).into();
-	let mut temp10 = Expr::Binop(
-			Loc { elt: &mut temp8, byte_offset: 0, byte_len: 9, file_id: 0, },
+	let mut temp4 = Loc {elt: Expr::Id( "a",).into(), byte_offset: 0, byte_len: 1, file_id: 0};
+	let mut temp5 = Loc { elt: Expr::Id( "b",).into(), byte_offset: 4, byte_len: 1, file_id: 0, };
+	let mut temp6 = Loc { elt: Expr::Binop(&mut temp4, BinaryOp::Sub, &mut temp5).into(), byte_offset: 0, byte_len: 5, file_id: 0, };
+	let mut temp7 = Loc { elt: Expr::Id("c").into(), byte_offset: 8, byte_len: 1, file_id: 0, };
+	let mut temp8 = Loc { elt: Expr::Binop( &mut temp6, BinaryOp::Sub, &mut temp7).into(), byte_offset: 0, byte_len: 9, file_id: 0, };
+	let mut temp9 = Loc { elt: Expr::Id( "d",).into(), byte_offset: 13, byte_len: 1, file_id: 0, };
+	let mut temp10 = Loc { elt: Expr::Binop(
+			&mut temp8,
 			BinaryOp::Equ,
-			Loc { elt: &mut temp9, byte_offset: 13, byte_len: 1, file_id: 0, },
-		).into();
-	let mut temp11 = Expr::Id("e").into();
-	let mut temp12 = Expr::Id("f").into();
-	let mut temp13 = Expr::Id("g").into();
-	let mut temp14 = Expr::Binop(
-			Loc { elt: &mut temp12, byte_offset: 23, byte_len: 1, file_id: 0, },
+			&mut temp9,
+		).into(), byte_offset: 0, byte_len: 14, file_id: 0, };
+	let mut temp11 = Loc { elt: Expr::Id("e").into(), byte_offset: 18, byte_len: 1, file_id: 0, };
+	let mut temp12 = Loc { elt: Expr::Id("f").into(), byte_offset: 23, byte_len: 1, file_id: 0, };
+	let mut temp13 = Loc { elt: Expr::Id("g").into(), byte_offset: 27, byte_len: 1, file_id: 0, };
+	let mut temp14 = Loc { elt: Expr::Binop(
+			&mut temp12,
 			BinaryOp::Mod,
-			Loc { elt: &mut temp13, byte_offset: 27, byte_len: 1, file_id: 0, },
-		).into();
-	let mut temp15 = Expr::Binop(
-		Loc { elt: &mut temp11, byte_offset: 18, byte_len: 1, file_id: 0, },
+			&mut temp13,
+		).into(), byte_offset: 23, byte_len: 5, file_id: 0, };
+	let mut temp15 = Loc { elt: Expr::Binop(
+		&mut temp11,
 		BinaryOp::Shl,
-		Loc { elt: &mut temp14, byte_offset: 23, byte_len: 5, file_id: 0, },
-	).into();
+		&mut temp14,
+	).into(), byte_offset: 18, byte_len: 10, file_id: 0, };
 	let tests = vec![
 		("true", Loc{elt: Expr::LitBool(true).into(), byte_offset: 0, byte_len: 4, file_id: 0}),
 		("*array[(5)].data", Loc{
-			elt: Expr::Deref(Loc{
-				elt: &mut temp1,
-				byte_offset: 1, byte_len: 15, file_id: 0
-			}).into(),
+			elt: Expr::Deref(&mut temp1).into(),
 			byte_offset: 0, byte_len: 16, file_id: 0
 		}),
 		("f@<i32>(g( ), sizeof(i32), cast(i8, 0))", Loc {
@@ -185,9 +165,9 @@ fn parse_expr_tests() {
 		}),
 		("a - b - c == d && e << f % g", Loc {
 			elt: Expr::Binop(
-				Loc { elt: &mut temp10, byte_offset: 0, byte_len: 14, file_id: 0, },
+				&mut temp10,
 				BinaryOp::And,
-				Loc { elt: &mut temp15, byte_offset: 18, byte_len: 10, file_id: 0, },
+				&mut temp15,
 			).into(),
 			byte_offset: 0, byte_len: 28, file_id: 0,
 		})

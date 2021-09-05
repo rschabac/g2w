@@ -1,6 +1,6 @@
 extern crate clap;
 extern crate tempfile;
-use super::{parser::Parser, ast, lexer::{Lexer, TokenLoc}, ast2, typechecker, frontend};
+use super::{parser::Parser, lexer::{Lexer, TokenLoc}, ast2, typechecker, frontend};
 use rayon::prelude::*;
 use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
@@ -386,26 +386,21 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		cached: RwLock::new(HashMap::new())
 	};
 	let arena_arena = Herd::new();
+	let arena_for_typechecking = arena_arena.get();
 	let LexParseResult{ast, mut errors} = lex_and_parse(src_inputs.as_slice(), &typecache, &arena_arena);
-	let ast: Vec<ast::Gdecl> = ast.iter().map(|g| g.to_owned_ast()).collect();
+	let mut sorted_ast: ast2::Program<'_, '_> = ast2::Program::from_gdecls(ast, arena_for_typechecking.as_bump());
 	timeinfo.parsing.1 = Instant::now();
 	timeinfo.typechecking.0 = timeinfo.parsing.1;
-	let program_context = typechecker::typecheck_program(&ast).map_err(|err_msg| {
-		//for now, only one type error will be generated
-		errors.push(Error{
-			err: err_msg,
-			byte_offset: 0,
-			approx_len: 0,
-			file_id: 0
-		});
+	let program_context = typechecker::typecheck_program(&mut sorted_ast, &typecache, &arena_for_typechecking).map_err(|mut errs| {
+		errors.append(&mut errs);
 	});
 	timeinfo.typechecking.1 = Instant::now();
 	if !errors.is_empty() {
 		timeinfo.end_time = Instant::now();
 		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice());
-		return Err("Compilation failed".to_owned());
+		return Err(format!("{} errors detected", errors.len()));
 	}
-	let program_context = program_context.unwrap();
+	let program_context = typechecker::make_owned_progcontext(&program_context.unwrap());
 	if last_phase == Phase::Check {
 		timeinfo.end_time = Instant::now();
 		if options.print_timings {
@@ -415,7 +410,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		}
 	}
 	timeinfo.frontend = Some((timeinfo.typechecking.1, Instant::now()));
-	let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, options.target_triple, options.errno_func_name);
+	let llvm_prog = frontend::cmp_prog(&sorted_ast.to_owned_ast(), &program_context, options.target_triple, options.errno_func_name);
 	timeinfo.frontend.as_mut().unwrap().1 = Instant::now();
 	timeinfo.write_output = Some((timeinfo.frontend.unwrap().1, Instant::now()));
 	use std::io::{Write, BufWriter};
@@ -598,6 +593,7 @@ pub fn lex_and_parse<'src: 'arena, 'arena>(input_srcs: &'src [String], typecache
 		.map_init(|| arena_arena.get(), move |bump: &mut Member<'arena>, token_chunk_or_lex_err: Result<Vec<TokenLoc<'src>>, Error>| /* -> par_iter<&'arena ast2::Gdecl<'src, 'arena>> */{
 			let (gdecls, this_chunk_errors) = match token_chunk_or_lex_err {
 				Ok(token_chunk) => {
+					//TODO: could probably use the member directly, don't have to allocate a Bump in it
 					let arena: &'arena Bump = bump.alloc(Bump::new());
 					let parser = Parser::new(token_chunk.into_iter(), file_id as u16, arena, typecache);
 					parser.parse_gdecls()
@@ -625,6 +621,7 @@ pub struct Error {
 }
 
 fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [Error]) {
+	//TODO: command-line argument for color, always/term/never
 	let stderr_is_term = console::user_attended_stderr();
 	let err_style = if stderr_is_term {
 		console::Style::new().fg(console::Color::Red).bright()

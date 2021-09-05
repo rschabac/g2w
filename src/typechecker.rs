@@ -1,25 +1,89 @@
-use crate::ast;
 use std::collections::{HashMap, HashSet};
-use driver::Error;
+use crate::driver::Error;
 use crate::ast2::*;
 
+//remove this once frontend is ported to ast2
+pub mod owned {
+	use crate::ast;
+	use std::collections::HashMap;
+	pub enum FuncType {
+		NonGeneric{return_type: Option<ast::Ty>, args: Vec<ast::Ty>},
+		Generic{
+			return_type: Option<ast::Ty>,
+			mode: ast::PolymorphMode,
+			type_var: String,
+			args: Vec<ast::Ty>
+		}
+	}
+	pub enum StructType {
+		NonGeneric(Vec<(String, ast::Ty)>),
+		Generic{mode: ast::PolymorphMode, type_var: String, fields: Vec<(String, ast::Ty)>}
+	}
+	pub type StructContext = HashMap<String, StructType>;
+	pub type FuncContext = HashMap<String, FuncType>;
+	pub struct ProgramContext {
+		pub structs: StructContext,
+		pub funcs: FuncContext,
+	}
+}
+
+fn make_owned_functype<'src: 'arena, 'arena>(s: &FuncType<'src, 'arena>) -> owned::FuncType {
+	match s {
+		FuncType::NonGeneric{return_type, args} => owned::FuncType::NonGeneric{
+			return_type: return_type.map(|t| t.to_owned_ast()),
+			args: args.iter().map(|t| t.to_owned_ast()).collect()
+		},
+		FuncType::Generic{return_type, mode, type_var, args} => owned::FuncType::Generic{
+			return_type: return_type.map(|t| t.to_owned_ast()),
+			args: args.iter().map(|t| t.to_owned_ast()).collect(),
+			mode: mode.to_owned_ast(),
+			type_var: type_var.to_string()
+		}
+	}
+}
+
+fn make_owned_structtype<'src: 'arena, 'arena>(s: &StructType<'src, 'arena>) -> owned::StructType {
+	match s {
+		StructType::NonGeneric(fields) => owned::StructType::NonGeneric(
+			fields.iter().map(|(name, ty)| (name.to_string(), ty.to_owned_ast())).collect()
+		),
+		StructType::Generic{mode, type_var, fields} => owned::StructType::Generic{
+			mode: mode.to_owned_ast(),
+			fields: fields.iter().map(|(name, ty)| (name.to_string(), ty.to_owned_ast())).collect(),
+			type_var: type_var.to_string()
+		}
+	}
+}
+
+fn make_owned_funccontext<'src: 'arena, 'arena>(s: &FuncContext<'src, 'arena>) -> owned::FuncContext {
+	s.iter().map(|(name, functype)| (name.to_string(), make_owned_functype(functype))).collect()
+}
+fn make_owned_structcontext<'src: 'arena, 'arena>(s: &StructContext<'src, 'arena>) -> owned::StructContext {
+	s.iter().map(|(name, structtype)| (name.to_string(), make_owned_structtype(structtype))).collect()
+}
+pub fn make_owned_progcontext<'src: 'arena, 'arena>(p: &ProgramContext<'src, 'arena>) -> owned::ProgramContext {
+	owned::ProgramContext{
+		structs: make_owned_structcontext(&p.structs),
+		funcs: make_owned_funccontext(&p.funcs)
+	}
+}
+
 pub enum FuncType<'src: 'arena, 'arena>{
-	NonGeneric{return_type: Option<&'arena Ty<'src, 'arena>>, args: &'arena [Ty<'src, 'arena>]},
+	NonGeneric{return_type: Option<&'arena Ty<'src, 'arena>>, args: &'arena [&'arena Ty<'src, 'arena>]},
 	Generic{
 		return_type: Option<&'arena Ty<'src, 'arena>>,
 		mode: PolymorphMode,
 		type_var: &'src str,
-		args: &'arena [Ty<'src, 'arena>]
+		args: &'arena [&'arena Ty<'src, 'arena>]
 	}
 }
 pub enum StructType<'src: 'arena, 'arena>{
 	NonGeneric(&'arena [(&'src str, &'arena Ty<'src, 'arena>)]),
-	Generic{mode: PolymorphMode, type_var: &'src str, fields: &'arena [(&'src str, &'arena Ty<'src, 'arena>)]>}
+	Generic{mode: PolymorphMode, type_var: &'src str, fields: &'arena [(&'src str, &'arena Ty<'src, 'arena>)]}
 }
 
-type LocalContext<'src: 'arena, 'arena> = HashMap<&'src str, &'arena Ty<'src, 'arena>>;
-type GlobalContext<'src: 'arena, 'arena> = HashMap<&'src str, &'arena Ty<'src, 'arena>>;
-//type StructContext = HashMap<String, Vec<(String, ast::Ty)>>;
+type LocalContext<'src, 'arena> = HashMap<&'src str, &'arena Ty<'src, 'arena>>;
+type GlobalContext<'src, 'arena> = HashMap<&'src str, &'arena Ty<'src, 'arena>>;
 pub type StructContext<'src, 'arena> = HashMap<&'src str, StructType<'src, 'arena>>;
 
 //FuncContext contains generic and non-generic functions
@@ -35,7 +99,7 @@ pub struct LocalTypeContext<'src: 'arena, 'arena>{
 	pub is_lhs: bool,
 }
 
-pub fn get_empty_localtypecontext() -> (LocalTypeContext<'_, '_>, FuncContext<'_, '_>) {
+pub fn get_empty_localtypecontext<'src: 'arena, 'arena>() -> (LocalTypeContext<'src, 'arena>, FuncContext<'src, 'arena>) {
 	(LocalTypeContext{
 		locals: HashMap::new(),
 		globals: HashMap::new(),
@@ -56,19 +120,19 @@ pub fn replace_type_var_with<'src: 'arena, 'arena>(
 	use Ty::*;
 	match original {
 		TypeVar(s) => {
-			debug_assert_eq!(s, type_var_str, "When replacing '{}, found other type var '{}", type_var_str, s);
+			debug_assert_eq!(s, &type_var_str, "When replacing '{}, found other type var '{}", type_var_str, s);
 			replacement
 		},
 		Ptr(Some(t)) => {
-			let replaced = replace_type_var_with(t, type_var_str, replacement);
+			let replaced = replace_type_var_with(t, type_var_str, replacement, typecache);
 			Ptr(Some(replaced)).getref(typecache)
 		},
 		Array{typ, length} => {
-			let replaced = replace_type_var_with(typ, type_var_str, replacement);
-			Array{typ: replaced, length}.getref(typecache)
+			let replaced = replace_type_var_with(typ, type_var_str, replacement, typecache);
+			Array{typ: replaced, length: *length}.getref(typecache)
 		},
 		GenericStruct{type_param, name} => {
-			let replaced = replace_type_var_with(type_param, type_var_str, replacement);
+			let replaced = replace_type_var_with(type_param, type_var_str, replacement, typecache);
 			GenericStruct{type_param: replaced, name}.getref(typecache)
 		},
 		Bool | Int{..} | Float(_) | Struct(_) | Ptr(None) => original
@@ -100,24 +164,24 @@ fn all_struct_names_valid<'src: 'arena, 'arena>(t: &Loc<&'arena Ty<'src, 'arena>
 					},
 					(Some(s), Some((current_var, current_mode))) => {
 						//cannot use the type struct A@<'T> if 'T is not the current type var
-						if current_var.as_str() != s {
+						if current_var != &s {
 							return Err(format!("Cannot pass unknown type variable '{} to struct {}", current_var, name));
 						}
 						//cannot pass an erased type var to a separated struct
-						if *current_mode == ast::PolymorphMode::Erased && *mode == ast::PolymorphMode::Separated {
+						if *current_mode == PolymorphMode::Erased && *mode == PolymorphMode::Separated {
 							return Err(format!("Cannot pass erased type variable '{} to separated struct {}", s, name));
 						}
 					}
 					_ => ()
 				};
-				all_struct_names_valid(type_param, struct_context, current_type_var)
+				recursively_check(type_param, struct_context, current_type_var)
 			}
 		},
-		Ptr(Some(t)) | Array{typ: t, ..} => all_struct_names_valid(t, struct_context, current_type_var),
+		Ptr(Some(t)) | Array{typ: t, ..} => recursively_check(t, struct_context, current_type_var),
 		_ => Ok(())
 		}
 	}
-	if let Err(errmsg) = recursively_check(&t.elt, struct_context, current_type_var) {
+	if let Err(errmsg) = recursively_check(t.elt, struct_context, current_type_var) {
 		Err(Error{
 			err: errmsg,
 			byte_offset: t.byte_offset,
@@ -130,11 +194,16 @@ fn all_struct_names_valid<'src: 'arena, 'arena>(t: &Loc<&'arena Ty<'src, 'arena>
 }
 
 
-pub fn typecheck_expr<'src: 'arena, 'arena>(ctxt: &mut LocalTypeContext<'src, 'arena>, funcs: &FuncContext<'src, 'arena>, e: &mut Loc<&'arena mut TypedExpr<'src, 'arena>>, typecache: &'arena TypeCache<'src, 'arena>) -> Result<(), Vec<Error>>{
+//Is this the best place to put the indirection in exprs?
+pub fn typecheck_expr<'src: 'arena, 'arena: 'expr + 'ctxt, 'expr, 'ctxt>(
+	ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>,
+	funcs: &FuncContext<'src, 'arena>,
+	e: &'expr mut Loc<TypedExpr<'src, 'arena>>,
+	typecache: &'arena TypeCache<'src, 'arena>) -> Result<(), Vec<Error>>{
 use Ty::*;
 use Expr::*;
 use IntSize::*;
-match &e.elt.expr {
+match &mut e.elt.expr {
 	LitNull => match &ctxt.type_for_lit_nulls {
 		Some(t @ Ptr(_)) => {
 			e.elt.typ = Some(t);
@@ -154,15 +223,15 @@ match &e.elt.expr {
 		Ok(())
 	},
 	LitSignedInt(_, size) => {
-		e.elt.typ = Some(Int{signed: true, size}.getref(typecache));
+		e.elt.typ = Some(Int{signed: true, size: *size}.getref(typecache));
 		Ok(())
 	},
 	LitUnsignedInt(_, size) => {
-		e.elt.typ = Some(Int{signed: false, size}.getref(typecache));
+		e.elt.typ = Some(Int{signed: false, size: *size}.getref(typecache));
 		Ok(())
 	},
 	LitFloat(_, size) => {
-		e.elt.typ = Some(Float(size).getref(typecache));
+		e.elt.typ = Some(Float(*size).getref(typecache));
 		Ok(())
 	},
 	LitString(_) => {
@@ -190,7 +259,7 @@ match &e.elt.expr {
 	Index(base, index) => {
 		ctxt.type_for_lit_nulls = None;
 		let mut errors = Vec::new();
-		let result_type = if let Err(base_errors) = typecheck_expr(ctxt, funcs, base, typecache) {
+		let result_type = if let Err(mut base_errors) = typecheck_expr(ctxt, funcs, base, typecache) {
 			errors.append(&mut base_errors);
 			None
 		} else {
@@ -221,7 +290,7 @@ match &e.elt.expr {
 				}
 			}
 		};
-		if let Err(index_errors) = typecheck_expr(ctxt, funcs, index, typecache) {
+		if let Err(mut index_errors) = typecheck_expr(ctxt, funcs, index, typecache) {
 			errors.append(&mut index_errors);
 		} else {
 			match index.elt.typ.as_mut().unwrap() {
@@ -229,7 +298,7 @@ match &e.elt.expr {
 				other => errors.push(Error{
 					err: format!("Indices must be integers, not {}", other),
 					byte_offset: index.byte_offset, approx_len: index.byte_len, file_id: index.file_id
-				});
+				})
 			}
 		}
 		if errors.is_empty() {
@@ -245,13 +314,14 @@ match &e.elt.expr {
 		ctxt.type_for_lit_nulls = None;
 		//if the base has a type error, I can't check anything else about this Proj
 		typecheck_expr(ctxt, funcs, base, typecache)?;
-		match base.elt.typ.unwrap() {
+		let base_typ = base.elt.typ.unwrap();
+		match base_typ {
 			Ptr(Some(nested)) => match nested {
 				Struct(struct_name) => match ctxt.structs.get(struct_name) {
 					None => panic!("Proj: base had type {}, but struct context did not contain an entry for '{}'", base_typ, struct_name),
 					Some(NonGeneric(field_list)) => {
 						for (field_name, typ) in field_list.iter() {
-							if field.eq(field_name) {
+							if field.elt.eq(*field_name) {
 								e.elt.typ = Some(typ);
 								return Ok(());
 							}
@@ -268,10 +338,10 @@ match &e.elt.expr {
 					Some(NonGeneric(_)) => panic!("Proj: base had type {}, but struct context contained a non-generic struct for {}", base_typ, struct_name),
 					Some(Generic{mode: _, type_var, fields}) => {
 						for (field_name, typ) in fields.iter() {
-							if field.eq(field_name) {
-								let replaced_ty = replace_type_var_with(typ.clone(), type_var.as_str(), type_param);
+							if field.elt.eq(*field_name) {
+								let replaced_ty = replace_type_var_with(typ, type_var, type_param, typecache);
 								e.elt.typ = Some(replaced_ty);
-								return Ok(()):
+								return Ok(());
 							}
 						}
 						Err(vec![Error{
@@ -292,14 +362,14 @@ match &e.elt.expr {
 					if is_lhs is set and base is not a pointer and base itself is not an lvalue, error
 					*/
 					let mut errors = Vec::new();
-					if ctxt.is_lhs && !matches!(base as &ast::Expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
+					if ctxt.is_lhs && !matches!(&base.elt.expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
 						errors.push(Error{
 							err: "Cannot assign to field of struct that is not an lvalue".to_owned(),
 							byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 						})
 					}
 					for (field_name, typ) in field_list.iter() {
-						if field.eq(field_name) {
+						if field.elt.eq(*field_name) {
 							if errors.is_empty() {
 								//e.elt.typ = Some(replace_type_var_with(typ, type_var, type_param))
 								e.elt.typ = Some(typ);
@@ -325,17 +395,17 @@ match &e.elt.expr {
 					if is_lhs is set and base is not a pointer and base itself is not an lvalue, error
 					*/
 					let mut errors = Vec::new();
-					if ctxt.is_lhs && !matches!(base as &ast::Expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
+					if ctxt.is_lhs && !matches!(&base.elt.expr, Id(_) | Index(_,_) | Proj(_,_) | Deref(_)){
 						errors.push(Error{
 							err: "Cannot assign to field of struct that is not an lvalue".to_owned(),
 							byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 						})
 					}
-					for (field_name, typ) in field_list.iter() {
-						if field.eq(field_name) {
+					for (field_name, typ) in fields.iter() {
+						if field.elt.eq(*field_name) {
 							if errors.is_empty() {
-								//e.elt.typ = Some(replace_type_var_with(typ, type_var, type_param))
-								e.elt.typ = Some(typ);
+								e.elt.typ = Some(replace_type_var_with(typ, type_var, type_param, typecache));
+								//e.elt.typ = Some(typ);
 								return Ok(());
 							} else {
 								return Err(errors);
@@ -357,14 +427,14 @@ match &e.elt.expr {
 	},
 	Call(func_name, args) => {
 		use FuncType::*;
-		if PRINTF_FAMILY.contains(&func_name.as_str()){
-			typecheck_printf(func_name.as_str(), args, ctxt, funcs, e.byte_offset, e.byte_len, e.file_id, typecache)?;
-			e.elt.typ = Int{signed: true, size: ast::IntSize::Size32};
+		if PRINTF_FAMILY.contains(&func_name.elt){
+			typecheck_printf(func_name.elt, args, ctxt, funcs, e.byte_offset, e.byte_len, e.file_id, typecache)?;
+			e.elt.typ = Some(Int{signed: true, size: IntSize::Size32}.getref(typecache));
 			return Ok(());
 		}
 		let return_type;
 		let arg_type_list;
-		match funcs.get(func_name) {
+		match funcs.get(func_name.elt) {
 			None => {
 				return Err(vec![Error{
 					err: format!("Could not find a function named '{}'", func_name),
@@ -397,28 +467,15 @@ match &e.elt.expr {
 			});
 			check_against_expected_types = false;
 		}
-		for (index, (arg_or_errors, correct_type)) in args.iter_mut()
-				.zip(arg_type_list.iter())
-				.map(|(arg, expected_type)| {
-					ctxt.type_for_lit_nulls = Some(expected_type);
-					let arg_or_errors = match typecheck_expr(ctxt, funcs, arg, typecache) {
-						Err(err) => Err(err),
-						Ok(()) => Ok(arg)
-					};
-					(arg_or_errors, expected_type)
+		for (index, (arg, correct_type)) in args.iter_mut().zip(arg_type_list.iter()).enumerate() {
+			ctxt.type_for_lit_nulls = Some(correct_type);
+			if let Err(mut errs) = typecheck_expr(ctxt, funcs, arg, typecache) {
+				errors.append(&mut errs);
+			} else if check_against_expected_types && arg.elt.typ.unwrap().ne(correct_type) {
+				errors.push(Error{
+					err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ.unwrap(), correct_type),
+					byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
 				})
-				.enumerate(){
-			//not doing array-to-pointer decay like c, do &arr[0] instead
-			match arg_or_errors {
-				Err(errs) => errors.append(&mut errs),
-				Ok(arg) => {
-					if check_against_expected_types && arg.elt.typ.ne(correct_type) {
-						errors.push(Error{
-							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ, correct_type),
-							byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
-						})
-					}
-				}
 			}
 		}
 		if errors.is_empty() {
@@ -440,7 +497,7 @@ match &e.elt.expr {
 		let arg_type_list;
 		let callee_mode;
 		let type_var_string;
-		match funcs.get(func_name) {
+		match funcs.get(func_name.elt) {
 			None => {
 				errors.push(Error{
 					err: format!("Could not find a function named '{}'", func_name.elt),
@@ -480,13 +537,13 @@ match &e.elt.expr {
 				});
 			},
 			(Some(s), Some((current_func_type_var, current_func_mode))) => {
-				if s != current_func_type_var {
+				if &s != current_func_type_var {
 					errors.push(Error{
 						err: format!("Type param passed to generic func {} contains unknown type variable '{}", func_name, s),
 						byte_offset: type_param.byte_offset, approx_len: type_param.byte_len, file_id: type_param.file_id
 					});
 				}
-				use ast::PolymorphMode::*;
+				use PolymorphMode::*;
 				if *callee_mode == Separated && *current_func_mode == Erased {
 					errors.push(Error{
 						err: format!("Cannot call separated function {} from erased function", func_name),
@@ -508,33 +565,21 @@ match &e.elt.expr {
 		the monomorphed version of name would look like:
 						return_type name_mangled_type_var(..arg_type_list with var_string replaced with type_var..)
 		*/
-		for (index, (arg_or_errors, correct_type)) in args.iter_mut()
-				.zip(arg_type_list.iter())
-				.map(|(arg, expected_type)| {
-					//if the type param of this call was not valid, don't try to do any replacements
-					//instead, just skip typechecking on any arg where a replacement would take place
-					let correct_type = replace_type_var_with(expected_type, type_var_string, type_param.elt, typecache);
-					if !type_param_was_valid && correct_type != expected_type {
-						return Err(vec![]);
-					}
-					ctxt.type_for_lit_nulls = Some(correct_type);
-					let arg_or_errors = match typecheck_expr(ctxt, funcs, arg, typecache) {
-						Err(err) => Err(err),
-						Ok(()) => Ok(arg)
-					};
-					(arg_or_errors, correct_type)
+		for (index, (arg, correct_type)) in args.iter_mut().zip(arg_type_list.iter()).enumerate() {
+			//if the type param of this call was not valid, don't try to do any replacements
+			//instead, just skip typechecking on any arg where a replacement would take place
+			let replaced_type = replace_type_var_with(correct_type, type_var_string, type_param.elt, typecache);
+			if !type_param_was_valid && &replaced_type != correct_type {
+				continue;
+			}
+			ctxt.type_for_lit_nulls = Some(replaced_type);
+			if let Err(mut errs) = typecheck_expr(ctxt, funcs, arg, typecache) {
+				errors.append(&mut errs);
+			} else if check_against_expected_types && arg.elt.typ.unwrap().ne(replaced_type) {
+				errors.push(Error{
+					err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ.unwrap(), correct_type),
+					byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
 				})
-				.enumerate() {
-			match arg_or_errors {
-				Err(errs) => errors.append(&mut errs),
-				Ok(arg) => {
-					if check_against_expected_types && arg.elt.typ.ne(correct_type) {
-						errors.push(Error{
-							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ, correct_type),
-							byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
-						})
-					}
-				}
 			}
 		}
 		/*
@@ -544,7 +589,7 @@ match &e.elt.expr {
 		this expr has type (return_type with 'C replaced with type_param)
 		*/
 		if errors.is_empty() {
-			let replaced_type_var = replace_type_var_with(return_type, type_var_string, type_param);
+			let replaced_type_var = replace_type_var_with(return_type, type_var_string, type_param.elt, typecache);
 			e.elt.typ = Some(replaced_type_var);
 			Ok(())
 		} else {
@@ -561,28 +606,28 @@ match &e.elt.expr {
 			(Some(s), None) => {
 				errors.push(Error{
 					err: format!("Cannot use type var '{} in non-generic function", s),
-					byte_offset: type_param.byte_offset, approx_len: type_param.byte_len, file_id: type_param.file_id
+					byte_offset: dest_type.byte_offset, approx_len: dest_type.byte_len, file_id: dest_type.file_id
 				});
 			},
-			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
+			(Some(s), Some((current_func_type_var, _))) if &s != current_func_type_var => {
 				errors.push(Error{
-					err: format!("Type used in cast contains unknown type var '{}", func_name, s),
-					byte_offset: type_param.byte_offset, approx_len: type_param.byte_len, file_id: type_param.file_id
+					err: format!("Type used in cast contains unknown type var '{}", s),
+					byte_offset: dest_type.byte_offset, approx_len: dest_type.byte_len, file_id: dest_type.file_id
 				});
 			},
 			_ => ()
 		};
-		ctxt.type_for_lit_nulls = Some(Ptr(None));
+		ctxt.type_for_lit_nulls = Some(&Ptr(None));
 		//if the base expr has a type error, just assume that the cast works
 		match typecheck_expr(ctxt, funcs, source, typecache) {
-			Err(errs) => {
+			Err(mut errs) => {
 				errors.append(&mut errs);
-				e.elt.typ = Some(dest_type);
+				e.elt.typ = Some(dest_type.elt);
 				return Ok(());
 			},
 			Ok(()) => ()
 		};
-		match (source.elt.typ.unwrap(), dest_type) {
+		match (source.elt.typ.unwrap(), dest_type.elt) {
 			(Int{..}, Int{..})
 		  | (Ptr(_), Ptr(_))
 		  | (Float(_), Float(_))
@@ -608,21 +653,21 @@ match &e.elt.expr {
 			}
 		};
 		if errors.is_empty() {
-			e.elt.typ = Some(dest_type);
+			e.elt.typ = Some(dest_type.elt);
 			Ok(())
 		} else {
 			Err(errors)
 		}
 	},
 	Binop(left, bop, right) => {
-		use ast::BinaryOp::*;
+		use BinaryOp::*;
 		let mut errors = Vec::new();
-		ctxt.type_for_lit_nulls = Some(Ptr(None));
-		if let Err(errs) = typecheck_expr(ctxt, funcs, left, typecache) {
+		ctxt.type_for_lit_nulls = Some(&Ptr(None));
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, left, typecache) {
 			errors.append(&mut errs);
 		}
-		ctxt.type_for_lit_nulls = Some(Ptr(None));
-		if let Err(errs) = typecheck_expr(ctxt, funcs, right, typecache) {
+		ctxt.type_for_lit_nulls = Some(&Ptr(None));
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, right, typecache) {
 			errors.append(&mut errs);
 		}
 		if !errors.is_empty() {
@@ -636,56 +681,56 @@ match &e.elt.expr {
 					err: "when doing pointer arithmetic, the pointer must be the left hand side, and the integer must be the right hand side".to_owned(),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				}),
-				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: *sign1, size: if size1 > size2 {*size1} else {*size2}}.getref(typecache)),
 				(Int{..}, Int{..}) => Err(Error{
-					err: format!("Cannot {} integers with different signedness", if bop == Add {"add"} else {"subtract"}),
+					err: format!("Cannot {} integers with different signedness", if *bop == Add {"add"} else {"subtract"}),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				}),
-				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
+				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {*size1} else {*size2}).getref(typecache)),
 				(left_type, right_type) => Err(Error{
-					err: format!("Cannot {} types {} and {}", if bop == Add {"add"} else {"subtract"}, left_type, right_type),
+					err: format!("Cannot {} types {} and {}", if *bop == Add {"add"} else {"subtract"}, left_type, right_type),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				})
 			},
-			Mul | Div | Mod => match (left_type, right_type) {
-				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+			Mul | Div | Mod => match (left.elt.typ.unwrap(), right.elt.typ.unwrap()) {
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: *sign1, size: if size1 > size2 {*size1} else {*size2}}.getref(typecache)),
 				(Int{..}, Int{..}) => Err(Error{
 					err: format!("Cannot {} integers with different signedness", match bop {Mul => "multiply", Div => "divide", Mod => "mod", _ => unreachable!()}),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				}),
-				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {size1} else {size2})),
+				(Float(size1), Float(size2)) => Ok(Float(if size1 > size2 {*size1} else {*size2}).getref(typecache)),
 				(left_type, right_type) => Err(Error{
 					err: format!("Cannot {} types {} and {}", match bop {Mul => "multiply", Div => "divide", Mod => "mod", _ => unreachable!()}, left_type, right_type),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				})
 			},
-			Lt | Lte | Gt | Gte | Equ | Neq => match (left_type, right_type) {
+			Lt | Lte | Gt | Gte | Equ | Neq => match (left.elt.typ.unwrap(), right.elt.typ.unwrap()) {
 				(Int{signed: sign1,..}, Int{signed: sign2,..}) if sign1 != sign2 => Err(Error{
 					err: "Cannot compare signed and unsigned int".to_owned(),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				}),
-				(Int{..}, Int{..}) | (Float(_), Float(_)) | (Bool, Bool) => Ok(Bool),
-				(Ptr(p1), Ptr(p2)) if p1 == p2 => Ok(Bool),
+				(Int{..}, Int{..}) | (Float(_), Float(_)) | (Bool, Bool) => Ok(Bool.getref(typecache)),
+				(Ptr(p1), Ptr(p2)) if p1 == p2 => Ok(Bool.getref(typecache)),
 				(left_type, right_type) => Err(Error{
 					err: format!("Cannot compare types {} and {}", left_type, right_type),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				})
 			},
-			And | Or => match (left_type, right_type) {
-				(Bool, Bool) => Ok(Bool),
+			And | Or => match (left.elt.typ.unwrap(), right.elt.typ.unwrap()) {
+				(Bool, Bool) => Ok(Bool.getref(typecache)),
 				(left_type, right_type) => Err(Error{
-					err: format!("Logical {} cannot be applied to types {} and {}", if bop == And {"and"} else {"or"}, left_type, right_type),
+					err: format!("Logical {} cannot be applied to types {} and {}", if *bop == And {"and"} else {"or"}, left_type, right_type),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				})
 			},
-			Bitand | Bitor | Bitxor => match (left_type, right_type) {
-				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: sign1, size: if size1 > size2 {size1} else {size2}}),
+			Bitand | Bitor | Bitxor => match (left.elt.typ.unwrap(), right.elt.typ.unwrap()) {
+				(Int{signed: sign1, size: size1}, Int{signed: sign2, size: size2}) if sign1 == sign2 => Ok(Int{signed: *sign1, size: if size1 > size2 {*size1} else {*size2}}.getref(typecache)),
 				(left_type, right_type) => Err(Error{
 					err: format!("Bitwise {} cannot be applied to types {} and {}", match bop {Bitand => "and", Bitor => "or", Bitxor => "xor", _ => unreachable!()}, left_type, right_type),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 				})
 			},
-			Shl | Shr | Sar => match (left_type, right_type) {
+			Shl | Shr | Sar => match (left.elt.typ.unwrap(), right.elt.typ.unwrap()) {
 				(left_type @ Int{..}, Int{..}) => Ok(left_type),
 				(left_type, right_type) => Err(Error{
 					err: format!("Cannot bitshift {} by {}", left_type, right_type),
@@ -702,8 +747,8 @@ match &e.elt.expr {
 		}
 	},
 	Unop(op, inner) => {
-		use ast::UnaryOp::*;
-		ctxt.type_for_lit_nulls = Some(Ptr(None));
+		use UnaryOp::*;
+		ctxt.type_for_lit_nulls = Some(&Ptr(None));
 		typecheck_expr(ctxt, funcs, inner, typecache)?; 
 		let inner_typ = inner.elt.typ.unwrap();
 		let result_ty_or_err = match op {
@@ -719,7 +764,7 @@ match &e.elt.expr {
 				})
 			},
 			Lognot => match inner_typ {
-				Bool => Ok(Bool),
+				Bool => Ok(Bool.getref(typecache)),
 				other => Err(Error{
 					err: format!("Logical not can only be applied to bool, not {}", other),
 					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
@@ -743,13 +788,13 @@ match &e.elt.expr {
 	},
 	GetRef(inner) => {
 		let mut errors = Vec::new();
-		if let Err(err) = typecheck_expr(ctxt, funcs, inner) {
-			errors.append(&mut err);
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, inner, typecache) {
+			errors.append(&mut errs);
 		}
 		//don't need to set type_for_lit_nulls here because it will already be an error anyway
-		if !matches(e.elt.expr, Id(_) | Proj(_,_) | Index(_,_) | Deref(_)) {
+		if !matches!(&inner.elt.expr, Id(_) | Proj(_,_) | Index(_,_) | Deref(_)) {
 			errors.push(Error{
-				err: "Cannot get address of expression",
+				err: "Cannot get address of expression".to_owned(),
 				byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
 			});
 		}
@@ -761,8 +806,8 @@ match &e.elt.expr {
 		}
 	},
 	Deref(inner) => {
-		ctxt.type_for_lit_nulls = Some(Ptr(None));
-		typecheck_expr(ctxt, funcs, inner)?;
+		ctxt.type_for_lit_nulls = Some(&Ptr(None));
+		typecheck_expr(ctxt, funcs, inner, typecache)?;
 		match inner.elt.typ.unwrap() {
 			Ptr(Some(t)) => {
 				e.elt.typ = Some(t);
@@ -783,12 +828,13 @@ match &e.elt.expr {
 			(Some(s), None) => Err(vec![Error{
 				err: format!("Cannot use type variable '{} in non-generic function", s),
 				byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
-			}])
-			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => Err(vec![Error{
-				err: format!("Type contains unknown type variable '{}", s)
+			}]),
+			(Some(s), Some((current_func_type_var, _))) if &s != current_func_type_var => Err(vec![Error{
+				err: format!("Type contains unknown type variable '{}", s),
+				byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
 			}]),
 			_ => {
-				e.elt.typ = Some(Int{signed: false, size: Size64});
+				e.elt.typ = Some(Int{signed: false, size: Size64}.getref(typecache));
 				Ok(())
 			}
 		}
@@ -807,7 +853,14 @@ pub const PRINTF_FAMILY: &[&str] = &[
 	"dprintf"
 ];
 
-fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<TypedExpr<'src, 'arena>>], ctxt: &mut LocalTypeContext, funcs: &FuncContext<'src, 'arena>, byte_offset: usize, byte_len: usize, file_id: u16, typecache: &'arena TypeCache<'src, 'arena>) -> Result<(), Vec<Error>> {
+#[allow(clippy::too_many_arguments)]
+fn typecheck_printf<'src: 'arena, 'arena: 'ctxt + 'expr, 'expr, 'ctxt>(
+	func_name: &'src str,
+	args: &'expr mut [Loc<TypedExpr<'src, 'arena>>],
+	ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>,
+	funcs: &FuncContext<'src, 'arena>,
+	byte_offset: usize, byte_len: usize, file_id: u16,
+	typecache: &'arena TypeCache<'src, 'arena>) -> Result<(), Vec<Error>> {
 	/*
 	According to the C standard, there is something called "default argument promotion" that happens when the expected type
 	of the argument is unknown (such as when passing arguments to printf). This means that floats are converted to doubles,
@@ -826,9 +879,9 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 					err: "printf requires at least one argument".to_owned(),
 					byte_offset, approx_len: byte_len, file_id
 				});
-			} else if let Err(errs) = typecheck_expr(ctxt, funcs, &args[0], typecache) {
+			} else if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[0], typecache) {
 				errors.append(&mut errs);
-			} else if args[0].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+			} else if args[0].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 				errors.push(Error{
 					err: "The first argument to printf must be a u8*".to_owned(),
 					byte_offset: args[0].byte_offset, approx_len: args[0].byte_len, file_id: args[0].file_id
@@ -843,19 +896,19 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 					byte_offset, approx_len: byte_len, file_id
 				});
 			}
-			if args.len() >= 1 {
-				if let Err(errs) = typecheck_expr(ctxt, funcs, &args[0], typecache) {
+			if !args.is_empty() {
+				if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[0], typecache) {
 					errors.append(&mut errs);
-				} else if args[0].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+				} else if args[0].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 					errors.push(Error{
 						err: "The first argument to sprintf must be a u8*".to_owned(),
 						byte_offset: args[0].byte_offset, approx_len: args[0].byte_len, file_id: args[0].file_id
 					});
 				}
 				if args.len() >= 2 {
-					if let Err(errs) = typecheck_expr(ctxt, funcs, &args[1], typecache) {
+					if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[1], typecache) {
 						errors.append(&mut errs);
-					} else if args[1].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+					} else if args[1].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 						errors.push(Error{
 							err: "The second argument to sprintf must be a u8*".to_owned(),
 							byte_offset: args[1].byte_offset, approx_len: args[1].byte_len, file_id: args[1].file_id
@@ -872,28 +925,28 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 					byte_offset, approx_len: byte_len, file_id
 				});
 			}
-			if args.len() >= 1 {
-				if let Err(errs) = typecheck_expr(ctxt, funcs, &args[0], typecache) {
+			if !args.is_empty() {
+				if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[0], typecache) {
 					errors.append(&mut errs);
-				} else if args[0].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+				} else if args[0].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 					errors.push(Error{
 						err: "The first argument to snprintf must be a u8*".to_owned(),
 						byte_offset: args[0].byte_offset, approx_len: args[0].byte_len, file_id: args[0].file_id
 					});
 				}
 				if args.len() >= 2 {
-					if let Err(errs) = typecheck_expr(ctxt, funcs, &args[1], typecache) {
+					if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[1], typecache) {
 						errors.append(&mut errs);
-					} else if args[1].elt.typ.unwrap() != Int{signed: false, size: Size64} {
+					} else if args[1].elt.typ.unwrap() != &(Int{signed: false, size: Size64}) {
 						errors.push(Error{
 							err: "The second argument to snprintf must be a u64".to_owned(),
 							byte_offset: args[1].byte_offset, approx_len: args[1].byte_len, file_id: args[1].file_id
 						});
 					}
 					if args.len() >= 3 {
-						if let Err(errs) = typecheck_expr(ctxt, funcs, &args[2], typecache) {
+						if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[2], typecache) {
 							errors.append(&mut errs);
-						} else if args[2].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+						} else if args[2].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 							errors.push(Error{
 								err: "The third argument to snprintf must be a u8*".to_owned(),
 								byte_offset: args[2].byte_offset, approx_len: args[2].byte_len, file_id: args[2].file_id
@@ -911,19 +964,19 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 					byte_offset, approx_len: byte_len, file_id
 				});
 			}
-			if args.len() >= 1 {
-				if let Err(errs) = typecheck_expr(ctxt, funcs, &args[0], typecache) {
+			if !args.is_empty() {
+				if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[0], typecache) {
 					errors.append(&mut errs);
-				} else if args[0].elt.typ.unwrap() != Int{size: Size32, signed: true} {
+				} else if args[0].elt.typ.unwrap() != &(Int{size: Size32, signed: true}) {
 					errors.push(Error{
 						err: "The first argument to dprintf must be a i32".to_owned(),
 						byte_offset: args[0].byte_offset, approx_len: args[0].byte_len, file_id: args[0].file_id
 					});
 				}
 				if args.len() >= 2 {
-					if let Err(errs) = typecheck_expr(ctxt, funcs, &args[1], typecache) {
+					if let Err(mut errs) = typecheck_expr(ctxt, funcs, &mut args[1], typecache) {
 						errors.append(&mut errs);
-					} else if args[1].elt.typ.unwrap() != Ptr(Some(&Int{size: Size8, signed: false})) {
+					} else if args[1].elt.typ.unwrap() != &Ptr(Some(&Int{size: Size8, signed: false})) {
 						errors.push(Error{
 							err: "The second argument to dprintf must be a u8*".to_owned(),
 							byte_offset: args[1].byte_offset, approx_len: args[1].byte_len, file_id: args[1].file_id
@@ -935,8 +988,8 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 		},
 		_ => panic!("typecheck_printf called with non-printf function {} (maybe it's just not in PRINT_FAMILY)", func_name)
 	};
-	for (i, arg) in args[starting_index..].iter().enumerate().map(|(i, e)| (i + starting_index, e)) {
-		if let Err(errs) = typecheck_expr(ctxt, funcs, arg, typecache) {
+	for (i, arg) in args[starting_index..].iter_mut().enumerate().map(|(i, e)| (i + starting_index, e)) {
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, arg, typecache) {
 			errors.append(&mut errs);
 			continue
 		}
@@ -963,19 +1016,25 @@ fn typecheck_printf<'src: 'arena, 'arena>(func_name: &str, args: &mut [Loc<Typed
 	}
 }
 
-pub fn typecheck_stmt<'src: 'arena, 'arena>(ctxt: &mut LocalTypeContext<'src, 'arena>, funcs: &FuncContext, s: &mut Loc<Stmt<'src, 'arena>>, expected_return_type: Option<&'arena Ty<'src, 'arena>>, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>> {
-use ast::Ty::*;
-use ast::Expr::*;
-use ast::Stmt::*;
-match s {
+pub fn typecheck_stmt<'src: 'arena, 'arena: 'stmt, 'stmt>(
+		ctxt: &mut LocalTypeContext<'src, 'arena>,
+		funcs: &FuncContext<'src, 'arena>,
+		s: &'stmt mut Loc<Stmt<'src, 'arena>>,
+		expected_return_type: Option<&'arena Ty<'src, 'arena>>,
+		typecache: &'arena TypeCache<'src, 'arena>)
+		-> Result<bool, Vec<Error>> {
+use Ty::*;
+use Expr::*;
+use Stmt::*;
+match &mut s.elt {
 	Assign(lhs, rhs) => {
 		let mut errors = Vec::new();
-		let lhs_typ: Option<&'arena Ty<'src, 'arena>> = match &lhs.elt {
+		let lhs_typ: Option<&'arena Ty<'src, 'arena>> = match &lhs.elt.expr {
 			Id(_) | Index(_,_) | Proj(_,_) | Deref(_) => {
 				ctxt.is_lhs = true;
-				let expr_result = typecheck_expr(ctxt, funcs, lhs);
+				let expr_result = typecheck_expr(ctxt, funcs, lhs, typecache);
 				ctxt.is_lhs = false;
-				if let Err(errs) = expr_result; {
+				if let Err(mut errs) = expr_result {
 					errors.append(&mut errs);
 					None
 				} else {
@@ -993,7 +1052,7 @@ match s {
 		};
 		let rhs_typ = {
 			ctxt.type_for_lit_nulls = lhs_typ;
-			if let Err(errs) = typecheck_expr(ctxt, funcs, rhs) {
+			if let Err(mut errs) = typecheck_expr(ctxt, funcs, rhs, typecache) {
 				errors.append(&mut errs);
 				None
 			} else {
@@ -1028,7 +1087,7 @@ match s {
 					byte_offset: typ.byte_offset, approx_len: typ.byte_len, file_id: typ.file_id
 				});
 			},
-			(Some(s), Some((current_func_type_var, _))) if s != current_func_type_var => {
+			(Some(s), Some((current_func_type_var, _))) if &s != current_func_type_var => {
 				errors.push(Error{
 					err: format!("Type used in declaration of {} contains unknown type var '{}", name, s),
 					byte_offset: typ.byte_offset, approx_len: typ.byte_len, file_id: typ.file_id
@@ -1036,7 +1095,7 @@ match s {
 			},
 			_ => ()
 		};
-		if ctxt.locals.contains_key(name){
+		if ctxt.locals.contains_key(name.elt){
 			errors.push(Error{
 				err: format!("redeclaration of local var {}", name),
 				byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
@@ -1060,8 +1119,8 @@ match s {
 		}
 	},
 	Return(Some(e)) => {
-		ctxt.type_for_lit_nulls = ctxt.type_for_lit_nulls;
-		let (mut errors, result_ty) = match typecheck_expr(ctxt, funcs, e) {
+		//ctxt.type_for_lit_nulls = ctxt.type_for_lit_nulls;
+		let (mut errors, result_ty) = match typecheck_expr(ctxt, funcs, e, typecache) {
 			Err(errs) => (errs, None),
 			Ok(()) => {
 				debug_assert!(e.elt.typ.is_some());
@@ -1092,22 +1151,22 @@ match s {
 	},
 	SCall(func_name, args) => {
 		use FuncType::*;
-		if PRINTF_FAMILY.contains(&func_name.as_str()){
-			typecheck_printf(func_name.as_str(), args, ctxt, funcs, s.byte_offset, s.byte_len, s.file_id, typecache)?;
+		if PRINTF_FAMILY.contains(&func_name.elt){
+			typecheck_printf(func_name.elt, args, ctxt, funcs, s.byte_offset, s.byte_len, s.file_id, typecache)?;
 			return Ok(false);
 		}
 		let arg_type_list;
-		match funcs.get(func_name) {
+		match funcs.get(func_name.elt) {
 			None => {
 				return Err(vec![Error{
 					err: format!("Could not find a function named '{}'", func_name),
-					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+					byte_offset: s.byte_offset, approx_len: s.byte_len, file_id: s.file_id
 				}]);
 			},
 			Some(Generic{..}) => {
 				return Err(vec![Error{
 					err: format!("Function '{}' is generic", func_name),
-					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+					byte_offset: s.byte_offset, approx_len: s.byte_len, file_id: s.file_id
 				}]);
 			},
 			Some(NonGeneric{args: arg_types, ..}) => {
@@ -1119,7 +1178,7 @@ match s {
 		if args.len() != arg_type_list.len() {
 			errors.push(Error{
 				err: format!("Wrong number of args to {}: given {} args, should be {}", func_name.elt, args.len(), arg_type_list.len()),
-				byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+				byte_offset: s.byte_offset, approx_len: s.byte_len, file_id: s.file_id
 			});
 			check_against_expected_types = false;
 		}
@@ -1136,11 +1195,11 @@ match s {
 				.enumerate(){
 			//not doing array-to-pointer decay like c, do &arr[0] instead
 			match arg_or_errors {
-				Err(errs) => errors.append(&mut errs),
+				Err(mut errs) => errors.append(&mut errs),
 				Ok(arg) => {
-					if check_against_expected_types && arg.elt.typ.ne(correct_type) {
+					if check_against_expected_types && arg.elt.typ.unwrap().ne(correct_type) {
 						errors.push(Error{
-							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ, correct_type),
+							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ.unwrap(), correct_type),
 							byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
 						})
 					}
@@ -1164,7 +1223,7 @@ match s {
 		let arg_type_list;
 		let callee_mode;
 		let type_var_string;
-		match funcs.get(func_name) {
+		match funcs.get(func_name.elt) {
 			None => {
 				errors.push(Error{
 					err: format!("Could not find a function named '{}'", func_name.elt),
@@ -1175,7 +1234,7 @@ match s {
 			Some(NonGeneric{..}) => {
 				errors.push(Error{
 					err: format!("Function '{}' is not generic", func_name),
-					byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+					byte_offset: s.byte_offset, approx_len: s.byte_len, file_id: s.file_id
 				});
 				return Err(errors);
 			},
@@ -1196,17 +1255,17 @@ match s {
 				});
 			},
 			(Some(s), Some((current_func_type_var, current_func_mode))) => {
-				if s != current_func_type_var {
+				if &s != current_func_type_var {
 					errors.push(Error{
 						err: format!("Type param passed to generic func {} contains unknown type variable '{}", func_name, s),
 						byte_offset: type_param.byte_offset, approx_len: type_param.byte_len, file_id: type_param.file_id
 					});
 				}
-				use ast::PolymorphMode::*;
+				use PolymorphMode::*;
 				if *callee_mode == Separated && *current_func_mode == Erased {
 					errors.push(Error{
 						err: format!("Cannot call separated function {} from erased function", func_name),
-						byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+						byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
 					});
 				}
 			}
@@ -1214,7 +1273,7 @@ match s {
 		if args.len() != arg_type_list.len() {
 			errors.push(Error{
 				err: format!("Wrong number of args to {}: given {} args, should be {}", func_name.elt, args.len(), arg_type_list.len()),
-				byte_offset: e.byte_offset, approx_len: e.byte_len, file_id: e.file_id
+				byte_offset: s.byte_offset, approx_len: s.byte_len, file_id: s.file_id
 			});
 			check_against_expected_types = false;
 		}
@@ -1230,8 +1289,8 @@ match s {
 					//if the type param of this call was not valid, don't try to do any replacements
 					//instead, just skip typechecking on any arg where a replacement would take place
 					let correct_type = replace_type_var_with(expected_type, type_var_string, type_param.elt, typecache);
-					if !type_param_was_valid && correct_type != expected_type {
-						return Err(vec![]);
+					if !type_param_was_valid && &correct_type != expected_type {
+						return (Err(vec![]), correct_type);
 					}
 					ctxt.type_for_lit_nulls = Some(correct_type);
 					let arg_or_errors = match typecheck_expr(ctxt, funcs, arg, typecache) {
@@ -1242,11 +1301,11 @@ match s {
 				})
 				.enumerate() {
 			match arg_or_errors {
-				Err(errs) => errors.append(&mut errs),
+				Err(mut errs) => errors.append(&mut errs),
 				Ok(arg) => {
-					if check_against_expected_types && arg.elt.typ.ne(correct_type) {
+					if check_against_expected_types && arg.elt.typ.unwrap().ne(correct_type) {
 						errors.push(Error{
-							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ, correct_type),
+							err: format!("Argument {} to {} has type {}, expected {}", index + 1, func_name.elt, arg.elt.typ.unwrap(), correct_type),
 							byte_offset: arg.byte_offset, approx_len: arg.byte_len, file_id: arg.file_id
 						})
 					}
@@ -1260,29 +1319,29 @@ match s {
 		}
 	},
 	If(cond, then_block, else_block) => {
-		ctxt.type_for_lit_nulls = Some(Bool);
+		ctxt.type_for_lit_nulls = Some(&Bool);
 		let mut errors = Vec::new();
-		if let Err(errs) = typecheck_expr(ctxt, funcs, cond, typecache) {
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, cond, typecache) {
 			errors.append(&mut errs);
 		} else {
 			let cond_ty = cond.elt.typ.unwrap();
-			if cond_ty != Bool {
+			if cond_ty != &Bool {
 				errors.push(Error{
 					err: format!("condition of if statement must have type bool, not {}", cond_ty),
 					byte_offset: cond.byte_offset, approx_len: cond.byte_len, file_id: cond.file_id
 				});
 			}
 		}
-		let then_result = typecheck_block(ctxt, funcs, then_block, expected_return_type);
-		let else_result = typecheck_block(ctxt, funcs, else_block, expected_return_type);
+		let then_result = typecheck_block(ctxt, funcs, then_block, expected_return_type, typecache);
+		let else_result = typecheck_block(ctxt, funcs, else_block, expected_return_type, typecache);
 		let mut both_return = false;
 		if let (Ok(then_returns), Ok(else_returns)) = (&then_result, &else_result) {
 			both_return = *then_returns && *else_returns;
 		}
-		if let Err(errs) = then_result {
+		if let Err(mut errs) = then_result {
 			errors.append(&mut errs);
 		}
-		if let Err(errs) = else_result {
+		if let Err(mut errs) = else_result {
 			errors.append(&mut errs);
 		}
 		if errors.is_empty() {
@@ -1292,20 +1351,20 @@ match s {
 		}
 	},
 	While(cond, body) => {
-		ctxt.type_for_lit_nulls = Some(Bool);
+		ctxt.type_for_lit_nulls = Some(&Bool);
 		let mut errors = Vec::new();
-		if let Err(errs) = typecheck_expr(ctxt, funcs, cond, typecache) {
+		if let Err(mut errs) = typecheck_expr(ctxt, funcs, cond, typecache) {
 			errors.append(&mut errs);
 		} else {
 			let cond_ty = cond.elt.typ.unwrap();
-			if cond_ty != Bool {
+			if cond_ty != &Bool {
 				errors.push(Error{
 					err: format!("condition of while must have type bool, not {}", cond_ty),
 					byte_offset: cond.byte_offset, approx_len: cond.byte_len, file_id: cond.file_id
 				});
 			}
 		}
-		if let Err(errs) = typecheck_block(ctxt, funcs, body, expected_return_type) {
+		if let Err(mut errs) = typecheck_block(ctxt, funcs, body, expected_return_type, typecache) {
 			errors.append(&mut errs);
 		}
 		if errors.is_empty() {
@@ -1317,7 +1376,13 @@ match s {
 }
 }
 
-pub fn typecheck_block<'src: 'arena, 'arena>(ctxt: &mut LocalTypeContext<'src, 'arena>, funcs: &FuncContext, block: &mut Block<'src, 'arena>, expected_return_type: Option<&'arena Ty<'src, 'arena>>, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>> {
+pub fn typecheck_block<'src: 'arena, 'arena: 'body, 'body>(
+		ctxt: &mut LocalTypeContext<'src, 'arena>,
+		funcs: &FuncContext<'src, 'arena>,
+		block: &'body mut Block<'src, 'arena>,
+		expected_return_type: Option<&'arena Ty<'src, 'arena>>,
+		typecache: &'arena TypeCache<'src, 'arena>)
+		-> Result<bool, Vec<Error>> {
 	let mut stmt_returns = false;
 	let mut unreachable_err: Option<Error> = None;
 	for stmt in block.0.iter_mut(){
@@ -1327,7 +1392,7 @@ pub fn typecheck_block<'src: 'arena, 'arena>(ctxt: &mut LocalTypeContext<'src, '
 				byte_offset: stmt.byte_offset, approx_len: stmt.byte_len, file_id: stmt.file_id
 			});
 		}
-		stmt_returns |= typecheck_stmt(ctxt, funcs, stmt, expected_return_type)?;
+		stmt_returns |= typecheck_stmt(ctxt, funcs, stmt, expected_return_type, typecache)?;
 	}
 	if let Some(err) = unreachable_err {
 		Err(vec![err])
@@ -1336,14 +1401,15 @@ pub fn typecheck_block<'src: 'arena, 'arena>(ctxt: &mut LocalTypeContext<'src, '
 	}
 }
 
-pub fn typecheck_func_decl<'src: 'arena, 'arena>(
+pub fn typecheck_func_decl<'src: 'arena, 'arena: 'body, 'body>(
 		ctxt: &mut LocalTypeContext<'src, 'arena>,
-		funcs: &FuncContext,
-		name: Loc<&'src str>,
-		args: &'arena [(Loc<&'arnea Ty<'src, 'arena>>, Loc<&'src str>)],
-		body: Block<'src, 'arena>,
-		ret_type: Option<&'arena Ty<'src, 'arena>>
-		) -> Result<(), Vec<Error>>{
+		funcs: &FuncContext<'src, 'arena>,
+		name: &Loc<&'src str>,
+		args: &[(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)],
+		body: &'body mut Block<'src, 'arena>,
+		ret_type: Option<&'arena Ty<'src, 'arena>>,
+		typecache: &'arena TypeCache<'src, 'arena>)
+		 -> Result<(), Vec<Error>>{
 	/*
 	create a LocalTypeContext
 	add all args to it as locals
@@ -1353,8 +1419,8 @@ pub fn typecheck_func_decl<'src: 'arena, 'arena>(
 		ctxt.locals.insert(arg_name.elt, arg_ty.elt);
 	}
 	//add errno to the LocalTypeContext as a local variable with type i32
-	ctxt.locals.insert("errno", ast::Ty::Int{signed: true, size: ast::IntSize::Size32});
-	let last_statement_definitely_returns = typecheck_block(ctxt, funcs, body, ret_type)?;
+	ctxt.locals.insert("errno", Ty::Int{signed: true, size: IntSize::Size32}.getref(typecache));
+	let last_statement_definitely_returns = typecheck_block(ctxt, funcs, body, ret_type, typecache)?;
 	if ret_type.is_some() && !last_statement_definitely_returns {
 		return Err(vec![Error{
 			err: format!("function '{}' might not return", name),
@@ -1378,16 +1444,16 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 	//Possible Improvement: make type Node = (&str, Option<&Ty>)
 	//use pool allocator to wrap type_var in TypeVar
 	//this eliminates cloning of tys
-	type Node = (&'src str, Option<&'arena Ty<'src, 'arena>>);
+	type Node<'src, 'arena> = (&'src str, Option<&'arena Ty<'src, 'arena>>);
 	const MAX_STRUCT_DEPTH: i32 = 100;
 	let mut fully_explored_nodes: HashSet<Node> = HashSet::with_capacity(struct_context.len());
 	let mut queue: VecDeque<Node> = VecDeque::with_capacity(struct_context.len());
 	for (name, struct_type) in struct_context.iter(){
 		let node = match struct_type {
-			NonGeneric(_) => (name, None),
+			NonGeneric(_) => (*name, None),
 			Generic{type_var, ..} => {
 				let new_ty = Ty::TypeVar(type_var).getref(typecache);
-				(name, Some(new_ty))
+				(*name, Some(new_ty))
 			}
 		};
 		if fully_explored_nodes.contains(&node) { continue }
@@ -1406,7 +1472,7 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 			if seen_nodes.contains(&current_node) {
 				return Err((format!("struct '{}' is recursive", current_node.0), current_node.0, None));
 			}
-			seen_nodes.insert(current_node.clone());
+			seen_nodes.insert(current_node);
 			let struct_type = struct_context.get(current_node.0).expect("why is this not in the struct context?");
 			let fields = match struct_type {
 				NonGeneric(fields) => fields,
@@ -1421,10 +1487,10 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 					if field_type.recursively_find_type_var().is_some() {
 						return Err((format!("non-generic struct {} has a field of type {}", current_node.0, field_type), current_node.0, Some(field_name)));
 					}
-					use ast::Ty::*;
+					use Ty::*;
 					match field_type {
-						Struct(s) => queue.push_back((s.as_str(), None)),
-						GenericStruct{type_param: fully_concrete_type, name} => queue.push_back((name.as_str(), Some((fully_concrete_type as &ast::Ty).clone()))),
+						Struct(s) => queue.push_back((s, None)),
+						GenericStruct{type_param: fully_concrete_type, name} => queue.push_back((name, Some(fully_concrete_type))),
 						_ => ()
 					}
 				}
@@ -1435,15 +1501,15 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 				//the current struct's type param string as this type
 				//to get the type param string, need to look up current_node.0 in struct_context
 
-				let (current_mode, type_param_string_of_current_struct): (ast::PolymorphMode, &str) = match struct_context.get(current_node.0).expect("why is the current struct's name not in the context?") {
+				let (current_mode, type_param_string_of_current_struct): (PolymorphMode, &str) = match struct_context.get(current_node.0).expect("why is the current struct's name not in the context?") {
 					NonGeneric{..} => panic!("why is struct {} generic and non-generic?", current_node.0),
-					Generic{type_var, mode, ..} => (*mode, type_var.as_str())
+					Generic{type_var, mode, ..} => (*mode, type_var)
 				};
 				//the current type param can be concrete even if it is just a TypeVar.
 				//It could be a different TypeVar
-				let type_param_is_concrete: bool = type_param != ast::Ty::TypeVar(type_param_string_of_current_struct.to_owned());
+				let type_param_is_concrete: bool = type_param != &Ty::TypeVar(type_param_string_of_current_struct);
 				for (field_name, field_type) in fields.iter(){
-					use ast::Ty::*;
+					use Ty::*;
 					match (type_param_is_concrete, field_type.recursively_find_type_var()) {
 						//make sure a struct with a TypeVar type param does not have any fields with other TypeVars
 						(false, Some(field_param_str)) => {
@@ -1460,7 +1526,7 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 					//any TypeVars encountered henceforth are guaranteed to be valid,
 					//but I will debug_assert them anyway
 					match field_type {
-						Struct(s) => queue.push_back((s.as_str(), None)),
+						Struct(s) => queue.push_back((s, None)),
 						GenericStruct{type_param, name} => {
 							//if the current struct is erased, and the field struct is separated, and
 							//the current struct is passing its TypeVar to it (type param is not concrete),
@@ -1469,7 +1535,7 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 								NonGeneric{..} => panic!("why is struct {} generic and non-generic?", name),
 								Generic{mode, ..} => mode
 							};
-							use ast::PolymorphMode::*;
+							use PolymorphMode::*;
 							let type_param_found_in_type_var = type_param.recursively_find_type_var();
 							let field_type_param_is_concrete = type_param_found_in_type_var.is_none();
 							if current_mode == Erased
@@ -1477,13 +1543,14 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 								&& !field_type_param_is_concrete {
 								return Err((format!("struct {} passes an erased type var ('{}) to separated struct {}", current_node.0, type_param_string_of_current_struct, name), current_node.0, Some(field_name)));
 							}
-							let substituted1 = replace_type_var_with((type_param as &ast::Ty).clone(), type_param_string_of_current_struct, type_param);
+							let substituted1 = replace_type_var_with(type_param, type_param_string_of_current_struct, type_param, typecache);
 							let type_param_string_of_field_struct: &str = match struct_context.get(name).unwrap_or_else(|| panic!("why is struct {} not in the context?", name)) {
 								NonGeneric{..} => panic!("why is field struct {} generic and non-generic?", name),
-								Generic{type_var, ..} => type_var.as_str()
+								Generic{type_var, ..} => type_var
 							};
-							let substituted2 = replace_type_var_with(substituted1, type_param_string_of_current_struct, &TypeVar(type_param_string_of_field_struct.to_owned()));
-							queue.push_back((name.as_str(), Some(substituted2)));
+							let temptyp = TypeVar(type_param_string_of_field_struct).getref(typecache);
+							let substituted2 = replace_type_var_with(substituted1, type_param_string_of_current_struct, temptyp, typecache);
+							queue.push_back((name, Some(substituted2)));
 
 							/*
 							match (type_param_is_concrete, &type_var as &ast::Ty) {
@@ -1546,7 +1613,9 @@ fn traverse_struct_context<'src: 'arena, 'arena>(struct_context: &StructContext<
 
 //makes sure that a type declared in an extern function is compatible with the C type system
 //No TypeVars or GenericStructs, either directly contained within struct fields
-fn type_is_c_compatible<'src: 'arena, 'arena>(t: &'arena Ty<'src, 'arena>>, structs: &StructContext<'src, 'arena>) -> bool { match t {
+fn type_is_c_compatible<'src: 'arena, 'arena>(t: &'arena Ty<'src, 'arena>, structs: &StructContext<'src, 'arena>) -> bool {
+use Ty::*;
+match t {
 	Ptr(Some(inner)) => type_is_c_compatible(inner, structs),
 	Array{typ, ..} => type_is_c_compatible(typ, structs),
 	Struct(s) => { match structs.get(s).unwrap() {
@@ -1563,19 +1632,40 @@ pub struct ProgramContext<'src: 'arena, 'arena> {
 	pub globals: GlobalContext<'src, 'arena>
 }
 
-fn struct_err_with_loc<'src: 'arena, 'arena>(gdecls: &[Gdecl<'src, 'arena>], err_msg: String, struct_name: &'src str, field_name: Option<&'src str>) -> Error {
-	todo!()
-}
-
-fn type_to_string_or_void<'src: 'arena, 'arena>(t: Option<&'arena Ty<'src, 'arena>>) -> std::fmt::Arguments<'_> {
-	match t {
-		None => format_args!("void"),
-		Some(t) => format_args!("{}", t)
+fn struct_err_with_loc<'src: 'arena, 'arena>(prog: &Program<'src, 'arena>, err_msg: String, struct_name: &'src str, field_name: Option<&'src str>) -> Error {
+	for (name, fields) in prog.structs.iter()
+		.map(|s| (s.name, s.fields))
+		.chain(
+			prog.erased_structs.iter().chain(prog.separated_structs.iter())
+			.map(|s| (s.name, s.fields))
+		) {
+		if name.elt == struct_name {
+			if let Some(field_name) = field_name {
+				for (field_type_loc, field_name_loc) in fields.iter() {
+					if field_name_loc.elt == field_name {
+						return Error {
+							err: err_msg, byte_offset: field_type_loc.byte_offset,
+							approx_len: field_type_loc.byte_len, file_id: field_type_loc.file_id
+						}
+					}
+				}
+				panic!("field {} not found in struct {}", field_name, struct_name);
+			} else {
+				return Error{
+					err: err_msg,
+					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
+				};
+			}
+		}
 	}
+	panic!("struct {} not found in gdecls", struct_name);
 }
 
-pub fn typecheck_program<'src: 'arena, 'arena>(gdecls: &mut [Gdecl<'src, 'arena>], typecache: &'arena TypeCache<'src, 'arena>) -> Result<ProgramContext, Vec<Error>>{
-	use Gdecl::*;
+pub fn typecheck_program<'src: 'arena, 'arena: 'prog, 'prog>(
+	prog: &'prog mut Program<'src, 'arena>,
+	typecache: &'arena TypeCache<'src, 'arena>,
+	arena: &'arena bumpalo_herd::Member<'arena>)
+	-> Result<ProgramContext<'src, 'arena>, Vec<Error>>{
 	/*
 	create StructContext:
 		collect names of all structs, put all of them into struct_context
@@ -1597,105 +1687,114 @@ pub fn typecheck_program<'src: 'arena, 'arena>(gdecls: &mut [Gdecl<'src, 'arena>
 	*/
 	let mut struct_context: StructContext = HashMap::new();
 	let mut errors = Vec::new();
-	for g in gdecls.iter() { match g {
-		GStructDecl{name, fields} => {
-			if struct_context.contains_key(name){
-				errors.push(Error{
-					err: format!("struct '{}' is declared more than once", name),
-					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
-				});
-			} else {
-				struct_context.insert(name.elt, StructType::NonGeneric(fields.iter().map(|(t, n)| {(n, t)}).collect()));
-			}
-		},
-		GGenericStructDecl{name, var, mode, fields} => {
-			if struct_context.contains_key(name){
-				errors.push(Error{
-					err: format!("struct '{}' is declared more than once", name),
-					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
-				});
-			} else {
-				struct_context.insert(name, StructType::Generic{
-					mode: *mode,
-					type_var: var,
-					fields: fields.iter().map(|(t, n)| (n, t)).collect()
-				});
-			}
-		},
-		_ => ()
-	}}
-	//struct_context has been populated, now need to check for duplicate and invalid fields
-	for (name, struct_type) in struct_context.iter(){
-		use StructType::*;
-		match struct_type {
-		NonGeneric(fields) => {
-			let mut seen_fields: HashSet<&str> = HashSet::new();
-			for (field_name, field_type) in fields.iter(){
-				if seen_fields.contains(field_name){
-					errors.push(Error{
-						err: format!("struct {} contains two fields named {}", name, field_name.elt),
-						byte_offset: field_name.byte_offset, approx_len: field_type.byte_offset - field_name.byte_offset + field_type.byte_len, file_id: field_name.file_id
-					});
-				}
-				if let Err(err) = all_struct_names_valid(field_type, &struct_context, &None) {
-					errors.push(err);
-				}
-				seen_fields.insert(field_name.as_str());
-			}
-		},
-		Generic{type_var, fields, mode} => {
-			let mut seen_fields: HashSet<&str> = HashSet::new();
-			for (field_name, field_type) in fields.iter(){
-				if seen_fields.contains(field_name.as_str()){
-					errors.push(Error{
-						err: format!("struct {} contains two fields named {}", name, field_name.elt),
-						byte_offset: field_name.byte_offset, approx_len: field_type.byte_offset - field_name.byte_offset + field_type.byte_len, file_id: field_name.file_id
-					});
-				}
-				if let Err(err) = all_struct_names_valid(field_type, &struct_context, &Some((type_var.clone(), *mode))) {
-					errors.push(err);
-				}
-				seen_fields.insert(field_name.as_str());
-			}
+	for Struct{name, fields} in prog.structs.iter() {
+		if struct_context.contains_key(name.elt){
+			errors.push(Error{
+				err: format!("struct '{}' is declared more than once", name),
+				byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
+			});
+		} else {
+			let iter = fields.iter().map(|(t, n)| {(n.elt, t.elt)});
+			let allocated_slice = &*arena.alloc_slice_fill_iter(iter);
+			struct_context.insert(name.elt, StructType::NonGeneric(allocated_slice));
 		}
-	}}
+	}
+	for (mode, GenericStruct{name, var, fields}) in prog.erased_structs.iter()
+			.map(|s| (PolymorphMode::Erased, s))
+			.chain(prog.separated_structs.iter().map(|s| (PolymorphMode::Separated, s))) {
+		if struct_context.contains_key(name.elt){
+			errors.push(Error{
+				err: format!("struct '{}' is declared more than once", name),
+				byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
+			});
+		} else {
+			let iter = fields.iter().map(|(t, n)| (n.elt, t.elt));
+			let allocated_slice = &*arena.alloc_slice_fill_iter(iter);
+			struct_context.insert(name, StructType::Generic{
+				mode,
+				type_var: var,
+				fields: allocated_slice
+			});
+		}
+	}
+	//struct_context has been populated, now need to check for duplicate and invalid fields
+	//don't iterate through struct_context, iterate through gdecls again to get location info
+	for Struct{name, fields} in prog.structs.iter() {
+		let mut seen_fields: HashSet<&str> = HashSet::new();
+		for (field_type, field_name) in fields.iter() {
+			if seen_fields.contains(field_name.elt) {
+				errors.push(Error{
+					err: format!("struct {} contains two fields named {}", name.elt, field_name.elt),
+					byte_offset: field_name.byte_offset, approx_len: field_name.byte_len, file_id: field_name.file_id
+				});
+			}
+			if let Err(err) = all_struct_names_valid(field_type, &struct_context, &None) {
+				errors.push(err);
+			}
+			seen_fields.insert(field_name.elt);
+		}
+	}
+	for (mode, GenericStruct{name, var, fields}) in prog.erased_structs.iter()
+			.map(|s| (PolymorphMode::Erased, s))
+			.chain(prog.separated_structs.iter().map(|s| (PolymorphMode::Separated, s))) {
+		let mut seen_fields: HashSet<&str> = HashSet::new();
+		for (field_type, field_name) in fields.iter() {
+			if seen_fields.contains(field_name.elt) {
+				errors.push(Error{
+					err: format!("struct {} contains two fields named {}", name.elt, field_name.elt),
+					byte_offset: field_name.byte_offset, approx_len: field_name.byte_len, file_id: field_name.file_id
+				});
+			}
+			if let Err(err) = all_struct_names_valid(field_type, &struct_context, &Some((var, mode))) {
+				errors.push(err);
+			}
+			seen_fields.insert(field_name.elt);
+		}
+	}
 	//if there were non-existant structs/bad fields, can't really typecheck the rest
 	if !errors.is_empty() {
 		return Err(errors);
 	}
 	if let Err((msg, problematic_struct_name, problematic_field_opt)) = traverse_struct_context(&struct_context, typecache) {
-		errors.push(struct_err_with_loc(&*gdecls, msg, problematic_struct_name, problematic_field_opt));
+		errors.push(struct_err_with_loc(&*prog, msg, problematic_struct_name, problematic_field_opt));
 	}
 
 	let mut func_context: FuncContext = HashMap::new();
 	let mut global_context: GlobalContext = HashMap::new();
 
 	//first, check all external decls for c compatibility, and add them to the func_context
-	for g in gdecls.iter() { if let Extern{ret_type, name, arg_types} = g {
-		let mut bad_extern = false;
-		match func_context.get(name) {
+	for ExternalFunc{ret_type, name, arg_types} in prog.external_funcs.iter() {
+		match func_context.get(name.elt) {
 			Some(FuncType::NonGeneric{return_type, args}) => {
 				//extern declarations are allowed to be repeated if they have the same type
-				if return_type.elt != ret_type.elt {
-					bad_extern = true;
+				if return_type != &ret_type.elt {
+					use std::fmt::Write;
+					let mut msg = format!("Two extern function declarations of {} do not have the same return type (Previously declared with return type ", name.elt);
+					if let Some(t) = *return_type {
+						write!(&mut msg, "{}", t).unwrap();
+					} else {
+						msg.push_str("void");
+					}
+					msg.push_str(", declared again with return type ");
+					if let Some(t) = ret_type.elt {
+						write!(&mut msg, "{}", t).unwrap();
+					} else {
+						msg.push_str("void");
+					}
+					msg.push(')');
 					errors.push(Error{
-						err: format!("Two extern function declarations of {} do not have the same return type (Previously declared with return type {}, declared again with return type {})",
-							name.elt,
-							type_to_string_or_void(return_type.elt),
-							type_to_string_or_void(ret_type.elt)
-						), byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
+						err: msg, byte_offset: ret_type.byte_offset,
+						approx_len: ret_type.byte_len, file_id: ret_type.file_id
 					})
 				}
 				if args.len() != arg_types.len() {
-					bad_extern = true;
 					errors.push(Error{
 						err: format!("Two extern function declarations of {} do not have the same number of arguments (Previously declared with {} args, declared again with {} args)", name.elt, args.len(), arg_types.len()),
 						byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
 					});
 				}
 				for (i, (expected_ty, arg_ty_loc)) in args.iter().zip(arg_types.iter()).enumerate() {
-					if expected_ty != arg_ty_loc.elt {
-						bad_extern = true;
+					if expected_ty != &arg_ty_loc.elt {
 						errors.push(Error{
 							err: format!("Two extern function declarations of {} do not have the same type for argument {} (Previously declared with argument type {}, declared again with aragument type {})", name.elt, i+1, expected_ty, arg_ty_loc.elt),
 							byte_offset: arg_ty_loc.byte_offset, approx_len: arg_ty_loc.byte_len, file_id: arg_ty_loc.file_id
@@ -1707,256 +1806,287 @@ pub fn typecheck_program<'src: 'arena, 'arena>(gdecls: &mut [Gdecl<'src, 'arena>
 				//if it is already in the func context with the same types, no need to check those types
 				continue
 			},
-			None => (),
-			Some(FuncType::Generic{..}) => panic!("extern function {} already in func context as generic", name)
+			Some(FuncType::Generic{..}) => panic!("extern function {} already in func context as generic", name),
+			None => {
+				//first time seeing this extern, check all arg types and return type
+				let mut bad_extern = false;
+				for (i, arg_type) in arg_types.iter().enumerate() {
+					if let Err(err) = all_struct_names_valid(arg_type, &struct_context, &None) {
+						bad_extern = true;
+						errors.push(err);
+					} else if !type_is_c_compatible(arg_type, &struct_context) {
+						bad_extern = true;
+						errors.push(Error{
+							err: format!("argument {} to extern function {} has type {}, which is not C-compatible", i+1, name.elt, arg_type.elt),
+							byte_offset: arg_type.byte_offset, approx_len: arg_type.byte_len, file_id: arg_type.file_id
+						});
+					}
+				}
+				if let Some(ret) = ret_type.elt {
+					let ret_type_loc: Loc<&Ty<'src, 'arena>> = Loc{
+						elt: ret, byte_offset: ret_type.byte_offset, byte_len: ret_type.byte_len, file_id: ret_type.file_id
+					};
+					if let Err(err) = all_struct_names_valid(&ret_type_loc, &struct_context, &None) {
+						bad_extern = true;
+						errors.push(err);
+					} else if !type_is_c_compatible(ret, &struct_context) {
+						bad_extern = true;
+						errors.push(Error{
+							err: format!("extern function {} has return type {}, which is not C-compatible", name.elt, ret),
+							byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
+						});
+					}
+				}
+				if !bad_extern {
+					let arg_types_iter = arg_types.iter().map(|t_loc| t_loc.elt);
+					let allocated_slice = arena.alloc_slice_fill_iter(arg_types_iter);
+					func_context.insert(name.elt, FuncType::NonGeneric{
+						return_type: ret_type.elt,
+						args: allocated_slice
+					});
+				}
+			},
 		};
-		if bad_extern {
+	}
+	for Func{ret_type, name: func_name, args, ..} in prog.funcs.iter() {
+		if func_context.contains_key(func_name.elt) {
+			errors.push(Error{
+				err: format!("Function '{}' is declared more than once", func_name),
+				byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
+			});
 			continue
 		}
-		for (i, arg_type) in arg_types.iter().enumerate() {
-			if let Err(err) = all_struct_names_valid(arg_type, &struct_context, &None) {
-				bad_extern = true;
+		if global_context.contains_key(func_name.elt) {
+			errors.push(Error{
+				err: format!("Cannot declare a function named '{}', a global cariable of that name already exists", func_name.elt),
+				byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
+			});
+			continue
+		}
+		if let Some(ret) = ret_type.elt {
+			let ret_type_loc: Loc<&Ty<'src, 'arena>> = Loc{
+				elt: ret, byte_offset: ret_type.byte_offset, byte_len: ret_type.byte_len, file_id: ret_type.file_id
+			};
+			if let Err(err) = all_struct_names_valid(&ret_type_loc, &struct_context, &None) {
 				errors.push(err);
-			} else if !type_is_c_compatible(arg_type, &struct_context) {
-				bad_extern = true;
+				continue
+			} else if let Some(s) = ret.recursively_find_type_var() {
 				errors.push(Error{
-					err: format!("argument {} to extern function {} has type {}, which is not C-compatible", i+1, name.elt, arg_type.elt),
+					err: format!("Return type of non-generic function {} contains type variable '{}", func_name.elt, s),
+					byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
+				});
+				continue
+			}
+		}
+		let mut names: HashSet<&'src str> = HashSet::new();
+		for (arg_type, arg_name) in args.iter(){
+			if names.contains(arg_name.elt){
+				errors.push(Error{
+					err: format!("Function '{}' contains two arguments both named '{}'", func_name, arg_name),
+					byte_offset: arg_name.byte_offset, approx_len: arg_name.byte_len, file_id: arg_name.file_id
+				});
+			} else {
+				names.insert(arg_name.elt);
+			}
+			if let Err(e) = all_struct_names_valid(arg_type, &struct_context, &None) {
+				errors.push(e);
+			}
+			if let Some(s) = arg_type.recursively_find_type_var() {
+				errors.push(Error{
+					err: format!("found type variable '{} in type signature of non-generic function {}", s, func_name),
 					byte_offset: arg_type.byte_offset, approx_len: arg_type.byte_len, file_id: arg_type.file_id
 				});
 			}
 		}
-		if let Some(ret) = ret_type.elt {
-			if let Err(err) = all_struct_names_valid(ret, &struct_context, &None) {
-				bad_extern = true;
-				errors.push(err);
-			} else if !type_is_c_compatible(ret, &struct_context) {
-				bad_extern = true;
-				errors.push(Error{
-					err: format!("extern function {} has return type {}, which is not C-compatible", name.elt, ret),
-					byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: arg_type.file_id
-				});
-			}
-		}
-		if !bad_extern {
-			func_context.insert(name.clone(), FuncType::NonGeneric{
-				return_type: ret_type.clone(),
-				args: arg_types.clone()
+		let arg_types_iter = args.iter().map(|(t,_)| t.elt);
+		let allocated_slice = arena.alloc_slice_fill_iter(arg_types_iter);
+		func_context.insert(func_name.elt, FuncType::NonGeneric{
+			return_type: ret_type.elt,
+			args: allocated_slice
+		});
+	}
+	for (mode, GenericFunc{name: func_name, ret_type, args, var, ..}) in prog.erased_funcs.iter()
+			.map(|f| (PolymorphMode::Erased, f))
+			.chain(prog.separated_funcs.iter().map(|f| (PolymorphMode::Separated, f))) {
+		if func_context.contains_key(func_name.elt) {
+			errors.push(Error{
+				err: format!("Function '{}' is declared more than once", func_name),
+				byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
 			});
+			continue
 		}
-	}}
-	for g in gdecls.iter() { match g {
-		GFuncDecl{ret_type, name: func_name, args, ..} => {
-			if func_context.contains_key(func_name) {
-				errors.push(Error{
-					err: format!("Function '{}' is declared more than once", func_name),
-					byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
-				});
+		if global_context.contains_key(func_name.elt) {
+			errors.push(Error{
+				err: format!("Cannot declare a function named '{}', a global cariable of that name already exists", func_name.elt),
+				byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
+			});
+			continue
+		}
+		if let Some(ret) = ret_type.elt {
+			let ret_type_loc: Loc<&Ty<'src, 'arena>> = Loc{
+				elt: ret, byte_offset: ret_type.byte_offset, byte_len: ret_type.byte_len, file_id: ret_type.file_id
+			};
+			if let Err(e) = all_struct_names_valid(&ret_type_loc, &struct_context, &Some((var, mode))) {
+				errors.push(e);
 				continue
+			} else {
+				match ret.recursively_find_type_var() {
+					Some(s) if s != var.elt => {
+						errors.push(Error{
+							err: format!("Found unknown type variable '{} in return type of function {}", s, func_name),
+							byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
+						});
+						continue
+					}
+					_ => ()
+				};
 			}
-			if global_context.contains_key(func_name) {
+		}
+		let mut names: HashSet<&'src str> = HashSet::new();
+		for (arg_type, arg_name) in args.iter(){
+			if names.contains(arg_name.elt){
 				errors.push(Error{
-					err: format!("Cannot declare a function named '{}', a global cariable of that name already exists", func_name.elt),
-					byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
+					err: format!("Function '{}' contains two arguments both named '{}'", func_name, arg_name),
+					byte_offset: arg_name.byte_offset, approx_len: arg_name.byte_len, file_id: arg_name.file_id
 				});
-				continue
+			} else {
+				names.insert(arg_name.elt);
 			}
-			if let Some(ret) = ret_type.elt {
-				if let Err(err) = all_struct_names_valid(ret, &struct_context, &None) {
-					errors.push(err);
-					continue
-				} else if let Some(s) = ret.recursively_find_type_var() {
-					errors.push(Error{
-						err: format!("Return type of non-generic function {} contains type variable '{}", func_name.elt, s),
-						byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
-					});
-					continue
-				}
+			if let Err(e) = all_struct_names_valid(arg_type, &struct_context, &Some((var, mode))) {
+				errors.push(e);
 			}
-			let mut names: HashSet<&'src str> = HashSet::new();
-			for (arg_type, arg_name) in args.iter(){
-				if names.contains(arg_name.elt){
+			match arg_type.elt.recursively_find_type_var() {
+				Some(s) if s != var.elt => {
 					errors.push(Error{
-						err: format!("Function '{}' contains two arguments both named '{}'", func_name, arg_name),
-						byte_offset: arg_name.byte_offset, approx_len: arg_name.byte_len, file_id: arg_name.file_id
-					});
-				} else {
-					names.insert(arg_name.elt);
-				}
-				if let Err(e) = all_struct_names_valid(arg_type, &struct_context, &None) {
-					errors.push(e);
-				}
-				if let Some(s) = arg_type.recursively_find_type_var() {
-					errors.push(Error{
-						err: format!("found type variable '{} in type signature of non-generic function {}", s, func_name),
+						err: format!("Found unknown type variable '{} in type signature of function {}", s, func_name),
 						byte_offset: arg_type.byte_offset, approx_len: arg_type.byte_len, file_id: arg_type.file_id
 					});
 				}
+				_ => ()
 			}
-			func_context.insert(func_name.elt, FuncType::NonGeneric{
-				return_type: ret_type,
-				args: args.iter().map(|(t, _)| t).collect()
+		}
+		let arg_types_iter = args.iter().map(|(t, _)| t.elt);
+		let allocated_slice = arena.alloc_slice_fill_iter(arg_types_iter);
+		func_context.insert(func_name, FuncType::Generic {
+			return_type: ret_type.elt,
+			args: allocated_slice,
+			mode,
+			type_var: var,
+		});
+	}
+	for (t, name) in prog.global_vars.iter() {
+		if let Err(e) = all_struct_names_valid(t, &struct_context, &None) {
+			errors.push(e);
+		}
+		if let Some(s) = t.elt.recursively_find_type_var() {
+			errors.push(Error{
+				err: format!("Found type variable '{} in type of global variable", s),
+				byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
 			});
-		},
-		GGenericFuncDecl{name: func_name, ret_type, args, var, mode, ..} => {
-			if func_context.contains_key(func_name) {
-				errors.push(Error{
-					err: format!("Function '{}' is declared more than once", func_name),
-					byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
-				});
-				continue
-			}
-			if global_context.contains_key(func_name) {
-				errors.push(Error{
-					err: format!("Cannot declare a function named '{}', a global cariable of that name already exists", func_name.elt),
-					byte_offset: func_name.byte_offset, approx_len: func_name.byte_len, file_id: func_name.file_id
-				});
-				continue
-			}
-			if let Some(ret) = ret_type.elt {
-				if let Err(e) = all_struct_names_valid(ret, &struct_context, &Some((var.clone(), *mode))) {
-					errors.push(err);
-					continue
-				} else {
-					match ret.recursively_find_type_var() {
-						Some(s) if s != var.elt => {
-							errors.push(Error{
-								err: format!("Found unknown type variable '{} in return type of function {}", s, func_name),
-								byte_offset: ret_type.byte_offset, approx_len: ret_type.byte_len, file_id: ret_type.file_id
-							});
-							continue
-						}
-						_ => ()
-					};
-				}
-			}
-			let mut names: HashSet<&'src str> = HashSet::new();
-			for (arg_type, arg_name) in args.iter(){
-				if names.contains(arg_name.elt){
-					errors.push(Error{
-						err: format!("Function '{}' contains two arguments both named '{}'", func_name, arg_name),
-						byte_offset: arg_name.byte_offset, approx_len: arg_name.byte_len, file_id: arg_name.file_id
-					});
-				} else {
-					names.insert(arg_name.elt);
-				}
-				if let Err(e) = all_struct_names_valid(arg_type, &struct_context, &Some((var.clone(), *mode))) {
-					errors.push(e);
-				}
-				match arg_type.elt.recursively_find_type_var() {
-					Some(s) if s != var => {
-						errors.push(Error{
-							err: format!("Found unknown type variable '{} in type signature of function {}", s, func_name),
-							byte_offset: arg_type.byte_offset, approx_len: arg_type.byte_len, file_id: arg_type.file_id
-						});
-					}
-					_ => ()
-				}
-			}
-			func_context.insert(func_name, FuncType::Generic {
-				return_type: ret_type,
-				args: args.iter().map(|(t, _)| t).collect(),
-				mode: *mode,
-				type_var: var,
+		}
+		if global_context.contains_key(name.elt) {
+			errors.push(Error{
+				err: format!("Cannot have two global variables both named '{}'", name),
+				byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
 			});
-		},
-		//need to make sure there are no name collisions between global vars and functions
-		GVarDecl(t, name) => {
-			if let Err(e) = all_struct_names_valid(t, &struct_context, &None) {
-				errors.push(e);
-			}
-			if let Some(s) = t.elt.recursively_find_type_var() {
-				errors.push(Error{
-					err: format!("Found type variable '{} in type of global variable", s),
-					byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
-				});
-			}
-			if global_context.contains_key(name) {
-				errors.push(Error{
-					err: format!("Cannot have two global variables both named '{}'", name),
-					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
-				});
-			}
-			if func_context.contains_key(name) {
-				errors.push(Error{
-					err: format!("cannot declare global variable '{}', a function is already declared with that name", name),
-					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
-				});
-			}
-			//a global var needs to have a known size at compile time, so it cannot be an erased struct,
-			//or any array of erased structs, or a struct that contains an erased struct
-			if t.is_DST(&struct_context, None) {
-				errors.push(Error{
-					err: format!("global variable {} does not have a statically known size because it contains an erased struct", name),
-					byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
-				});
-			}
-			global_context.insert(name, t);
-		},
-		GStructDecl{..} | GGenericStructDecl{..} | Extern{..} => ()
-	}};
+		}
+		if func_context.contains_key(name.elt) {
+			errors.push(Error{
+				err: format!("cannot declare global variable '{}', a function is already declared with that name", name),
+				byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
+			});
+		}
+		//a global var needs to have a known size at compile time, so it cannot be an erased struct,
+		//or any array of erased structs, or a struct that contains an erased struct
+		if t.elt.is_DST(&struct_context, None, typecache) {
+			errors.push(Error{
+				err: format!("global variable {} does not have a statically known size because it contains an erased struct", name),
+				byte_offset: t.byte_offset, approx_len: t.byte_len, file_id: t.file_id
+			});
+		}
+		global_context.insert(name, t);
+	}
 	if !errors.is_empty() {
 		return Err(errors);
 	}
-	for g in gdecls.iter_mut(){ match g {
-		GFuncDecl{ret_type, name, args, body} => {
-			let (mut ctxt, _) = get_empty_localtypecontext();
-			//kind of weird, but in order to keep the LocalTypeContext the same and avoid
-			//cloning the struct_context all the time, I need to move it into this temporary
-			//ctxt variable, then move it back out (same for global_context)
-			ctxt.globals = global_context;
-			ctxt.structs = struct_context;
-			typecheck_func_decl(&mut ctxt, &func_context, name, args, body, ret_type)?;
-			struct_context = ctxt.structs;
-			global_context = ctxt.globals;
-		},
-		GGenericFuncDecl{ret_type, name, args, body, var, mode} => {
-			let (mut ctxt, _) = get_empty_localtypecontext();
-			ctxt.type_var = Some((var.clone(), *mode));		
-			ctxt.globals = global_context;
-			ctxt.structs = struct_context;
-			typecheck_func_decl(&mut ctxt, &func_context, name, args, body, ret_type)?;
-			struct_context = ctxt.structs;
-			global_context = ctxt.globals;
+	for Func{ret_type, name, args, body} in prog.funcs.iter_mut() {
+		let (mut ctxt, _) = get_empty_localtypecontext();
+		//kind of weird, but in order to keep the LocalTypeContext the same and avoid
+		//cloning the struct_context all the time, I need to move it into this temporary
+		//ctxt variable, then move it back out (same for global_context)
+		ctxt.globals = global_context;
+		ctxt.structs = struct_context;
+		if let Err(mut errs) = typecheck_func_decl(&mut ctxt, &func_context, name, args, body, ret_type.elt, typecache) {
+			errors.append(&mut errs);
 		}
-		_ => ()
-	}};
+		struct_context = ctxt.structs;
+		global_context = ctxt.globals;
+	}
+	for (mode, GenericFunc{name: func_name, ret_type, args, var, body}) in prog.erased_funcs.iter_mut()
+			.map(|f| (PolymorphMode::Erased, f))
+			.chain(prog.separated_funcs.iter_mut().map(|f| (PolymorphMode::Separated, f))) {
+		let (mut ctxt, _) = get_empty_localtypecontext();
+		ctxt.type_var = Some((var.elt, mode));		
+		ctxt.globals = global_context;
+		ctxt.structs = struct_context;
+		if let Err(mut errs) = typecheck_func_decl(&mut ctxt, &func_context, func_name, args, body, ret_type.elt, typecache) {
+			errors.append(&mut errs);
+		}
+		struct_context = ctxt.structs;
+		global_context = ctxt.globals;
+	}
 
-	fn err_with_main_loc<'src: 'arena, 'arena>(msg: String, gdecls: &[Gdecl<'src, 'arena>]) -> Error {
-		for g in gdecls.iter() { match g {
-			GFuncDecl{name, ..} | GGenericFuncDecl{name, ..} if name.elt == "main" {
+	fn err_with_main_loc<'src: 'arena, 'arena, Iter>(msg: String, names: Iter) -> Error
+		where Iter: Iterator<Item = Loc<&'src str>> {
+		for name in names {
+			if name.elt == "main" {
 				return Error{
-					err: msg,
-					byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
+					err: msg, byte_offset: name.byte_offset, approx_len: name.byte_len, file_id: name.file_id
 				}
 			}
-		}}
+		}
 		panic!("no gdecl found with name main")
 	}
 
 	//make sure main has the right type signature
-	match func_context.get("main") {
-		Some(FuncType::Generic{..}) => {
-			errors.push(err_with_main_loc("main() cannot be a generic function".to_owned(), &*gdecls));
-		}
+	let main_err_msg: Option<(String, Option<PolymorphMode>)> = match func_context.get("main") {
+		Some(FuncType::Generic{mode, ..}) => {
+			Some(("main() cannot be a generic function".to_owned(), Some(*mode)))
+		},
 		Some(FuncType::NonGeneric{return_type, args}) => {
-			let return_type_is_correct = return_type == &Some(Ty::Int{
+			let return_type_is_correct = return_type == &Some(&Ty::Int{
 				signed: true, size: IntSize::Size32
 			});
 			let args_are_correct_simple = args.is_empty();
 			let args_are_correct_extended =
 				args.len() == 2
-				&& args[0].elt == Ty::Int{signed: true, size: IntSize::Size32}
-				&& args[1].elt == Ty::Ptr(Some(&Ty::Ptr(Some(
+				&& args[0] == &Ty::Int{signed: true, size: IntSize::Size32}
+				&& args[1] == &Ty::Ptr(Some(&Ty::Ptr(Some(
 					&Ty::Int{signed: false, size: IntSize::Size8}
 				))))
 			;
 			let args_are_correct = args_are_correct_simple || args_are_correct_extended;
 			if !return_type_is_correct || !args_are_correct {
-				errors.push(err_with_main_loc("main() must have type i32 main() or i32 main(i32, u8**)".to_owned(), &*gdecls));
+				Some(("main() must have type i32 main() or i32 main(i32, u8**)".to_owned(), None))
+			} else {
+				None
 			}
 		},
+		None => None
+	};
+	//only find main loc if there is a type error with main
+	match main_err_msg {
+		Some((msg, None)) => {
+			errors.push(err_with_main_loc(msg, prog.funcs.iter().map(|f| f.name)));
+		},
+		Some((msg, Some(PolymorphMode::Erased))) => {
+			errors.push(err_with_main_loc(msg, prog.erased_funcs.iter().map(|f| f.name)));
+		},
+		Some((msg, Some(PolymorphMode::Separated))) => {
+			errors.push(err_with_main_loc(msg, prog.separated_funcs.iter().map(|f| f.name)));
+		},
 		None => ()
-	}
+	};
 	if errors.is_empty() {
 		Ok(ProgramContext{
 			structs: struct_context,

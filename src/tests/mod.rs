@@ -1,416 +1,139 @@
-use super::ast;
-use super::oldparser;
-
-#[test]
-fn parse_type_test(){
-	use ast::{Ty, IntSize, FloatSize};
-	let tests = vec![
-		("u8", Ty::Int{signed: false, size: IntSize::Size8}),
-		("i64", Ty::Int{signed: true, size: IntSize::Size64}),
-		("f32", Ty::Float(FloatSize::FSize32)),
-		("bool", Ty::Bool),
-		("u8 * ", Ty::Ptr(Some(Box::new(Ty::Int{signed: false, size: IntSize::Size8})))),
-		("void*", Ty::Ptr(None)),
-		("struct\tvector", Ty::Struct(String::from("vector"))),
-		("struct vector@<bool>", Ty::GenericStruct{type_param: Box::new(Ty::Bool), name: "vector".to_owned()}),
-		("u8 [64]", Ty::Array{length: 64, typ: Box::new(Ty::Int{signed: false, size: IntSize::Size8})}),
-		("'\nT\n", Ty::TypeVar(String::from("T"))),
-		("'E**", Ty::Ptr(Some(Box::new(Ty::Ptr(Some(Box::new(Ty::TypeVar(String::from("E")))))))))
-	];
-	let type_parser = oldparser::TypeParser::new();
-	let mut all_succeeded = true;
-	for (test_str, expected_parse) in tests {
-		match type_parser.parse(test_str) {
-			Ok(parse_result) => {
-				if parse_result != expected_parse {
-					println!("Parse mistake: {:?} parses as {}, not {}", test_str, parse_result, expected_parse);
-					all_succeeded = false;
-				}
-			},
-			Err(error) => {
-				println!("Parse error on {:?}: {}", test_str, error);
-				all_succeeded = false;
-			}
-		}
-	}
-	if !all_succeeded {
-		panic!();
-	}
-}
-
-#[test]
-fn parse_expr_test(){
-	use ast::{Expr, Ty, BinaryOp, UnaryOp};
-	let tests = vec![
-		("//Comments work\nnull", Expr::LitNull),
-		("/*block\tcomments\ntoo*/ true", Expr::LitBool(true)),
-		("987", Expr::LitSignedInt(987)),
-		("0xA", Expr::LitSignedInt(10)),
-		("10u", Expr::LitUnsignedInt(10)),
-		("0XFEu", Expr::LitUnsignedInt(254)),
-		("\"abc\"", Expr::LitString("abc".to_owned())),
-		("my_var", Expr::Id("my_var".to_owned())),
-		("array[5u]", Expr::Index(
-			Box::new(Expr::Id("array".to_owned())),
-			Box::new(Expr::LitUnsignedInt(5))
-		)),
-		("point.x", Expr::Proj(Box::new(Expr::Id("point".to_owned())), "x".to_owned())),
-		("malloc(64)", Expr::Call(
-			"malloc".to_owned(), 
-			vec![Expr::LitSignedInt(64)]
-		)),
-		("cast(u8,null)", Expr::Cast(
-			Ty::Int{signed:false, size: ast::IntSize::Size8},
-			Box::new(Expr::LitNull)
-		)),
-		("8 + 8", Expr::Binop(
-			Box::new(Expr::LitSignedInt(8)),
-			BinaryOp::Add,
-			Box::new(Expr::LitSignedInt(8)),
-		)),
-		("~ true", Expr::Unop(
-			UnaryOp::Bitnot,
-			Box::new(Expr::LitBool(true))
-		)),
-		("&false", Expr::GetRef(Box::new(Expr::LitBool(false)))),
-		("*null", Expr::Deref(Box::new(Expr::LitNull))),
-		("sizeof (struct vector) ", Expr::Sizeof(Ty::Struct("vector".to_owned()))),
-		("null*null+null", Expr::Binop(
-			Box::new(Expr::Binop(
-				Box::new(Expr::LitNull),
-				BinaryOp::Mul,
-				Box::new(Expr::LitNull)
-			)),
-			BinaryOp::Add,
-			Box::new(Expr::LitNull)
-		)),
-		("!f(cast(u8*, x), ~-x) + 1",
-			Expr::Binop(
-				Box::new(Expr::Unop(
-					UnaryOp::Lognot,
-					Box::new(Expr::Call(
-						"f".to_owned(),
-						vec![
-							Expr::Cast(
-								Ty::Ptr(Some(Box::new(
-									Ty::Int{signed: false, size: ast::IntSize::Size8}
-								))),
-								Box::new(Expr::Id("x".to_owned()))
-							),
-							Expr::Unop(
-								UnaryOp::Bitnot,
-								Box::new(
-									Expr::Unop(
-										UnaryOp::Neg,
-										Box::new(
-											Expr::Id("x".to_owned())
-										)
-									)
-								)
-							)
-						]
-					))
-				)),
-				BinaryOp::Add,
-				Box::new(Expr::LitSignedInt(1))
-			)
-		),
-		("print@<bool>(null)",
-			Expr::GenericCall{
-				name: "print".to_owned(),
-				type_param: Ty::Bool,
-				args: vec![
-					Expr::LitNull
-				]
-			}
-		)
-	];
-	let expr_parser = oldparser::ExprParser::new();
-	let mut all_succeeded = true;
-	for (test_str, expected_parse) in tests {
-		match expr_parser.parse(test_str) {
-			Ok(parse_result) => {
-				if parse_result != expected_parse {
-					println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
-					all_succeeded = false;
-				}
-			},
-			Err(error) => {
-				println!("Parse error on {:?}: {}", test_str, error);
-				all_succeeded = false;
-			}
-		}
-	}
-	if !all_succeeded {
-		panic!();
-	}
-}
-
-#[test]
-fn parse_stmt_test(){
-	use ast::{Ty, Expr, Stmt};
-	let tests = vec![
-		("x = 4;", Stmt::Assign(
-			Expr::Id("x".to_owned()),
-			Expr::LitSignedInt(4)
-		)),
-		("bool b;", Stmt::Decl(
-			Ty::Bool,
-			"b".to_owned()
-		)),
-		("return;", Stmt::Return(None)),
-		("return null;", Stmt::Return(Some(Expr::LitNull))),
-		("f();", Stmt::SCall("f".to_owned(), vec![])),
-		("f@<bool>();", Stmt::GenericSCall{
-				name: "f".to_owned(),
-				type_param: Ty::Bool,
-				args: vec![]
-			}
-		),
-		("while true { x = 4; }", Stmt::While(Expr::LitBool(true), vec![
-			Stmt::Assign(Expr::Id("x".to_owned()), Expr::LitSignedInt(4))
-		])),
-		("if true { return; }", Stmt::If(Expr::LitBool(true),
-			vec![
-				Stmt::Return(None)
-			],
-			vec![]
-		)),
-		("if true{return;}else{x=y;}", Stmt::If(Expr::LitBool(true),
-			vec![
-				Stmt::Return(None)
-			],
-			vec![
-				Stmt::Assign(Expr::Id("x".to_owned()), Expr::Id("y".to_owned()))
-			]
-		)),
-		("if true{return;}else if false{}else{x=y;}", Stmt::If(Expr::LitBool(true),
-			vec![
-				Stmt::Return(None)
-			],
-			vec![
-				Stmt::If(Expr::LitBool(false),
-					vec![],
-					vec![
-						Stmt::Assign(Expr::Id("x".to_owned()), Expr::Id("y".to_owned()))
-					]
-				)
-			]
-		)),
-			
-	];
-	let stmt_parser = oldparser::StmtParser::new();
-	let mut all_succeeded = true;
-	for (test_str, expected_parse) in tests {
-		match stmt_parser.parse(test_str) {
-			Ok(parse_result) => {
-				if parse_result != expected_parse {
-					println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
-					all_succeeded = false;
-				}
-			},
-			Err(error) => {
-				println!("Parse error on {:?}: {}", test_str, error);
-				all_succeeded = false;
-			}
-		}
-	}
-	if !all_succeeded {
-		panic!();
-	}
-}
-
-#[test]
-fn parse_gdecl_test(){
-	use ast::{Gdecl, Ty, PolymorphMode};
-	let tests = vec![
-		("bool x;", Gdecl::GVarDecl(Ty::Bool, "x".to_owned())),
-		("bool f(){return;}", Gdecl::GFuncDecl{
-			ret_type: Some(Ty::Bool),
-			name: "f".to_owned(),
-			args: vec![],
-			body: vec![
-					ast::Stmt::Return(None)
-				]
-		}),
-		("void g(bool x, bool y){}", Gdecl::GFuncDecl{
-			ret_type: None,
-			name: "g".to_owned(),
-			args: vec![
-				(Ty::Bool, "x".to_owned()),
-				(Ty::Bool, "y".to_owned())
-				],
-			body: vec![]
-		}),
-		("struct a{bool x;bool y;}", Gdecl::GStructDecl{
-			name: "a".to_owned(),
-			fields: vec![
-				(Ty::Bool, "x".to_owned()),
-				(Ty::Bool, "y".to_owned())
-			]
-		}),
-		("struct a@<erased 'T>{}", Gdecl::GGenericStructDecl{
-			name: "a".to_owned(),
-			var: "T".to_owned(),
-			mode: PolymorphMode::Erased,
-			fields: vec![]
-		}),
-		("void h@<separated 'T>(){}", Gdecl::GGenericFuncDecl{
-			ret_type: None,
-			name: "h".to_owned(),
-			args: vec![],
-			body: vec![],
-			var: "T".to_owned(),
-			mode: PolymorphMode::Separated
-		})
-	];
-	let gdecl_parser = oldparser::GDeclParser::new();
-	let mut all_succeeded = true;
-	for (test_str, expected_parse) in tests {
-		match gdecl_parser.parse(test_str) {
-			Ok(parse_result) => {
-				if parse_result != expected_parse {
-					println!("Parse mistake: {:?} parses as {:?}, not {:?}", test_str, parse_result, expected_parse);
-					all_succeeded = false;
-				}
-			},
-			Err(error) => {
-				println!("Parse error on {:?}: {}", test_str, error);
-				all_succeeded = false;
-			}
-		}
-	}
-	if !all_succeeded {
-		panic!();
-	}
-}
-
 mod typechecking_tests {
 	use crate::typechecker::*;
-	use crate::ast::*;
-	use crate::ast::Ty::*;
-	use super::oldparser;
-	fn setup_expr(expr: &str) -> Result<Ty, String>{
+	//use crate::ast::*;
+	//use crate::ast::Ty::*;
+	use crate::ast2::*;
+	use crate::ast2::Ty::*;
+	use crate::driver::Error;
+	fn setup_expr<'src: 'arena, 'arena>(expr: &'src str, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<&'arena Ty<'src, 'arena>, Vec<Error>>{
 		let (mut ctxt, func_context) = get_empty_localtypecontext();
-		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context)
+		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, &func_context, arena, typecache)
 	}
-	fn setup_expr_with_localtypecontext(expr: &str, ctxt: &mut LocalTypeContext) -> Result<Ty, String>{
+	fn setup_expr_with_localtypecontext<'src: 'arena, 'arena: 'ctxt, 'ctxt>(expr: &'src str, ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<&'arena Ty<'src, 'arena>, Vec<Error>>{
 		let (_, funcs) = get_empty_localtypecontext();
-		setup_expr_with_localtypecontext_and_funcs(expr, ctxt, &funcs)
+		setup_expr_with_localtypecontext_and_funcs(expr, ctxt, &funcs, arena, typecache)
 	}
-	fn setup_expr_with_funcs(expr: &str, funcs: &FuncContext) -> Result<Ty, String>{
+	fn setup_expr_with_funcs<'src: 'arena, 'arena>(expr: &'src str, funcs: &FuncContext<'src, 'arena>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<&'arena Ty<'src, 'arena>, Vec<Error>>{
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs)
+		setup_expr_with_localtypecontext_and_funcs(expr, &mut ctxt, funcs, arena, typecache)
 	}
-	fn setup_expr_with_localtypecontext_and_funcs(expr: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext) -> Result<Ty, String>{
-		let expr_parser = oldparser::ExprParser::new();
-		let expr = expr_parser.parse(expr).expect("parse error");
-		typecheck_expr(ctxt, funcs, &expr)
+	fn setup_expr_with_localtypecontext_and_funcs<'src: 'arena, 'arena: 'ctxt, 'ctxt>(expr: &'src str, ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>, funcs: &'ctxt FuncContext<'src, 'arena>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<&'arena Ty<'src, 'arena>, Vec<Error>>{
+		use crate::parser::tests::parse_as_expr;
+		let mut e: Loc<TypedExpr<'src, 'arena>> = parse_as_expr(expr, arena, typecache)?;
+		typecheck_expr(ctxt, funcs, &mut e, typecache)?;
+		Ok(e.elt.typ.unwrap())
 	}
 	#[test]
 	fn typecheck_expr_test(){
 		use std::collections::HashMap;
-		assert_eq!(setup_expr("true").unwrap(), Bool);
-		assert_eq!(setup_expr("38").unwrap(), Int{signed:true, size: IntSize::Size64});
+		use crate::parser::tests::get_typecache;
+		let arena = bumpalo::Bump::new();
+		let mut arena_for_typecache = bumpalo::Bump::new();
+		let typecache = get_typecache(&mut arena_for_typecache);
+		assert_eq!(setup_expr("true", &arena, &typecache).unwrap(), &Bool);
+		assert_eq!(setup_expr("38", &arena, &typecache).unwrap(), &Int{signed:true, size: IntSize::Size64});
 		//Can't index off of array literals
 		//assert_eq!(setup_expr("\"abc\"[{1, 2, 3}[0]]").unwrap(), Int{signed: false, size: IntSize::Size8});
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		let _ = ctxt.locals.insert("x".to_owned(), Bool);
-		assert_eq!(setup_expr_with_localtypecontext("x", &mut ctxt).unwrap(), Bool);
+		ctxt.locals.insert("x", &Bool);
+		assert_eq!(setup_expr_with_localtypecontext("x", &mut ctxt, &arena, &typecache).unwrap(), &Bool);
 		let mut funcs = HashMap::new();
-		let _ = funcs.insert("f".to_owned(), FuncType::NonGeneric{
-			args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
-			return_type: Some(Struct("abc".to_owned()))
+		funcs.insert("f", FuncType::NonGeneric{
+			args: &[&Bool, &Int{signed: true, size: IntSize::Size64}],
+			return_type: Some(&Struct("abc"))
 		});
-		assert_eq!(setup_expr_with_funcs("f(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
+		assert_eq!(setup_expr_with_funcs("f(true, 5)", &funcs, &arena, &typecache).unwrap(), &Struct("abc"));
 		let mut funcs = HashMap::new();
-		let _ = funcs.insert("f".to_owned(), FuncType::Generic{
-			args: vec![Bool, TypeVar("T".to_owned())],
+		let _ = funcs.insert("f", FuncType::Generic{
+			args: &[&Bool, &TypeVar("T")],
 			mode: PolymorphMode::Erased,
-			type_var: "T".to_owned(),
-			return_type: Some(Struct("abc".to_owned()))
+			type_var: "T",
+			return_type: Some(&Struct("abc"))
 		});
-		assert_eq!(setup_expr_with_funcs("f@<i64>(true, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
-		assert!(setup_expr("cast(u8*, 5)").is_err());
-		assert!(setup_expr("f()").is_err());
-		assert_eq!(setup_expr("~cast(u8, 4)").unwrap(), Int{signed: false, size: IntSize::Size8});
+		assert_eq!(setup_expr_with_funcs("f@<i64>(true, 5)", &funcs, &arena, &typecache).unwrap(), &Struct("abc"));
+		assert!(setup_expr("cast(u8*, 5)", &arena, &typecache).is_err());
+		assert!(setup_expr("f()", &arena, &typecache).is_err());
+		assert_eq!(setup_expr("~cast(u8, 4)", &arena, &typecache).unwrap(), &Int{signed: false, size: IntSize::Size8});
 		//assert_eq!(setup_expr("&({1, 2, 3}[0])").unwrap(), Ptr(Some(Box::new(Int{signed: true, size: IntSize::Size64}))));
-		assert_eq!(setup_expr("*\"abc\"").unwrap(), Int{signed: false, size: IntSize::Size8});
-		assert_eq!(setup_expr("sizeof(bool)").unwrap(), Int{signed: false, size: IntSize::Size64});
-		assert!(setup_expr("&true").is_err());
-		assert_eq!(setup_expr("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
-		assert_eq!(setup_expr("8 + 9").unwrap(), Int{signed: true, size: IntSize::Size64});
-		assert!(setup_expr("3.0 + 4").is_err());
-		assert_eq!(setup_expr("3 & cast(i32, 1)").unwrap(), Int{signed: true, size: IntSize::Size64});
-		assert!(setup_expr("true % 3.4").is_err());
+		assert_eq!(setup_expr("*\"abc\"", &arena, &typecache).unwrap(), &Int{signed: false, size: IntSize::Size8});
+		assert_eq!(setup_expr("sizeof(bool)", &arena, &typecache).unwrap(), &Int{signed: false, size: IntSize::Size64});
+		assert!(setup_expr("&true", &arena, &typecache).is_err());
+		assert_eq!(setup_expr("8 + 9", &arena, &typecache).unwrap(), &Int{signed: true, size: IntSize::Size64});
+		assert_eq!(setup_expr("8 + 9", &arena, &typecache).unwrap(), &Int{signed: true, size: IntSize::Size64});
+		assert!(setup_expr("3.0 + 4", &arena, &typecache).is_err());
+		assert_eq!(setup_expr("3 & 1i32", &arena, &typecache).unwrap(), &Int{signed: true, size: IntSize::Size64});
+		assert!(setup_expr("true % 3.4", &arena, &typecache).is_err());
 		let mut funcs = HashMap::new();
-		let _ = funcs.insert("f".to_owned(), FuncType::Generic{
-			args: vec![TypeVar("T".to_owned()), Int{signed: true, size: IntSize::Size64}],
+		let _ = funcs.insert("f", FuncType::Generic{
+			args: &[&TypeVar("T"), &Int{signed: true, size: IntSize::Size64}],
 			mode: PolymorphMode::Separated,
-			type_var: "T".to_owned(),
-			return_type: Some(Struct("abc".to_owned()))
+			type_var: "T",
+			return_type: Some(&Struct("abc"))
 		});
-		assert_eq!(setup_expr_with_funcs("f@<bool>(5 == 5, 5)", &funcs).unwrap(), Struct("abc".to_owned()));
-		assert!(setup_expr_with_funcs("f(true, 5)", &funcs).is_err());
-		assert_eq!(setup_expr("printf(\"abc\", 7, 8,8%8,8u,8)").unwrap(), Int{signed:true, size: IntSize::Size32});
-		assert!(setup_expr("fprintf(3, 5 + 5u)").is_err());
+		assert_eq!(setup_expr_with_funcs("f@<bool>(5 == 5, 5i64)", &funcs, &arena, &typecache).unwrap(), &Struct("abc"));
+		assert!(setup_expr_with_funcs("f(true, 5)", &funcs, &arena, &typecache).is_err());
+		assert_eq!(setup_expr("printf(\"abc\", 7, 8,8%8,8u64,8)", &arena, &typecache).unwrap(), &Int{signed:true, size: IntSize::Size32});
+		assert!(setup_expr("dprintf(3, \"a\", 5 + 5u64)", &arena, &typecache).is_err());
 	}
-	fn setup_stmt(stmt: &str, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+	fn setup_block<'src: 'arena, 'arena>(block: &'src str, expected_ret_ty: Option<&'arena Ty<'src, 'arena>>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>>{
 		let (mut ctxt, func_context) = get_empty_localtypecontext();
-		setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, &func_context, expected_ret_ty)
+		setup_block_with_localtypecontext_and_funcs(block, &mut ctxt, &func_context, expected_ret_ty, arena, typecache)
 	}
-	fn setup_stmt_with_localtypecontext(stmt: &str, ctxt: &mut LocalTypeContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+	fn setup_block_with_localtypecontext<'src: 'arena, 'arena: 'ctxt, 'ctxt>(block: &'src str, ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>, expected_ret_ty: Option<&'arena Ty<'src, 'arena>>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>>{
 		let (_, funcs) = get_empty_localtypecontext();
-		setup_stmt_with_localtypecontext_and_funcs(stmt, ctxt, &funcs, expected_ret_ty)
+		setup_block_with_localtypecontext_and_funcs(block, ctxt, &funcs, expected_ret_ty, arena, typecache)
 	}
-	fn setup_stmt_with_funcs(stmt: &str, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
+	fn setup_block_with_funcs<'src: 'arena, 'arena>(block: &'src str, funcs: &FuncContext<'src, 'arena>, expected_ret_ty: Option<&'arena Ty<'src, 'arena>>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>>{
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		setup_stmt_with_localtypecontext_and_funcs(stmt, &mut ctxt, funcs, expected_ret_ty)
+		setup_block_with_localtypecontext_and_funcs(block, &mut ctxt, funcs, expected_ret_ty, arena, typecache)
 	}
-	fn setup_stmt_with_localtypecontext_and_funcs(stmt: &str, ctxt: &mut LocalTypeContext, funcs: &FuncContext, expected_ret_ty: Option<Ty>) -> Result<bool, String>{
-		let stmt_parser = oldparser::StmtParser::new();
-		let stmt = stmt_parser.parse(stmt).expect("parse error");
-		typecheck_stmt(ctxt, funcs, &stmt, &expected_ret_ty)
+	fn setup_block_with_localtypecontext_and_funcs<'src: 'arena, 'arena: 'ctxt, 'ctxt>(block: &'src str, ctxt: &'ctxt mut LocalTypeContext<'src, 'arena>, funcs: &'ctxt FuncContext<'src, 'arena>, expected_ret_ty: Option<&'arena Ty<'src, 'arena>>, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Result<bool, Vec<Error>>{
+		use crate::parser::tests::parse_as_block;
+		let mut b: Loc<Block<'src, 'arena>> = parse_as_block(block, arena, typecache)?;
+		typecheck_block(ctxt, funcs, &mut b.elt, expected_ret_ty, typecache)
 	}
 	#[test]
-	fn typecheck_stmt_test(){
+	fn typecheck_block_test(){
 		use std::collections::HashMap;
-		assert!(!setup_stmt("u8 x;", None).unwrap());
+		use crate::parser::tests::get_typecache;
+		let arena = bumpalo::Bump::new();
+		let mut arena_for_typecache = bumpalo::Bump::new();
+		let typecache = get_typecache(&mut arena_for_typecache);
+		assert!(!setup_block("{u8 x;}", None, &arena, &typecache).unwrap());
 		let (mut ctxt, _) = get_empty_localtypecontext();
-		let _ = ctxt.locals.insert("x".to_owned(), Bool);
-		assert!(!setup_stmt_with_localtypecontext("x = true;", &mut ctxt, None).unwrap());
-		assert!(setup_stmt_with_localtypecontext("bool x;", &mut ctxt, None).is_err());
-		assert!(setup_stmt("return;", None).unwrap());
-		assert!(setup_stmt("return 3.0;", Some(Float(FloatSize::FSize64))).unwrap());
-		assert!(setup_stmt("return;", Some(Bool)).is_err());
-		assert!(setup_stmt("return 3;", None).is_err());
-		assert!(setup_stmt("return 3;", Some(Bool)).is_err());
+		let _ = ctxt.locals.insert("x", &Bool);
+		assert!(!setup_block_with_localtypecontext("{x = true;}", &mut ctxt, None, &arena, &typecache).unwrap());
+		assert!(setup_block_with_localtypecontext("{bool x;}", &mut ctxt, None, &arena, &typecache).is_err());
+		assert!(setup_block("{return;}", None, &arena, &typecache).unwrap());
+		assert!(setup_block("{return 3.0;}", Some(&Float(FloatSize::FSize64)), &arena, &typecache).unwrap());
+		assert!(setup_block("{return;}", Some(&Bool), &arena, &typecache).is_err());
+		assert!(setup_block("{return 3;}", None, &arena, &typecache).is_err());
+		assert!(setup_block("{return 3;}", Some(&Bool), &arena, &typecache).is_err());
 		let mut funcs = HashMap::new();
-		let _ = funcs.insert("f".to_owned(), FuncType::NonGeneric{
-			args: vec![Bool, Int{signed: true, size: IntSize::Size64}],
-			return_type: Some(Struct("abc".to_owned()))
+		let _ = funcs.insert("f", FuncType::NonGeneric{
+			args: &[&Bool, &Int{signed: true, size: IntSize::Size64}],
+			return_type: Some(&Struct("abc"))
 		});
-		assert!(!setup_stmt_with_funcs("f(true, 7);", &funcs, None).unwrap());
+		assert!(!setup_block_with_funcs("{f(true, 7);}", &funcs, None, &arena, &typecache).unwrap());
 		let mut funcs = HashMap::new();
-		let _ = funcs.insert("f".to_owned(), FuncType::Generic{
-			args: vec![Bool, TypeVar("T".to_owned())],
+		let _ = funcs.insert("f", FuncType::Generic{
+			args: &[&Bool, &TypeVar("T")],
 			mode: PolymorphMode::Erased,
-			type_var: "T".to_owned(),
-			return_type: Some(Struct("abc".to_owned()))
+			type_var: "T",
+			return_type: Some(&Struct("abc"))
 		});
-		assert!(!setup_stmt_with_funcs("f@<i64>(true, 5);", &funcs, None).unwrap());
-		assert!(setup_stmt("if true {return true;} else {return false;}", Some(Bool)).unwrap());
-		assert!(!setup_stmt("if true {return true;}", Some(Bool)).unwrap());
-		assert!(setup_stmt("if 3 {return true;}", Some(Bool)).is_err());
-		assert!(setup_stmt("if true {x = 4;}", None).is_err());
-		assert!(!setup_stmt("while true {return;}", None).unwrap());
-		assert!(!setup_stmt("while true {}", None).unwrap());
-		assert!(setup_stmt("while 3 {}", None).is_err());
+		assert!(!setup_block_with_funcs("{f@<i64>(true, 5);}", &funcs, None, &arena, &typecache).unwrap());
+		assert!(setup_block("{if true {return true;} else {return false;}}", Some(&Bool), &arena, &typecache).unwrap());
+		assert!(!setup_block("{if true {return true;}}", Some(&Bool), &arena, &typecache).unwrap());
+		assert!(setup_block("{if 3 {return true;}}", Some(&Bool), &arena, &typecache).is_err());
+		assert!(setup_block("{if true {x = 4;}}", None, &arena, &typecache).is_err());
+		assert!(!setup_block("{while true {return;}}", None, &arena, &typecache).unwrap());
+		assert!(!setup_block("{while true {}}", None, &arena, &typecache).unwrap());
+		assert!(setup_block("{while 3 {}}", None, &arena, &typecache).is_err());
 	}
 	#[test]
 	fn typecheck_files_test(){
 		use std::fs;
-		let program_parser = oldparser::ProgramParser::new();
 		for path in fs::read_dir("src/tests/typechecking/should_error").unwrap()
 				.filter_map(|entry| {
 					//gets only the filenames that end in .src
@@ -422,8 +145,29 @@ mod typechecking_tests {
 					}
 				}){
 			let program_source = fs::read_to_string(&path).map_err(|e| format!("io error on {}: {}", path.display(), e.to_string())).unwrap();
-			let ast = program_parser.parse(program_source.as_str()).map_err(|e| format!("parse error on {}: {}", path.display(), e.to_string())).unwrap();
-			assert!(typecheck_program(&ast).is_err(), "{} did not create a type error", path.display());
+			use bumpalo::Bump;
+			use bumpalo_herd::Herd;
+			use crate::{ast2, driver};
+			let mut type_arena = Bump::new();
+			use std::sync::{Mutex, RwLock};
+			use std::collections::HashMap;
+			let typecache = ast2::TypeCache{
+				arena: Mutex::new(&mut type_arena),
+				cached: RwLock::new(HashMap::new())
+			};
+			let arena_arena = Herd::new();
+			let arena_for_typechecking = arena_arena.get();
+			let slice = &[program_source];
+			let driver::LexParseResult{ast, errors} = driver::lex_and_parse(slice, &typecache, &arena_arena);
+			if !errors.is_empty() {
+				println!("{} generated type errors:", path.display());
+				for error in errors.iter() {
+					println!("{:?}", error);
+				}
+				panic!();
+			}
+			let mut sorted_ast: ast2::Program<'_, '_> = ast2::Program::from_gdecls(ast, arena_for_typechecking.as_bump());
+			assert!(typecheck_program(&mut sorted_ast, &typecache, &arena_for_typechecking).is_err(), "{} did not create a type error", path.display());
 		}
 	}
 }
@@ -467,25 +211,28 @@ fn run_file_tests() {
 		}
 		let should_print: Vec<u8> = should_print.into();
 		//let ast: Vec<ast::Gdecl> = program_parser.parse(program_source.as_str()).map_err(|parse_err| format!("parse error in file {}: {}", test_file_name.display(), parse_err))?;
-		let ast: Vec<ast::Gdecl> = {
-			use bumpalo::Bump;
-			use bumpalo_herd::Herd;
-			use crate::ast2;
-			let mut type_arena = Bump::new();
-			use std::sync::{Mutex, RwLock};
-			use std::collections::HashMap;
-			let typecache = ast2::TypeCache{
-				arena: Mutex::new(&mut type_arena),
-				cached: RwLock::new(HashMap::new())
-			};
-			let arena_arena = Herd::new();
-			let slice = &[program_source];
-			let driver::LexParseResult{ast, errors} = driver::lex_and_parse(slice, &typecache, &arena_arena);
-			assert!(errors.is_empty());
-			ast.iter().map(|g| g.to_owned_ast()).collect()
+		use bumpalo::Bump;
+		use bumpalo_herd::Herd;
+		use crate::ast2;
+		let mut type_arena = Bump::new();
+		use std::sync::{Mutex, RwLock};
+		use std::collections::HashMap;
+		let typecache = ast2::TypeCache{
+			arena: Mutex::new(&mut type_arena),
+			cached: RwLock::new(HashMap::new())
 		};
-		let program_context = typechecker::typecheck_program(&ast).map_err(|type_err_msg| format!("type error in file {}: {}", test_file_name.display(), type_err_msg))?;
-		let llvm_prog = frontend::cmp_prog(&ast.into(), &program_context, native_target_triple, "__errno_location");
+		let arena_arena = Herd::new();
+		let arena_for_typechecking = arena_arena.get();
+		let slice = &[program_source];
+		let driver::LexParseResult{ast, errors} = driver::lex_and_parse(slice, &typecache, &arena_arena);
+		if !errors.is_empty() {
+			return Err(format!("parse errors in file {}: {:?}", test_file_name.display(), errors));
+		}
+		let mut sorted_ast: ast2::Program<'_, '_> = ast2::Program::from_gdecls(ast, arena_for_typechecking.as_bump());
+		let program_context = typechecker::typecheck_program(&mut sorted_ast, &typecache, &arena_for_typechecking).map_err(|type_errs| format!("type errors in file {}: {:?}", test_file_name.display(), type_errs))?;
+		let owned_ast = sorted_ast.to_owned_ast();
+		let owned_prog_context = typechecker::make_owned_progcontext(&program_context);
+		let llvm_prog = frontend::cmp_prog(&owned_ast, &owned_prog_context, native_target_triple, "__errno_location");
 		let mut output_file_name: std::path::PathBuf = test_file_name;
 		output_file_name.set_extension("ll");
 		use std::ffi::{OsString, OsStr};

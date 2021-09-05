@@ -16,7 +16,6 @@ mod lexer;
 ///Turns a list of tokens into an ast2
 mod parser;
 
-#[allow(dead_code)] //TODO: remove this later
 mod ast2;
 
 #[cfg(test)]

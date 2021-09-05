@@ -1,5 +1,7 @@
 use crate::ast;
-use crate::typechecker;
+//hack to make this code use the owned versions of the typechecker types
+use crate::typechecker::owned as typechecker;
+use crate::typechecker::PRINTF_FAMILY;
 use crate::llvm;
 use std::collections::{HashSet, HashMap, VecDeque};
 use std::sync::Mutex;
@@ -872,7 +874,7 @@ fn cmp_call(func_name: String, args: &[ast::Expr], ctxt: &mut Context, type_para
 		Some(typechecker::FuncType::NonGeneric{return_type, args}) => (return_type, args, None),
 		Some(typechecker::FuncType::Generic{return_type, args, mode, ..}) => (return_type, args, Some(*mode)),
 		None => {
-			if typechecker::PRINTF_FAMILY.contains(&func_name.as_str()){
+			if PRINTF_FAMILY.contains(&func_name.as_str()){
 				printf_ret_ty = Some(ast::Ty::Int{size: ast::IntSize::Size32, signed: true});
 				//create an iterator that continuously yields void*, then take the first n from it
 				printf_expected_args_vec = Some(ast::Ty::Ptr(None)).into_iter()

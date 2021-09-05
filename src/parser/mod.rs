@@ -6,7 +6,7 @@ use Token::*;
 use crate::driver::Error;
 
 #[cfg(test)]
-mod tests;
+pub mod tests;
 
 //when parser is done, find largest argument to peek
 const PARSE_MAX_PEEK: usize = 1;
@@ -455,14 +455,14 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				Loc{
 					byte_offset: first_expr_loc.byte_offset,
 					byte_len: rparen_loc.byte_offset - first_expr_loc.byte_offset + rparen_loc.byte_len,
-					elt: Expr::Cast(ty_loc, nested_loc.alloc(self.arena)).into(),
+					elt: Expr::Cast(ty_loc, self.arena.alloc(nested_loc)).into(),
 					file_id: self.file_id
 				}
 			},
 			AND | STAR | TILDE | MINUS | NOT => {
 				let unop = &first_expr_loc.token;
 				//recurse with prec_level = 110, greater than any binop precedence
-				let operand_loc = self.parse_expr_without_handling_error(110)?.alloc(self.arena);
+				let operand_loc = self.arena.alloc(self.parse_expr_without_handling_error(110)?);
 				let (operand_offset, operand_len) = (operand_loc.byte_offset, operand_loc.byte_len);
 				let result_expr = match unop {
 					AND => Expr::GetRef(operand_loc),
@@ -506,7 +506,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				lhs = Loc{
 					byte_offset: lhs.byte_offset,
 					byte_len: rbracket_loc.byte_offset - lhs.byte_offset + rbracket_loc.byte_len,
-					elt: Expr::Index(lhs.alloc(self.arena), index_loc.alloc(self.arena)).into(),
+					elt: Expr::Index(self.arena.alloc(lhs), self.arena.alloc(index_loc)).into(),
 					file_id: self.file_id
 				};
 				continue;
@@ -518,7 +518,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 				lhs = Loc{
 					byte_offset: lhs.byte_offset,
 					byte_len: field_loc.byte_offset - lhs.byte_offset + field_loc.byte_len,
-					elt: Expr::Proj(lhs.alloc(self.arena), field_loc).into(),
+					elt: Expr::Proj(self.arena.alloc(lhs), field_loc).into(),
 					file_id: self.file_id
 				};
 				continue;
@@ -533,7 +533,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			lhs = Loc{
 				byte_offset: lhs.byte_offset,
 				byte_len: rhs.byte_offset - lhs.byte_offset + rhs.byte_len,
-				elt: Expr::Binop(lhs.alloc(self.arena), binop, rhs.alloc(self.arena)).into(),
+				elt: Expr::Binop(self.arena.alloc(lhs), binop, self.arena.alloc(rhs)).into(),
 				file_id: self.file_id
 			};
 		}
@@ -729,9 +729,21 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 	fn parse_block(&mut self, error_handler: &ErrorHandler<'src>) -> Option<Loc<Block<'src, 'arena>>> {
 		let lbrace_loc = self.expect(&[LBRACE], error_handler, Some("a '{' to begin a block"))?;
 		let mut stmts: Vec<Loc<Stmt<'src, 'arena>>> = Vec::new();
-		while self.peeker.peek(0).map(|t| t.token) != Some(RBRACE) {
-			if let Some(stmt_loc) = self.parse_stmt() {
-				stmts.push(stmt_loc);
+		loop {
+			match self.peeker.peek(0) {
+				Some(TokenLoc{token: RBRACE, ..}) => break,
+				Some(_) => {
+					if let Some(stmt_loc) = self.parse_stmt() {
+						stmts.push(stmt_loc);
+					}
+				},
+				None => {
+					self.errors.push(Error{
+						err: "Expected a '}' to close a block, found end of parsing chunk (either end of file or too many closing braces)".to_owned(),
+						byte_offset: self.latest_byte_offset, approx_len: 0, file_id: self.file_id
+					});
+					return None;
+				}
 			}
 		}
 		let rbrace_loc = self.expect(&[RBRACE], error_handler, Some("a '}' to close a block"))?;
@@ -809,6 +821,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 					return None;
 				}
 				//already seen `struct A@<separated 'T>{`
+				//}
 				let mut fields: Vec<(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)> = Vec::new();
 				let _rbrace_loc = loop {
 					if let Some(loc) = self.next_in(&[RBRACE]) {

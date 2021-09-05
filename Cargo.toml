@@ -14,7 +14,7 @@ build = "build.rs"
 #
 # The generated tokenizer depends on the regex crate.
 #
-lalrpop-util = "0.19.1"
+lalrpop-util = "0.19.6"
 regex = "1"
 #llvm-ir = { version = "0.7.4", features = ["llvm-11"] }
 rayon = "1.5.1"
@@ -29,4 +29,4 @@ console = "0.14"
 # Add a build-time dependency on the lalrpop library:
 [build-dependencies]
 # If you do not supply your own, external lexer you also need the `lexer` feature
-lalrpop = { version = "0.19.1", features = ["lexer"] }
+lalrpop = { version = "0.19.6", features = ["lexer"] }

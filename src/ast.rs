@@ -105,9 +105,9 @@ impl Ty {
 
 	///Determines if a type recursively contains an erased struct, and therefore is dynamically sized
 	#[allow(non_snake_case)]
-	pub fn is_DST(&self, structs: &super::typechecker::StructContext, mode: Option<PolymorphMode>) -> bool {
+	pub fn is_DST(&self, structs: &super::typechecker::owned::StructContext, mode: Option<PolymorphMode>) -> bool {
 		use Ty::*;
-		use super::typechecker::StructType::*;
+		use super::typechecker::owned::StructType::*;
 		match self {
 			GenericStruct{name, type_param} => match structs.get(name.as_str()).unwrap() {
 				Generic{mode: PolymorphMode::Erased, fields: _, type_var: _} => true,

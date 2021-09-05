@@ -6,16 +6,6 @@ pub struct Loc<T> {
 	pub byte_len: usize,
 	pub file_id: u16
 }
-impl<'arena, T> Loc<T> {
-	pub fn alloc(self, arena: &'arena bumpalo::Bump) -> Loc<&'arena mut T> {
-		Loc{
-			elt: arena.alloc(self.elt),
-			byte_offset: self.byte_offset,
-			byte_len: self.byte_len,
-			file_id: self.file_id
-		}
-	}
-}
 
 impl<T: Copy> Copy for Loc<T> {}
 
@@ -236,10 +226,9 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 		}
 	}
 
-	/*
 	///Determines if a type recursively contains an erased struct, and therefore is dynamically sized
 	#[allow(non_snake_case)]
-	pub fn is_DST(&self, structs: &super::typechecker::StructContext, mode: Option<PolymorphMode>) -> bool {
+	pub fn is_DST(&self, structs: &super::typechecker::StructContext<'src, 'arena>, mode: Option<PolymorphMode>, typecache: &'arena TypeCache<'src, 'arena>) -> bool {
 		use Ty::*;
 		use super::typechecker::StructType::*;
 		match self {
@@ -250,8 +239,8 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 					fields.par_iter()
 						.any(|(_, t)| t.clone().replace_type_var_with(type_param).is_DST(structs, mode))
 					*/
-					for field_ty in fields.iter().map(|(_, t)| t.clone()) {
-						if field_ty.replace_type_var_with(type_param).is_DST(structs, mode) {
+					for field_ty in fields.iter().map(|(_, t)| t) {
+						if field_ty.replace_type_var_with(type_param, typecache).is_DST(structs, mode, typecache) {
 							return true;
 						}
 					}
@@ -260,18 +249,18 @@ impl<'src, 'arena> Ty<'src, 'arena> where 'src: 'arena {
 				NonGeneric(_) => panic!("struct context contains nongeneric struct for generic struct {}, should have been caught by now", name),
 			},
 			Struct(name) => match structs.get(name).unwrap() {
-				NonGeneric(fields) => fields.iter().any(|(_, ty)| ty.is_DST(structs, mode)),
+				NonGeneric(fields) => fields.iter().any(|(_, ty)| ty.is_DST(structs, mode, typecache)),
 				_ => panic!("struct context contains generic struct for non-generic struct {}, should have been caught by now", name),
 			},
-			Array{typ, ..} => typ.as_ref().is_DST(structs, mode),
+			Array{typ, ..} => typ.is_DST(structs, mode, typecache),
 			TypeVar(_) => mode == Some(PolymorphMode::Erased),
 			_ => false
 		}
 	}
-	*/
 
 	///Helper function to call `replace_type_var_with` when the replacement is an Option that should only be unwrapped if self
 	///contains a TypeVar
+	#[allow(dead_code)] //remove this after rewriting frontend, which will use this function
 	pub fn concretized(&'arena self, replacement: Option<&'arena Self>, arena: &'arena TypeCache<'src, 'arena>) -> &'arena Self {
 		if self.recursively_find_type_var().is_some() {
 			let replacement = replacement.unwrap_or_else(|| panic!("Tried to concretize {:?}, which contains type var '{}, but replacement was None", &self, self.recursively_find_type_var().unwrap()));
@@ -378,17 +367,17 @@ pub enum Expr<'src, 'arena> where 'src: 'arena {
 	LitFloat(f64, FloatSize),
 	LitString(Cow<'src, str>),
 	Id(&'src str),
-	Index(Loc<&'arena mut TypedExpr<'src, 'arena>>, Loc<&'arena mut TypedExpr<'src, 'arena>>),
-	Proj(Loc<&'arena mut TypedExpr<'src, 'arena>>, Loc<&'src str>),
+	Index(&'arena mut Loc<TypedExpr<'src, 'arena>>, &'arena mut Loc<TypedExpr<'src, 'arena>>),
+	Proj(&'arena mut Loc<TypedExpr<'src, 'arena>>, Loc<&'src str>),
 	//when dealing with a slice of ast items, should I wrap the slice in a Loc? I think it's ok to just use the loc of
 	//the containing item (e.g. wrong number of args to function)
 	Call(Loc<&'src str>, &'arena mut [Loc<TypedExpr<'src, 'arena>>]),
 	GenericCall{name: Loc<&'src str>, type_param: Loc<&'arena Ty<'src, 'arena>>, args: &'arena mut [Loc<TypedExpr<'src, 'arena>>]},
-	Cast(Loc<&'arena Ty<'src, 'arena>>, Loc<&'arena mut TypedExpr<'src, 'arena>>),
-	Binop(Loc<&'arena mut TypedExpr<'src, 'arena>>, BinaryOp, Loc<&'arena mut TypedExpr<'src, 'arena>>),
-	Unop(UnaryOp, Loc<&'arena mut TypedExpr<'src, 'arena>>),
-	GetRef(Loc<&'arena mut TypedExpr<'src, 'arena>>),
-	Deref(Loc<&'arena mut TypedExpr<'src, 'arena>>),
+	Cast(Loc<&'arena Ty<'src, 'arena>>, &'arena mut Loc<TypedExpr<'src, 'arena>>),
+	Binop(&'arena mut Loc<TypedExpr<'src, 'arena>>, BinaryOp, &'arena mut Loc<TypedExpr<'src, 'arena>>),
+	Unop(UnaryOp, &'arena mut Loc<TypedExpr<'src, 'arena>>),
+	GetRef(&'arena mut Loc<TypedExpr<'src, 'arena>>),
+	Deref(&'arena mut Loc<TypedExpr<'src, 'arena>>),
 	Sizeof(Loc<&'arena Ty<'src, 'arena>>)
 }
 impl<'src: 'arena, 'arena> Expr<'src, 'arena> {
@@ -521,6 +510,7 @@ pub enum Gdecl<'src, 'arena> where 'src: 'arena {
 }
 //typecheck_program expects a &[ast::Gdecl], so I need a .to_owned_ast() for this enum
 impl <'src: 'arena, 'arena> Gdecl<'src, 'arena> {
+	#[allow(dead_code)]
 	pub fn to_owned_ast(&self) -> ast::Gdecl {
 		use Gdecl::*;
 		match self {
@@ -641,12 +631,12 @@ impl<'src: 'arena, 'arena> ExternalFunc<'src, 'arena> {
 pub struct Program<'src: 'arena, 'arena> {
 	pub external_funcs: &'arena [ExternalFunc<'src, 'arena>],
 	pub global_vars: &'arena [(Loc<&'arena Ty<'src, 'arena>>, Loc<&'src str>)],
-	pub funcs: &'arena [Func<'src, 'arena>],
+	pub funcs: &'arena mut [Func<'src, 'arena>],
 	pub structs: &'arena [Struct<'src, 'arena>],
 	pub erased_structs: &'arena [GenericStruct<'src, 'arena>],
 	pub separated_structs: &'arena [GenericStruct<'src, 'arena>],
-	pub erased_funcs: &'arena [GenericFunc<'src, 'arena>],
-	pub separated_funcs: &'arena [GenericFunc<'src, 'arena>],
+	pub erased_funcs: &'arena mut [GenericFunc<'src, 'arena>],
+	pub separated_funcs: &'arena mut [GenericFunc<'src, 'arena>],
 }
 
 impl<'src, 'arena> Program<'src, 'arena> {
@@ -715,7 +705,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 				}
 			} else { None }
 		});
-		let funcs: &'arena [Func<'src, 'arena>] =
+		let funcs: &'arena mut [Func<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_funcs, |_| just_funcs.next().unwrap());
 		debug_assert!(just_funcs.next().is_none(), "More funcs than expected, num_funcs = {}", num_funcs);
 
@@ -756,14 +746,14 @@ impl<'src, 'arena> Program<'src, 'arena> {
 		debug_assert!(just_separated_structs.next().is_none(), "More separated structs than expected, num_separated_structs = {}", num_separated_structs);
 
 		let mut just_erased_funcs = gdecls.iter_mut().filter_map(|g| {
-			if matches!(g, GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Separated, ..}, ..}) {
+			if matches!(g, GGenericFuncDecl{mode: Loc{elt: PolymorphMode::Erased, ..}, ..}) {
 				match replace(g, get_dummy()) {
 					GGenericFuncDecl{ret_type, name, args, body, var, ..} => Some(GenericFunc{ret_type, name, args, body, var}),
 					_ => unreachable!()
 				}
 			} else { None }
 		});
-		let erased_funcs: &'arena [GenericFunc<'src, 'arena>] =
+		let erased_funcs: &'arena mut [GenericFunc<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_erased_funcs, |_| just_erased_funcs.next().unwrap());
 		debug_assert!(just_erased_funcs.next().is_none(), "More erased funcs than expected, num_erased_funcs = {}", num_erased_funcs);
 
@@ -775,7 +765,7 @@ impl<'src, 'arena> Program<'src, 'arena> {
 				}
 			} else { None }
 		});
-		let separated_funcs: &'arena [GenericFunc<'src, 'arena>] =
+		let separated_funcs: &'arena mut [GenericFunc<'src, 'arena>] =
 			arena.alloc_slice_fill_with(num_separated_funcs, |_| just_separated_funcs.next().unwrap());
 		debug_assert!(just_separated_funcs.next().is_none(), "More separated funcs than expected, num_separated_funcs = {}", num_separated_funcs);
 
