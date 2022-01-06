@@ -58,6 +58,17 @@ impl Phase {
 	}
 }
 
+///Determines when color should be used when printing error messages.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ColorMethod {
+	///Always use color
+	Always,
+	///Use color if stderr is a terminal
+	Auto,
+	///Never use color
+	Never
+}
+
 ///Data that was parsed from the command-line arguments.
 #[derive(Debug)]
 struct Opts<'a> {
@@ -68,6 +79,17 @@ struct Opts<'a> {
 	output_file_name: &'a str,
 	print_timings: bool,
 	print_clang_command: bool,
+	colored_messages: ColorMethod
+}
+
+fn get_color_method(matches: &clap::ArgMatches) -> ColorMethod {
+	use ColorMethod::*;
+	match matches.value_of("color") {
+		None | Some("auto") => Auto,
+		Some("always") => Always,
+		Some("never") => Never,
+		Some(other) => panic!("value of \"color\" argument is {}", other)
+	}
 }
 
 ///Gets the target triple of the current machine.
@@ -201,6 +223,13 @@ fn with_timing() -> Result<Option<Timing>, String>{
 				.help("Print the time taken for each phase of compilation to standard output")
 		)
 		.arg(
+			Arg::with_name("color")
+			.long("color")
+			.help("Display error messages in color")
+			.possible_values(&["always", "auto", "never"])
+			.default_value_if("color", None, "auto")
+		)
+		.arg(
 			Arg::with_name("print-clang-command")
 				.long("print-clang-command")
 				.help("Print the command used to invoke clang")
@@ -323,7 +352,8 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		last_phase,
 		output_file_name: matches.value_of("output-file-name").unwrap_or_else(|| last_phase.get_default_output_filename()),
 		print_timings: matches.is_present("time"),
-		print_clang_command: matches.is_present("print-clang-command")
+		print_clang_command: matches.is_present("print-clang-command"),
+		colored_messages: get_color_method(&matches)
 	};
 	let input_file_names = matches.values_of("input_files").ok_or_else(|| {
 		"No input files provided".to_owned()
@@ -397,11 +427,11 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	timeinfo.typechecking.1 = Instant::now();
 	if !errors.is_empty() {
 		timeinfo.end_time = Instant::now();
-		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice());
-		return Err(format!("{} errors detected", errors.len()));
+		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice(), options.colored_messages);
+		return Err(format!("{} error{} detected", errors.len(), if errors.len() == 1 {""} else {"s"}));
 	}
 	let program_context = typechecker::make_owned_progcontext(&program_context.unwrap());
-	if last_phase == Phase::Check {
+	if options.last_phase == Phase::Check {
 		timeinfo.end_time = Instant::now();
 		if options.print_timings {
 			return Ok(Some(timeinfo));
@@ -414,7 +444,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	timeinfo.frontend.as_mut().unwrap().1 = Instant::now();
 	timeinfo.write_output = Some((timeinfo.frontend.unwrap().1, Instant::now()));
 	use std::io::{Write, BufWriter};
-	if last_phase == Phase::Frontend {
+	if options.last_phase == Phase::Frontend {
 		use std::fs::OpenOptions;
 		let output_ll_file = OpenOptions::new().read(true).write(true).create(true).truncate(true)
 			.open(&options.output_file_name).map_err(|e| format!("Could not open output file {}: {}", &options.output_file_name, e))?;
@@ -438,7 +468,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	timeinfo.write_output.as_mut().unwrap().1 = Instant::now();
 	timeinfo.clang = Some((timeinfo.write_output.unwrap().1, Instant::now()));
 	use std::process::Command;
-	let clang_exit_status = match last_phase {
+	let clang_exit_status = match options.last_phase {
 		Phase::Backend => {
 			//clang {opt_level} -o {output_file} --target={target_triple} {.c, .ll and .bc files} -S -x ir -
 			let mut command = Command::new("clang");
@@ -620,13 +650,15 @@ pub struct Error {
 	pub file_id: u16,
 }
 
-fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [Error]) {
-	//TODO: command-line argument for color, always/term/never
-	let stderr_is_term = console::user_attended_stderr();
-	let err_style = if stderr_is_term {
-		console::Style::new().fg(console::Color::Red).bright()
-	} else {
-		console::Style::new()
+fn print_errors(input_srcs: &[String], input_file_names: &[&str], errors: &mut [Error], color_method: ColorMethod) {
+	let err_style = match color_method {
+		ColorMethod::Never => console::Style::new(),
+		ColorMethod::Always => console::Style::new().fg(console::Color::Red).bright(),
+		ColorMethod::Auto => if console::user_attended_stderr() {
+					console::Style::new().fg(console::Color::Red).bright()
+				} else {
+					console::Style::new()
+				}
 	};
 	//sort the errors by file_id, then byte_offset
 	errors.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id).then(a.byte_offset.cmp(&b.byte_offset)));
