@@ -230,9 +230,7 @@ fn run_file_tests() {
 		}
 		let mut sorted_ast: ast2::Program<'_, '_> = ast2::Program::from_gdecls(ast, arena_for_typechecking.as_bump());
 		let program_context = typechecker::typecheck_program(&mut sorted_ast, &typecache, &arena_for_typechecking).map_err(|type_errs| format!("type errors in file {}: {:?}", test_file_name.display(), type_errs))?;
-		let owned_ast = sorted_ast.to_owned_ast();
-		let owned_prog_context = typechecker::make_owned_progcontext(&program_context);
-		let llvm_prog = frontend::cmp_prog(&owned_ast, &owned_prog_context, native_target_triple, "__errno_location");
+		let llvm_prog = frontend::cmp_prog(&sorted_ast, &program_context, native_target_triple, "__errno_location", &typecache);
 		let mut output_file_name: std::path::PathBuf = test_file_name;
 		output_file_name.set_extension("ll");
 		use std::ffi::{OsString, OsStr};

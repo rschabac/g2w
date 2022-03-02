@@ -4,18 +4,12 @@ version = "0.1.0"
 authors = ["Robert Schabacker <rschabac@stevens.edu>"]
 edition = "2018"
 
-#needed for LALRPOP preprocessing
+#not very necessary, but there's some code in there to use lld on linux, which may speed up linking
 build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# The generated code depends on lalrpop-util.
-#
-# The generated tokenizer depends on the regex crate.
-#
-lalrpop-util = "0.19.6"
-regex = "1"
 #llvm-ir = { version = "0.7.4", features = ["llvm-11"] }
 rayon = "1.5.1"
 clap = "2.33.3"
@@ -25,8 +19,3 @@ bumpalo = "3.7.0"
 bumpalo-herd = "0.1.1"
 unicode-segmentation = "1.8.0"
 console = "0.14"
-
-# Add a build-time dependency on the lalrpop library:
-[build-dependencies]
-# If you do not supply your own, external lexer you also need the `lexer` feature
-lalrpop = { version = "0.19.6", features = ["lexer"] }

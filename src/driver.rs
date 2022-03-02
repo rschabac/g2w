@@ -177,16 +177,17 @@ struct Timing {
 ///
 ///On error, it returns a String describing the error.
 fn with_timing() -> Result<Option<Timing>, String>{
+	let dummy_instant = Instant::now(); //only way to create an instant
 	let mut timeinfo = Timing{
 		start_time: Instant::now(),
-		arg_parse: (Instant::now(), Instant::now()),
-		read_input: (Instant::now(), Instant::now()),
-		parsing: (Instant::now(), Instant::now()), //will be overridden later
-		typechecking: (Instant::now(), Instant::now()), //will be overridden later
+		arg_parse: (dummy_instant, dummy_instant),
+		read_input: (dummy_instant, dummy_instant),
+		parsing: (dummy_instant, dummy_instant), //will be overridden later
+		typechecking: (dummy_instant, dummy_instant), //will be overridden later
 		frontend: None,
 		write_output: None,
 		clang: None,
-		end_time: Instant::now() //will be overridden later
+		end_time: dummy_instant //will be overridden later
 	};
 	use clap::{Arg, ArgGroup, app_from_crate, crate_name, crate_authors, crate_description, crate_version};
 	timeinfo.arg_parse.0 = Instant::now();
@@ -426,11 +427,11 @@ fn with_timing() -> Result<Option<Timing>, String>{
 	});
 	timeinfo.typechecking.1 = Instant::now();
 	if !errors.is_empty() {
-		timeinfo.end_time = Instant::now();
 		print_errors(src_inputs.as_slice(), src_file_names.as_slice(), errors.as_mut_slice(), options.colored_messages);
+		timeinfo.end_time = Instant::now();
 		return Err(format!("{} error{} detected", errors.len(), if errors.len() == 1 {""} else {"s"}));
 	}
-	let program_context = typechecker::make_owned_progcontext(&program_context.unwrap());
+	let program_context = program_context.unwrap();
 	if options.last_phase == Phase::Check {
 		timeinfo.end_time = Instant::now();
 		if options.print_timings {
@@ -439,10 +440,10 @@ fn with_timing() -> Result<Option<Timing>, String>{
 			return Ok(None);
 		}
 	}
-	timeinfo.frontend = Some((timeinfo.typechecking.1, Instant::now()));
-	let llvm_prog = frontend::cmp_prog(&sorted_ast.to_owned_ast(), &program_context, options.target_triple, options.errno_func_name);
+	timeinfo.frontend = Some((timeinfo.typechecking.1, dummy_instant));
+	let llvm_prog = frontend::cmp_prog(&sorted_ast, &program_context, options.target_triple, options.errno_func_name, &typecache);
 	timeinfo.frontend.as_mut().unwrap().1 = Instant::now();
-	timeinfo.write_output = Some((timeinfo.frontend.unwrap().1, Instant::now()));
+	timeinfo.write_output = Some((timeinfo.frontend.unwrap().1, dummy_instant));
 	use std::io::{Write, BufWriter};
 	if options.last_phase == Phase::Frontend {
 		use std::fs::OpenOptions;
@@ -466,7 +467,7 @@ fn with_timing() -> Result<Option<Timing>, String>{
 		.map_err(|e| format!("Could not create temporary ll file: {}", e))?;
 	write!(BufWriter::new(&mut output_ll_file), "{}", llvm_prog).map_err(|e| format!("IO error writing to temporary ll file: {}", e))?;
 	timeinfo.write_output.as_mut().unwrap().1 = Instant::now();
-	timeinfo.clang = Some((timeinfo.write_output.unwrap().1, Instant::now()));
+	timeinfo.clang = Some((timeinfo.write_output.unwrap().1, dummy_instant));
 	use std::process::Command;
 	let clang_exit_status = match options.last_phase {
 		Phase::Backend => {

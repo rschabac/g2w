@@ -1,10 +1,5 @@
-#[macro_use]
-extern crate lalrpop_util;
-
 ///Handles parsing command-line arguments, reading input files, invoking clang, and generating output files
 mod driver;
-///Data structures that represent a parsed input file
-mod ast;
 ///Checks the program for type errors
 mod typechecker;
 ///generates a representation of an llvm program
@@ -16,16 +11,11 @@ mod lexer;
 ///Turns a list of tokens into an ast2
 mod parser;
 
+///Data structures that represent a parsed input file
 mod ast2;
 
 #[cfg(test)]
 mod tests;
-
-lalrpop_mod!(
-	#[doc(hidden)]	//don't include generated parser code in documentation
-	#[allow(clippy::all)] //This seems to prevent clippy from checking the generated parser file
-	pub oldparser
-);
 
 ///Just calls [driver::print_timings], does nothing else.
 ///
