@@ -152,18 +152,14 @@ impl<'src: 'arena, 'arena> std::fmt::Debug for ExpResult<'src, 'arena> {
 
 fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		e: &'arena ast2::TypedExpr<'src, 'arena>,
-		ctxt: &mut Context<'src, 'arena, 'front, 'func>,
-		type_for_lit_nulls: Option<&llvm::Ty<'src, 'arena>>
+		ctxt: &mut Context<'src, 'arena, 'front, 'func>
 		) -> ExpResult<'src, 'arena> { match &e.expr {
-	ast2::Expr::LitNull => match type_for_lit_nulls {
-		None => panic!("type_for_lit_nulls is None in cmp_exp"),
-		Some(t @ llvm::Ty::Ptr(_)) => {
-			ExpResult{
-				llvm_typ: t.clone(),
-				llvm_op: llvm::Operand::Const(llvm::Constant::Null(t.clone())),
-			}
-		},
-		Some(t) => panic!("type_for_lit_nulls in cmp_exp is not a pointer: {:?}", t)
+	ast2::Expr::LitNull => {
+		let llvm_typ = cmp_ty(e.typ.unwrap(), ctxt.structs, ctxt.current_separated_type_param.as_ref().map(|pair| pair.0), ctxt.mode, ctxt.struct_inst_queue, ctxt.typecache);
+		ExpResult {
+			llvm_typ: llvm_typ.clone(),
+			llvm_op: llvm::Operand::Const(llvm::Constant::Null(llvm_typ)),
+		}
 	},
 	ast2::Expr::LitBool(b) => ExpResult{
 		llvm_typ: llvm::Ty::Int{bits: 1, signed: false},
@@ -225,7 +221,7 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		%v_loaded = load %vec_i32, %vec_i32* %v_pointer
 		%field = extractvalue %vec_i32 %v_loaded, index
 		*/
-		let mut base_result = cmp_exp(base, ctxt, None);
+		let mut base_result = cmp_exp(base, ctxt);
 		//The cases for Dynamic(Struct(s)) and Ptr(Dynamic(Struct(s))) are the same thing
 		let mut base_type_param: Option<&'arena ast2::Ty<'_, '_>> = None;
 		let (is_dynamic, base_is_ptr, struct_name) = match &base_result.llvm_typ {
@@ -336,7 +332,7 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Expr::Cast(new_type, src) => {
-		let mut src_result = cmp_exp(src, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let mut src_result = cmp_exp(src, ctxt);
 		let new_type: &'arena ast2::Ty<'src, 'arena> = new_type;
 		let new_llvm_typ = cmp_ty(new_type, ctxt.structs, ctxt.current_src_type_param(), ctxt.mode, ctxt.struct_inst_queue, ctxt.typecache);
 		use llvm::Ty::*;
@@ -449,8 +445,8 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Expr::Binop(left, bop, right) => {
-		let left_result = cmp_exp(left, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
-		let right_result = cmp_exp(right, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let left_result = cmp_exp(left, ctxt);
+		let right_result = cmp_exp(right, ctxt);
 		use ast2::BinaryOp::*;
 		match (bop, &left_result.llvm_typ, &right_result.llvm_typ) {
 			//Arithmetic between Ints
@@ -674,7 +670,7 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Expr::Unop(uop, base) => {
-		let base_result = cmp_exp(base, ctxt, Some(&llvm::Ty::Ptr(Box::new(llvm::Ty::Int{bits: 8, signed: false}))));
+		let base_result = cmp_exp(base, ctxt);
 		use ast2::UnaryOp::*;
 		match (uop, &base_result.llvm_typ) {
 			(Neg, llvm::Ty::Int{bits, signed}) => {
@@ -941,17 +937,9 @@ fn cmp_call<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	}
 	for (arg, expected_ty) in args.iter().zip(expected_arg_types.as_ref()) {
-		//only need to compute this if the arg is a LitNull
-		let type_for_lit_nulls = match &arg.expr {
-			//if cmp_ty returns a Dynamic(_) here, then llvm could try to make a null literal have type i8.
-			//however, this will not happen because if the arg is LitNull, then the type must be a pointer,
-			//which will never be a DST.
-			ast2::Expr::LitNull => Some(cmp_ty(expected_ty, ctxt.structs, concretized_type_param, callee_mode, ctxt.struct_inst_queue, ctxt.typecache)),
-			_ => None
-		};
 		//if arg is dynamically sized, then arg_result will be a ptr to that value, which is what should be passed to the function
 		//however, the type used for this operand should be i8*, not i8 (really Dynamic(_), but gets printed as i8)
-		let arg_result = cmp_exp(arg, ctxt, type_for_lit_nulls.as_ref());
+		let arg_result = cmp_exp(arg, ctxt);
 		if matches!(arg_result.llvm_typ, llvm::Ty::Dynamic(_)) {
 			arg_ty_ops.push( (llvm::Ty::Ptr(Box::new(arg_result.llvm_typ)), arg_result.llvm_op) );
 		} else if expected_ty.is_DST(ctxt.structs, callee_mode, ctxt.typecache) {
@@ -1159,7 +1147,7 @@ fn cmp_lvalue<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		let mut base_lvalue_result;
 		if !matches!(&base.expr, ast2::Expr::Id(_) | ast2::Expr::Index(_,_) | ast2::Expr::Proj(_,_) | ast2::Expr::Deref(_)) {
 			//if base is a function call, then it must return a pointer
-			base_lvalue_result = cmp_exp(base, ctxt, None);
+			base_lvalue_result = cmp_exp(base, ctxt);
 		} else {
 			//if base is a potential lvalue, then cmp it as an lvalue, see what it's type is,
 			//and potentially load from it if its type is a pointer
@@ -1195,7 +1183,7 @@ fn cmp_lvalue<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 			};
 		}
 		//base_lvalue_result is now the address of the first element of the array
-		let mut index_result = cmp_exp(index, ctxt, None);
+		let mut index_result = cmp_exp(index, ctxt);
 		let result_op = gensym("index_offset");
 		let result_typ = base_lvalue_result.llvm_typ.remove_ptr();
 		if let llvm::Ty::Dynamic(dst) = &result_typ {
@@ -1260,9 +1248,7 @@ fn cmp_lvalue<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		*/
 		let mut base_lvalue_result;
 		if !matches!(&base.expr, ast2::Expr::Id(_) | ast2::Expr::Index(_,_) | ast2::Expr::Proj(_,_) | ast2::Expr::Deref(_)) {
-			//something like f()->field
-			//if doing something like null.field, the typechecker will catch this, so the None here is ok
-			base_lvalue_result = cmp_exp(base, ctxt, None);
+			base_lvalue_result = cmp_exp(base, ctxt);
 		} else {
 			base_lvalue_result = cmp_lvalue(base, ctxt);
 			match &base_lvalue_result.llvm_typ {
@@ -1400,7 +1386,7 @@ fn cmp_lvalue<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Expr::Deref(base) => {
-		let mut result = cmp_exp(base, ctxt, None);
+		let mut result = cmp_exp(base, ctxt);
 		result.llvm_typ = result.llvm_typ.remove_ptr();
 		result
 	},
@@ -1473,7 +1459,7 @@ fn cmp_stmt<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		) { match stmt {
 	ast2::Stmt::Assign(lhs, rhs) => {
 		let dest_result = cmp_lvalue(lhs, ctxt);
-		let data_result = cmp_exp(rhs, ctxt, Some(&dest_result.llvm_typ));
+		let data_result = cmp_exp(rhs, ctxt);
 		#[cfg(debug_assertions)]
 		if dest_result.llvm_typ != data_result.llvm_typ {
 			eprintln!("BUG: Assignment type discrepancy on when cmping {:?} = {:?};", lhs, rhs);
@@ -1525,7 +1511,7 @@ fn cmp_stmt<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Stmt::Return(Some(expr)) => {
-		let expr_result = cmp_exp(expr, ctxt, Some(expected_ret_ty));
+		let expr_result = cmp_exp(expr, ctxt);
 		if let llvm::Ty::Dynamic(dst) = expr_result.llvm_typ {
 			//there will be an llvm local that indicates where to write the result to
 			//There will also be an llvm local that indicates the size to memcpy
@@ -1563,7 +1549,7 @@ fn cmp_stmt<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		cmp_call(func_name, args, ctxt, Some(type_param));
 	},
 	ast2::Stmt::If(cond, then_block, else_block) => {
-		let cond_result = cmp_exp(cond, ctxt, None);
+		let cond_result = cmp_exp(cond, ctxt);
 		let then_lbl = gensym("then");
 		let else_lbl = gensym("else");
 		let merge_lbl = gensym("merge");
@@ -1588,7 +1574,7 @@ fn cmp_stmt<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		//stream.reserve(cond_result.stream.len() + body_stream.len() + 6);
 		ctxt.stream.push(Component::Term(llvm::Terminator::Br(check_lbl.clone())));
 		ctxt.stream.push(Component::Label(check_lbl.clone()));
-		let cond_result = cmp_exp(cond, ctxt, None);
+		let cond_result = cmp_exp(cond, ctxt);
 		ctxt.stream.push(Component::Term(llvm::Terminator::CondBr{
 			condition: cond_result.llvm_op,
 			true_dest: body_lbl.clone(),
@@ -1695,8 +1681,6 @@ fn cmp_func<'src: 'arena, 'arena: 'front, 'front>(f: FuncInst<'src, 'arena>,
 	};
 	for (arg_ty, arg_name) in args.iter() {
 		if arg_ty.is_DST(&prog_context.structs, context.mode, typecache) {
-			//the type signature of cmp_exp says that it needs a Context, but for the Sizeof case, it only ever uses the .structs field, which
-			//is already set up by now, so it is not an issue that `context` is not quite complete yet.
 			let ExpResult{llvm_op: sizeof_op, ..} = cmp_sizeof(arg_ty, &mut context);
 			//alloca enough space for this type
 			let dst_copy_uid = gensym("dst_param_copy");
