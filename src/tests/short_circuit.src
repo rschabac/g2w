@@ -1,0 +1,37 @@
+/*0
+x is true, and maybe bad() is
+x is true as a fallback
+now actually false
+caught false early
+still not true
+truth table complete
+*/
+
+bool bad() {
+	printf("should never happen!\n");
+	return false;
+}
+
+i32 main() {
+	bool x;
+	x = true;
+	if (x || bad()) {
+		printf("x is true, and maybe bad() is\n");
+	} else { bad(); }
+	if (false || x) {
+		printf("x is true as a fallback\n");
+	} else { bad(); }
+	if ((1 == 2) || false) { bad(); } else {
+		printf("now actually false\n");
+	}
+	if (false && bad()) { bad(); } else {
+		printf("caught false early\n");
+	}
+	if (true && false) { bad(); } else {
+		printf("still not true\n");
+	}
+	if (true && true) {
+		printf("truth table complete\n");
+	} else { bad(); }
+	return cast(i32, 0);
+}

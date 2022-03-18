@@ -445,13 +445,70 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 		}
 	},
 	ast2::Expr::Binop(left, bop, right) => {
+		if matches!(bop, And | Or) {
+			//handle short-circuiting specially
+			/* And case
+			//No phi nodes, so I need to use memory for this
+			%left_op = ...
+			%and_result_loc = alloca i1
+			br i1 %left_op, label %check_right_op, label %short_circuit
+			short_circuit:
+			store i1 0, i1* %and_result_loc
+			br label %and_join
+			check_right_op:
+			%right_op = ...
+			store i1 %right_op, i1* %and_result_loc
+			br label %and_join
+			and_join:
+			%result = load i1, i1* %and_result_loc
+			*/
+			let ExpResult{llvm_op: left_op, ..} = cmp_exp(left, ctxt);
+			let result_loc = gensym("short_circuit_result_loc");
+			let check_right_op_lbl = gensym("check_righ_op");
+			let sc_lbl = gensym("short_circuit");
+			let join_lbl = gensym("short_circuit_join");
+			ctxt.stream.push(Component::Instr(result_loc.clone(), llvm::Instruction::Alloca(
+				llvm::Ty::Int{bits: 1, signed: false},
+				llvm::Operand::Const(llvm::Constant::UInt{bits: 64, val: 1}), None
+			)));
+			ctxt.stream.push(Component::Term(llvm::Terminator::CondBr{
+				condition: left_op,
+				true_dest: if *bop == And {check_right_op_lbl.clone()} else {sc_lbl.clone()},
+				false_dest: if *bop == And {sc_lbl.clone()} else {check_right_op_lbl.clone()}
+			}));
+			ctxt.stream.push(Component::Label(sc_lbl));
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+				typ: llvm::Ty::Int{bits: 1, signed: false},
+				data: llvm::Operand::Const(llvm::Constant::UInt{bits: 1, val: (*bop == Or) as u64}),
+				dest: llvm::Operand::Local(result_loc.clone())
+			}));
+			ctxt.stream.push(Component::Term(llvm::Terminator::Br(join_lbl.clone())));
+			ctxt.stream.push(Component::Label(check_right_op_lbl));
+			let ExpResult{llvm_op: right_op, ..} = cmp_exp(right, ctxt);
+			ctxt.stream.push(Component::Instr(String::new(), llvm::Instruction::Store{
+				typ: llvm::Ty::Int{bits: 1, signed: false},
+				data: right_op,
+				dest: llvm::Operand::Local(result_loc.clone())
+			}));
+			ctxt.stream.push(Component::Term(llvm::Terminator::Br(join_lbl.clone())));
+			ctxt.stream.push(Component::Label(join_lbl));
+			let result_op = gensym("short_circuit_result");
+			ctxt.stream.push(Component::Instr(result_op.clone(), llvm::Instruction::Load{
+				typ: llvm::Ty::Int{bits: 1, signed: false},
+				src: llvm::Operand::Local(result_loc)
+			}));
+			return ExpResult{
+				llvm_op: llvm::Operand::Local(result_op),
+				llvm_typ: llvm::Ty::Int{bits: 1, signed: false}
+			}
+		}
 		let left_result = cmp_exp(left, ctxt);
 		let right_result = cmp_exp(right, ctxt);
 		use ast2::BinaryOp::*;
 		match (bop, &left_result.llvm_typ, &right_result.llvm_typ) {
 			//Arithmetic between Ints
 			(_, llvm::Ty::Int{bits: l_bits, signed: l_signed}, llvm::Ty::Int{bits: r_bits, signed: r_signed})
-			if matches!(bop, Add | Sub | Mul | Div | Mod | And | Or | Bitand | Bitor | Bitxor | Shl | Shr | Sar)=> {
+					if matches!(bop, Add | Sub | Mul | Div | Mod | Bitand | Bitor | Bitxor | Shl | Shr | Sar)=> {
 				let uid = gensym("int_arith");
 				let mut extended_left_op = left_result.llvm_op;
 				let mut extended_right_op = right_result.llvm_op;
@@ -627,8 +684,7 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 			(Add, llvm::Ty::Ptr(pointee_type), llvm::Ty::Int{bits, ..}) | 
 			(Sub, llvm::Ty::Ptr(pointee_type), llvm::Ty::Int{bits, ..}) => {
 				let ptr_arith_uid = gensym("ptr_arith");
-				let offset_op;
-				if *bop == ast2::BinaryOp::Sub {
+				let offset_op = if *bop == ast2::BinaryOp::Sub {
 					let negated_offset_uid = gensym("negated_offset");
 					ctxt.stream.push(Component::Instr(negated_offset_uid.clone(), llvm::Instruction::Binop{
 						op: llvm::BinaryOp::Mul,
@@ -636,10 +692,10 @@ fn cmp_exp<'src: 'arena, 'arena: 'front, 'front: 'func, 'func>(
 						left: right_result.llvm_op,
 						right: llvm::Operand::Const(llvm::Constant::SInt{bits: *bits, val: -1})
 					}));
-					offset_op = llvm::Operand::Local(negated_offset_uid);
+					llvm::Operand::Local(negated_offset_uid)
 				} else {
-					offset_op = right_result.llvm_op;
-				}
+					right_result.llvm_op
+				};
 				ctxt.stream.push(Component::Instr(ptr_arith_uid.clone(), llvm::Instruction::Gep{
 					typ: pointee_type.as_ref().clone(),
 					base: left_result.llvm_op,

@@ -1090,8 +1090,7 @@ match &mut s.elt {
 			typecheck_printf(func_name.elt, args, ctxt, funcs, s.byte_offset, s.byte_len, s.file_id, typecache)?;
 			return Ok(false);
 		}
-		let arg_type_list;
-		match funcs.get(func_name.elt) {
+		let arg_type_list = match funcs.get(func_name.elt) {
 			None => {
 				return Err(vec![Error{
 					err: format!("Could not find a function named '{}'", func_name),
@@ -1105,7 +1104,7 @@ match &mut s.elt {
 				}]);
 			},
 			Some(NonGeneric{args: arg_types, ..}) => {
-				arg_type_list = arg_types;
+				arg_types
 			}
 		};
 		let mut errors = Vec::new();
