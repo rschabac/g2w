@@ -1,0 +1,4 @@
+This directory (src/tests/temp) must be present for the tests to work. However,
+git does not track directories, only files within directories. So, to make the
+tests work when the repository is cloned, something must be in this directory
+to force git to track it. This file serves that purpose.

@@ -281,8 +281,13 @@ fn run_file_tests() {
 	} else {
 		//delete all ll and exe files in temp, but only if all tests passed
 		let temp_dir = fs::read_dir("src/tests/temp").unwrap();
+		let placeholder_name = std::ffi::OsStr::new("src/tests/temp/placeholder.txt");
 		for dir_entry in temp_dir {
-			fs::remove_file(dir_entry.unwrap().path()).unwrap();
+			let path = dir_entry.unwrap().path();
+			//see placeholder.txt for why this is necessary
+			if path != placeholder_name {
+				fs::remove_file(path).unwrap();
+			}
 		}
 	}
 }
