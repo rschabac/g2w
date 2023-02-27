@@ -9,8 +9,8 @@ fn lex_str(s: &'static str) -> Vec<TokenLoc<'static>> {
 #[test]
 fn simple_tokens() {
 	use Token::*;
-	let vec_of_token_locs = lex_str("(  )[], .@\t\n+\r-*/%~;^'");
-	let expected_tokens_and_offsets = &[(LPAREN, 0), (RPAREN, 3), (LBRACKET, 4), (RBRACKET, 5), (COMMA, 6), (DOT, 8), (AT, 9), (PLUS,12), (MINUS, 14), (STAR, 15), (SLASH, 16), (PERCENT, 17), (TILDE, 18), (SEMI, 19), (XOR, 20), (APOSTROPHE, 21)];
+	let vec_of_token_locs = lex_str("(  )[], .@\t\n+\r-*/%~;^'_");
+	let expected_tokens_and_offsets = &[(LPAREN, 0), (RPAREN, 3), (LBRACKET, 4), (RBRACKET, 5), (COMMA, 6), (DOT, 8), (AT, 9), (PLUS,12), (MINUS, 14), (STAR, 15), (SLASH, 16), (PERCENT, 17), (TILDE, 18), (SEMI, 19), (XOR, 20), (APOSTROPHE, 21), (UNDERSCORE, 22)];
 	assert_eq!(expected_tokens_and_offsets.len(), vec_of_token_locs.len());
 	for (given_token_loc, (expected_token, expected_offset)) in vec_of_token_locs.iter().zip(expected_tokens_and_offsets) {
 		let expected_token_loc = TokenLoc{
@@ -25,8 +25,8 @@ fn simple_tokens() {
 #[test]
 fn complex_operands() {
 	use Token::*;
-	let vec_of_token_locs = lex_str("<<=>>>>>|>=!====&&&|||");
-	let expected_token_locs = &[(SHL, 0, 2), (EQ, 2, 1), (SAR, 3, 3), (SHR, 6, 2), (OR, 8, 1), (GTE, 9, 2), (NOTEQ, 11, 2), (EQEQ, 13, 2), (EQ, 15, 1), (ANDAND, 16, 2), (AND, 18, 1), (OROR, 19, 2), (OR, 21, 1)];
+	let vec_of_token_locs = lex_str("<<=>>>>>|>>=!====&&&|||");
+	let expected_token_locs = &[(SHL, 0, 2), (EQ, 2, 1), (SAR, 3, 3), (SHR, 6, 2), (PIPELINE, 8, 2), (OR, 9, 1), (GTE, 10, 2), (NOTEQ, 12, 2), (EQEQ, 14, 2), (EQ, 16, 1), (ANDAND, 17, 2), (AND, 19, 1), (OROR, 20, 2), (OR, 22, 1)];
 	assert_eq!(expected_token_locs.len(), vec_of_token_locs.len());
 	for (given_token_loc, expected) in vec_of_token_locs.iter().zip(expected_token_locs) {
 		let expected_token_loc = TokenLoc{
@@ -275,13 +275,6 @@ fn bad_numeric_literal() {
 	let err = lex_str_err("3i128");
 	assert_eq!(0, err.byte_offset);
 	assert_eq!(4, err.approx_len);
-}
-
-#[test]
-fn wayward_underscore() {
-	let err = lex_str_err("u8* _x");
-	assert_eq!(4, err.byte_offset);
-	assert_eq!(1, err.approx_len);
 }
 
 #[test]

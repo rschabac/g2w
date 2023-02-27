@@ -131,7 +131,7 @@ base Ty or void= BOOL
 Ty = <base Ty or void> (STAR | (LBRACKET INT RBRACKET))*
 */
 
-const CAN_START_TY: &[Token<'static>] = &[BOOL, INTTYPE{bits: IntSize::Size8, signed: false}, F32, F64, VOID, STRUCT, APOSTROPHE];
+const CAN_START_TY: &[Token<'static>] = &[BOOL, INTTYPE{bits: IntSize::Size8, signed: false}, F32, F64, VOID, STRUCT, APOSTROPHE, UNDERSCORE];
 const CAN_START_BASE_EXPR: &[Token<'static>] = &[NULL, TRUE, FALSE, INT{val: 0, bits: IntSize::Size8, signed: false}, FLOAT{val: 0.0, bits: FloatSize::FSize32}, STR(std::borrow::Cow::Borrowed("")), IDENT(""), SIZEOF, CAST, LPAREN, AND, STAR, TILDE, NOT, MINUS];
 const OPERATORS: &[Token<'static>] = &[LBRACKET, DOT, LT, LTE, GT, GTE, EQEQ, NOTEQ, OR, OROR, AND, ANDAND, XOR, SHL, SHR, SAR, PLUS, MINUS, STAR, SLASH, PERCENT];
 
@@ -142,6 +142,12 @@ pub enum ErrorHandler<'src> {
 	Nothing,
 	UntilBalanced,
 	UntilEndOfChainedIf,
+}
+#[derive(Debug)]
+pub enum UnderscoreExpr<'src: 'arena, 'arena> {
+	NoExpr,
+	HasExpr(Loc<TypedExpr<'src, 'arena>>),
+	AlreadyTaken
 }
 impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'arena, T> {
 	pub fn new(chunk_of_tokens: T, file_id: u16, arena: &'arena bumpalo::Bump, typecache: &'arena TypeCache<'src, 'arena>) -> Self {
@@ -210,49 +216,53 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 	}
 	//executes the given error recovery method
-	fn handle_error(&mut self, method: &ErrorHandler<'src>) -> bool {
-		use ErrorHandler::*;
-		match method {
-			ConsumeIncluding(token) => {
-				loop {
-					match self.poll() {
-						None => return false,
-						Some(t) if t.token.same_kind(token) => return true,
-						Some(_) => ()
-					}
-				}
-			},
-			Nothing => true,
-			UntilBalanced => {
-				let mut balance = 0;
-				let mut result = false;
-				while let Some(tokenloc) = self.poll() {
-					if tokenloc.token == LBRACE {
-						balance += 1;
-					} else if tokenloc.token == RBRACE {
-						balance -= 1;
-						if balance == 0 {
-							result = true;
-							break;
+	fn handle_error(&mut self, method: &ErrorHandler<'src>) {
+		//return value is only useful internally for UntilEndOfChainedIf case
+		fn handle_error_internal(&mut this: Self, method: &ErrorHandler<'src>) -> bool {
+			use ErrorHandler::*;
+			match method {
+				ConsumeIncluding(token) => {
+					loop {
+						match self.poll() {
+							None => return false,
+							Some(t) if t.token.same_kind(token) => return true,
+							Some(_) => ()
 						}
 					}
-				}
-				result
-			},
-			//if there is an error parsing the condition of an if stmt, skip until balanced, then check if the next token is ELSE,
-			//if it is, then consume the whole else branch. repeat as many times as necessary.
-			UntilEndOfChainedIf => {
-				if !self.handle_error(&UntilBalanced) {
-					return false;
-				}
-				while self.peeker.peek(0).map(|t| t.token) == Some(ELSE) {
+				},
+				Nothing => true,
+				UntilBalanced => {
+					let mut balance = 0;
+					let mut result = false;
+					while let Some(tokenloc) = self.poll() {
+						if tokenloc.token == LBRACE {
+							balance += 1;
+						} else if tokenloc.token == RBRACE {
+							balance -= 1;
+							if balance == 0 {
+								result = true;
+								break;
+							}
+						}
+					}
+					result
+				},
+				//if there is an error parsing the condition of an if stmt, skip until balanced, then check if the next token is ELSE,
+				//if it is, then consume the whole else branch. repeat as many times as necessary.
+				UntilEndOfChainedIf => {
 					if !self.handle_error(&UntilBalanced) {
 						return false;
 					}
+					while self.peeker.peek(0).map(|t| t.token) == Some(ELSE) {
+						if !self.handle_error(&UntilBalanced) {
+							return false;
+						}
+					}
+					true
 				}
-				true
 			}
 		}
+		handle_error_internal(self, method);
 	}
 	fn id_token_loc_to_loc(&self, token_loc: &TokenLoc<'src>) -> Loc<&'src str> {
 		Loc{
@@ -386,7 +396,7 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 		}
 	}
 	//doesn't call self.handle_error, but does report the error
-	fn parse_expr_without_handling_error(&mut self, prec_level: i32) -> Option<Loc<TypedExpr<'src, 'arena>>> {
+	fn parse_expr_without_handling_error(&mut self, prec_level: i32, underscore_expr_loc: Option<Loc<TypedExpr<'src, 'arena>>>) -> Option<Loc<TypedExpr<'src, 'arena>>> {
 		let first_expr_loc = match self.peeker.peek(0) {
 			None => {
 				self.errors.push(Error{
@@ -489,6 +499,67 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 					file_id: self.file_id
 				}
 			},
+			UNDERSCORE => {
+				if let Some(underscore_expr_loc) = underscore_expr_loc {
+					/*
+					e |> _ + 1
+					Add("e", 1)
+					Add range should start at _ and go to 1
+					e range should just cover e
+					*/
+					/*
+					Must have exactly one _ in non-first pipeline segments
+					a |> _ + _	//Not allowed, too many _
+					a |> b		//Not allowed, no _
+
+					First segment cannot have a _
+
+					Shouldn't be allowed, nowhere for a to go
+					a |> (b |> c(_))
+					Could be allowed, but is confusing
+					a |> (b(_) |> c(_)) => a |> c(b(_))
+					
+					Could be allowed, but is confusing
+					Maybe include a hint in the error message to write `a |> b(_) |> c(_)` instead
+					(a |> b(_)) |> c(_)
+
+					Could be allowed, but could be confusing because deciding which _ goes to which expr
+					requires looking at commas in addition to parens
+					a |> b(_, x |> _.f)
+
+					Allowed, because the nested pipeline is in the first element of the outer pipeline
+					Parser does not yet know that a[b |> _.i] is the first element of a pipeline
+					a[b |> _.i] |> f(_)
+					*/
+					/*
+					Least complicated way, still useful:
+					Once you enter a pipeline, no nested pipelines are allowed
+
+					|> should be considered an operator with a lower precedence than any other operator
+					If !pipelines_allowed, report error, return, caller will handle error, likely throwing out the whole expr
+					first expr has been parsed already, and will have reported an error if it had an underscore in it
+						Should just bail out of entire expr because it's unclear what the user wanted at this point
+					if first expr was a pipeline (in parens), or contained a pipeline as a subexpr, nothing is wrong, just keep going as normal
+					parse the next expr with underscore_expr_loc = the loc of the first expr
+					The next expr is allowed to encounter a pipeline, but all recursive calls to parse_expr are not
+					pass in_pipeline = true and pipelines_allowed = true
+						Recursive calls should pass pipelines_allowed = !in_pipeline and in_pipeline = false //TODO: not sure about what in_pipeline should be in recursive calls
+					The next expr needs to have only one _ in it
+					parser struct will have an UnderscoreExpr in it
+					Before starting to parse the next expr, set this to HasExpr(first expr)
+					When an expr is encountered, report an error if it is NoExpr or AlreadyTaken,
+						if it is HasExpr, take the expr and leave it as AlreadyTaken
+					*/
+					todo!()
+				} else {
+					self.errors.push(Error{
+						err: "Underscore used outside of |> pipeline".to_owned(),
+						byte_offset: first_expr_loc.byte_offset,
+						approx_len: first_expr_loc.byte_len,
+						file_id: self.file_id
+					});
+				}
+			}
 			_ => unreachable!()
 		};
 		loop {
@@ -640,6 +711,8 @@ impl<'src: 'arena, 'arena, T: Iterator<Item = TokenLoc<'src>>> Parser<'src, 'are
 			});
 		}
 		if let Some(while_loc) = self.next_in(&[WHILE]) {
+			//TODO: if there is a parse error in condition, the body of the loop is skipped
+			//Could try to parse it anyway
 			let cond_loc = self.parse_expr(&ErrorHandler::UntilBalanced)?;
 			let block: Loc<_> = self.parse_block(&ErrorHandler::UntilBalanced)?;
 			return Some(Loc{

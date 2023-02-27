@@ -98,7 +98,8 @@ pub enum Token<'src> {
 	CAST,
 	//statements
 	EQ, SEMI, IF, ELSE, WHILE, RETURN,
-	EXTERN
+	EXTERN,
+	PIPELINE, UNDERSCORE
 }
 impl<'src> Token<'src> {
 	pub fn same_kind(&self, other: &Self) -> bool {
@@ -127,6 +128,7 @@ impl<'src> Token<'src> {
 			STAR => (100, Mul),
 			SLASH => (100, Div),
 			PERCENT => (100, Mod),
+			PIPELINE => panic!("precedence() called on PIPELINE"),
 			_ => panic!("{} is not a binary operator", self)
 		}
 	}
@@ -157,6 +159,7 @@ impl<'src> std::fmt::Display for Token<'src> {
 			INT{val, bits, signed} => write!(f, "{}{}{}", val, if *signed {'i'} else {'u'}, bits),
 			FLOAT{val, bits} => write!(f, "{}{}{}", val, if val.fract() == 0.0 {".0"} else {""}, bits),
 			STR(s) => write!(f, "\"{}\"", s.escape_default()),
+			UNDERSCORE => write!(f, "_"), PIPELINE => write!(f, "|>"),
 		}
 	}
 }
@@ -326,6 +329,8 @@ impl<'src> Lexer<'src> {
 					},
 				'|' => if self.next_is('|') {
 						emit(OROR, 2, initial_offset)
+					} else if self.next_is('>') {
+						emit(PIPELINE, 2, initial_offset)
 					} else {
 						emit(OR, 1, initial_offset)
 					},
@@ -714,15 +719,7 @@ impl<'src> Lexer<'src> {
 				//skip whitespace
 				_ if c.is_whitespace() => {},
 				//identifiers cannot start with _
-				'_' => {
-					self.advance_until_balanced();
-					return Err(Error{
-						err: "Identifiers cannot start with _".to_owned(),
-						byte_offset: initial_offset,
-						approx_len: 1,
-						file_id: self.file_id
-					});
-				}
+				'_' => emit(UNDERSCORE, 1, initial_offset),
 				//any other characters are an error
 				_ => {
 					let err = Error {
